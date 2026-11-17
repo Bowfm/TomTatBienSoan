@@ -27,9 +27,9 @@ gemini:
   backoff_max_s: 10
   max_output_tokens: 16384
   temperature: null               # null = để mặc định của model
-  max_concurrent_calls: 3         # số cuộc gọi đồng thời an toàn cho pool nhiều key
+  max_concurrent_calls: 6         # hỗ trợ tới 6 luồng gọi song song trên pool 20 keys
 
-workers: 3                        # xử lý 3 file song song khi có từ 2-3 API keys trở lên
+workers: 4                        # xử lý 4 file song song cùng lúc siêu nhanh trên pool 20 keys
 
 # ---------------- Đếm từ ----------------
 word_count:
