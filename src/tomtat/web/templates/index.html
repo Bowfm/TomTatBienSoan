@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Duyệt Tóm tắt - Biên soạn</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <strong>Tóm tắt – Biên soạn</strong>
+      <span id="mode-badge" class="badge"></span>
+    </div>
+    <div class="shortcuts-hint">
+      Phím tắt: <kbd>Alt+↑/↓</kbd> chuyển nhanh giữa các file
+    </div>
+    <div class="top-actions">
+      <button id="btn-self-update" class="btn" title="Tải bản cập nhật code & prompt mới nhất từ GitHub">🔄 Cập nhật</button>
+      <button id="btn-logs" class="btn">📋 Xem log AI</button>
+      <button id="btn-preview" class="btn">Xem trước bảng cuối</button>
+      <button id="btn-approve" class="btn btn-primary">Duyệt &amp; Ghi .docx</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Cột trái: Chia thành 2 cột Chờ duyệt & Đã duyệt -->
+    <aside class="sidebar">
+      <div class="sidebar-upload">
+        <input id="file-upload-input" type="file" accept=".docx" multiple class="hidden">
+        <div class="upload-btn-row">
+          <button id="btn-add-files" class="btn btn-primary" style="flex:1">+ Thêm file .docx</button>
+          <button id="btn-run-pending" class="btn" title="Chạy AI cho các file chưa xử lý">▶ Chạy AI</button>
+          <button id="btn-stop-batch" class="btn hidden" style="color:#b91c1c;border-color:#fca5a5">⏹ Dừng</button>
+        </div>
+        <div id="batch-progress" class="batch-progress hidden"></div>
+        <label class="chk-inline upload-opt">
+          <input type="checkbox" id="chk-run-on-upload" checked>
+          Tự động chạy AI ngay khi thêm file
+        </label>
+        <div class="counts-summary">
+          <span>Tổng: <strong id="cnt-total">0</strong></span>
+          <span>· Chờ duyệt: <strong id="cnt-pending">0</strong></span>
+          <span>· Đã duyệt: <strong id="cnt-approved">0</strong></span>
+          <button id="btn-clear-all" class="btn-link-danger" title="Xóa toàn bộ file của ca/ngày hiện tại để làm ngày mới">🧹 Xóa hết</button>
+        </div>
+      </div>
+
+      <div class="sidebar-columns">
+        <!-- Cột 1: Chờ duyệt -->
+        <div class="sb-col sb-col-pending">
+          <div class="sb-col-head">
+            <div class="sb-col-title">
+              <span>Chờ duyệt</span>
+              <span id="badge-pending" class="count-pill pill-pending">0</span>
+            </div>
+            <select id="filter-status" title="Lọc chi tiết trong cột Chờ duyệt">
+              <option value="">Tất cả chờ duyệt</option>
+              <option value="da_co_nhap">Đã có nháp</option>
+              <option value="can_xu_ly_tay">Cần xử lý tay</option>
+              <option value="chua_xu_ly">Chưa xử lý</option>
+              <option value="loi">Lỗi</option>
+            </select>
+          </div>
+          <ul id="file-list" class="file-list"></ul>
+          <div class="sb-col-foot sb-col-foot-pending">
+            <button id="btn-clear-pending" class="btn btn-sm btn-danger-outline" style="width:100%" disabled>
+              🗑 Xóa danh sách chờ duyệt
+            </button>
+          </div>
+        </div>
+
+        <!-- Cột 2: Đã duyệt -->
+        <div class="sb-col sb-col-approved">
+          <div class="sb-col-head">
+            <div class="sb-col-title">
+              <span>Đã duyệt</span>
+              <span id="done-count" class="count-pill pill-approved">0</span>
+            </div>
+            <label class="chk-inline">
+              <input type="checkbox" id="chk-done-all" checked> Chọn hết
+            </label>
+          </div>
+          <ul id="done-list" class="file-list done-list"></ul>
+          <div class="sb-col-foot">
+            <button id="btn-download-zip" class="btn btn-primary btn-zip" disabled>
+              ⬇ Tải ZIP hôm nay
+            </button>
+            <button id="btn-clear-approved" class="btn btn-sm btn-danger-outline" style="width:100%;margin-top:5px" disabled>
+              🗑 Xóa các file đã duyệt
+            </button>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Khung chính -->
+    <main class="main-pane">
+      <div id="empty-state" class="empty-state">
+        Chọn một file ở cột bên trái để bắt đầu duyệt.
+      </div>
+
+      <div id="editor-pane" class="editor-pane hidden">
+        <!-- Thanh thông tin file & cảnh báo chung -->
+        <section class="card file-summary">
+          <div class="file-title-row">
+            <div>
+              <h2 id="cur-filename">—</h2>
+              <span id="cur-meta" class="muted"></span>
+            </div>
+            <div class="status-box">
+              Trạng thái: <span id="cur-status" class="status-pill"></span>
+            </div>
+          </div>
+          <div id="flags-box" class="flags-box hidden"></div>
+          <div class="ai-rerun-bar">
+            <input id="ai-note" type="text" placeholder="Ghi chú gửi cho AI khi chạy lại (ví dụ: giữ giọng trang trọng hơn, rút ngắn 20 từ)...">
+            <button class="btn btn-sm" data-rerun="label">AI: Gán nhãn lại</button>
+            <button class="btn btn-sm" data-rerun="extract">AI: Trích chọn lại</button>
+            <button class="btn btn-sm" data-rerun="abstract">AI: Biên soạn lại</button>
+            <button class="btn btn-sm" data-rerun="judge">AI: Chấm G-Eval</button>
+            <button class="btn btn-sm" data-rerun="all">AI: Chạy lại cả bài</button>
+          </div>
+        </section>
+
+        <div class="two-cols">
+          <!-- Cột nguồn: Query + các văn bản gốc chia theo đơn vị -->
+          <section class="col-source">
+            <div class="card">
+              <h3>Câu truy vấn (Query)</h3>
+              <div id="query-box" class="query-box"></div>
+            </div>
+
+            <div class="card">
+              <div class="section-head">
+                <h3>Văn bản gốc (tick câu để đưa vào bản trích chọn)</h3>
+                <span class="muted" id="budget-hint"></span>
+              </div>
+              <div id="docs-container" class="docs-container"></div>
+            </div>
+
+            <details class="card">
+              <summary><strong>Gợi ý của AI có sẵn trong file gốc (chỉ tham khảo)</strong></summary>
+              <div class="ref-block">
+                <h4>Tóm tắt trích chọn của AI:</h4>
+                <pre id="ai-extract-ref" class="ref-pre"></pre>
+                <h4>Tóm tắt biên soạn của AI:</h4>
+                <pre id="ai-abstract-ref" class="ref-pre"></pre>
+              </div>
+            </details>
+          </section>
+
+          <!-- Cột kết quả: Nhãn + Trích chọn + Biên soạn + Kiểm tra + Lịch sử -->
+          <section class="col-work">
+            <!-- Bảng chỉ số và kiểm tra thời gian thực -->
+            <div class="card metrics-card">
+              <h3>Chỉ số &amp; Kiểm tra cơ học (cập nhật tức thì)</h3>
+              <div class="metrics-grid">
+                <div class="metric">
+                  <span class="m-label">Từ gốc (G)</span>
+                  <strong id="m-total">0</strong>
+                </div>
+                <div class="metric">
+                  <span class="m-label">Từ trích chọn (T)</span>
+                  <strong id="m-ext">0</strong>
+                </div>
+                <div class="metric">
+                  <span class="m-label">Compress (T/G)</span>
+                  <strong id="m-compress">0%</strong>
+                  <small>cần 10%–50% (~30%)</small>
+                </div>
+                <div class="metric">
+                  <span class="m-label">Từ biên soạn (B)</span>
+                  <strong id="m-abs">0</strong>
+                  <small id="m-abs-target"></small>
+                </div>
+                <div class="metric">
+                  <span class="m-label" id="m-ratio-label">Tỉ lệ B/T</span>
+                  <strong id="m-ratio">0%</strong>
+                  <small>cần ≤ 70%</small>
+                </div>
+                <div class="metric">
+                  <span class="m-label">Edit / Độ bám</span>
+                  <strong id="m-edit-cov">—</strong>
+                  <small>Edit ≥ 0,10</small>
+                </div>
+                <div class="metric">
+                  <span class="m-label">ROUGE-2 (ước lượng)</span>
+                  <strong id="m-rouge2">—</strong>
+                  <small>cần ≥ 33,00%</small>
+                </div>
+                <div class="metric">
+                  <span class="m-label">BARTScore (ước lượng)</span>
+                  <strong id="m-bart">—</strong>
+                  <small>cần ≥ -2,56</small>
+                </div>
+                <div class="metric">
+                  <span class="m-label">G-Eval (chấm/ước lượng)</span>
+                  <strong id="m-geval">—</strong>
+                  <small>cần ≥ 4,25 / 5,0</small>
+                </div>
+              </div>
+              <div id="issues-list" class="issues-list"></div>
+            </div>
+
+            <!-- Bước 1: Nhãn -->
+            <div class="card">
+              <div class="section-head">
+                <h3>1. Phong cách chức năng</h3>
+                <span id="model-badge-label" class="badge"></span>
+              </div>
+              <div class="label-row">
+                <select id="sel-style" class="style-select">
+                  <option value="">-- Chọn phong cách --</option>
+                  {% for s in styles %}
+                  <option value="{{ s }}">{{ s }}</option>
+                  {% endfor %}
+                </select>
+                <span id="label-conf" class="badge"></span>
+              </div>
+              <div id="label-reason" class="muted small-mt"></div>
+              <div id="label-per-doc" class="per-doc-list"></div>
+            </div>
+
+            <!-- Bước 2: Bản trích chọn -->
+            <div class="card">
+              <div class="section-head">
+                <h3>2. Bản trích chọn (<span id="ext-word-inline">0</span> từ) <span id="model-badge-extract" class="badge"></span></h3>
+                <button id="btn-rebuild-extract" class="btn btn-sm" title="Ghép lại nguyên văn từ các ô đã tick bên trái">Ghép lại từ các câu đã tick</button>
+              </div>
+              <p class="hint">Có thể tick/bỏ tick từng câu ở cột trái, hoặc xóa bớt thành phần phụ ở đầu câu ngay trong ô dưới đây (hệ thống kiểm tra nguyên văn tức thì):</p>
+              <textarea id="txt-extract" rows="8" spellcheck="false"></textarea>
+              <div id="verbatim-bar" class="verbatim-bar"></div>
+            </div>
+
+            <!-- Bước 3: Bản biên soạn -->
+            <div class="card">
+              <div class="section-head">
+                <h3>3. Bản biên soạn (<span id="abs-word-inline">0</span> từ) <span id="model-badge-abstract" class="badge"></span></h3>
+                <span id="abs-target-inline" class="muted"></span>
+              </div>
+              <textarea id="txt-abstract" rows="10" spellcheck="false"></textarea>
+            </div>
+
+            <!-- Bước 5: Kết quả chấm G-Eval (nếu có) -->
+            <div id="judge-card" class="card hidden">
+              <h3>Điểm G-Eval tự chấm</h3>
+              <div id="judge-content"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Hộp thoại xem trước bảng cuối cùng -->
+  <div id="preview-modal" class="modal hidden">
+    <div class="modal-backdrop" id="preview-close-bg"></div>
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 id="preview-modal-title">Xem trước bảng .docx cuối cùng</h3>
+        <button id="btn-close-preview" class="btn btn-sm">Đóng</button>
+      </div>
+      <div class="modal-body" id="preview-modal-body">
+        <table class="docx-preview-table" id="preview-table"></table>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

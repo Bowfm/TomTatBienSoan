@@ -1,0 +1,72 @@
+================================================================================
+   HƯỚNG DẪN CÀI ĐẶT & SỬ DỤNG CÔNG CỤ "TÓM TẮT – BIÊN SOẠN" (.DOCX)
+   (Dành cho máy mới / Laptop cá nhân / Chia sẻ cho đồng nghiệp)
+================================================================================
+
+Bạn chỉ cần làm đúng 3 bước dưới đây trong lần đầu tiên (mất khoảng 2-3 phút):
+
+--------------------------------------------------------------------------------
+BƯỚC 1: GIẢI NÉN THƯ MỤC
+--------------------------------------------------------------------------------
+- Giải nén file "TomTatBienSoan_ChiaSe.zip" ra một thư mục trên máy tính
+  (ví dụ: D:\TomTatBienSoan hoặc Desktop\TomTatBienSoan).
+- Lưu ý: Phải GIẢI NÉN (Extract) ra thư mục thật, KHÔNG chạy trực tiếp bên trong
+  cửa sổ xem trước của WinRAR / 7-Zip.
+
+--------------------------------------------------------------------------------
+BƯỚC 2: CHẠY FILE "setup.bat" (CHỈ CẦN CHẠY 1 LẦN DUY NHẤT)
+--------------------------------------------------------------------------------
+1. Nhấp đúp chuột vào file:  setup.bat
+2. Những việc "setup.bat" sẽ tự động làm cho bạn:
+   - Kiểm tra xem máy đã có Python 3.11+ chưa:
+     + Nếu CHƯA CÓ: script sẽ tự động cài đặt Python 3.12 giúp bạn (hoặc mở
+       trang tải Python chính thức tại https://www.python.org/downloads/windows/
+       — khi cài Python bằng tay, NHỚ TICK vào ô "Add python.exe to PATH").
+   - Tự động tạo môi trường ảo (.venv) và tải đầy đủ các thư viện cần thiết
+     (google-genai, python-docx, flask, pyyaml, jinja2, openpyxl...).
+   - Tự động tạo file ".env" và MỞ SẴN NOTEPAD để bạn dán khóa GEMINI_API_KEY.
+
+3. Điền khóa Gemini API vào file ".env":
+   - Trong cửa sổ Notepad vừa hiện ra, thay chữ "your_gemini_api_key_here" bằng
+     khóa Gemini API của bạn (lấy tại https://aistudio.google.com/apikey):
+       GEMINI_API_KEY=AIzaSy...khoa_cua_ban...
+   - Bấm Ctrl + S để lưu lại rồi đóng Notepad.
+
+   * Ghi chú về gói API (Paid Tier vs Free Tier):
+     - Mặc định trong file "config.yaml" đang đặt model cao cấp nhất là
+       "gemini-4-carbon" (dành cho tài khoản đã bật thanh toán Paid Tier 1).
+     - Nếu tài khoản của bạn dùng gói MIỄN PHÍ (Free Tier), công cụ vẫn tự động
+       chuyển xuống model miễn phí ("gemini-3.5-flash-lite"), hoặc bạn có thể mở
+       file "config.yaml" và sửa dòng:
+         model: gemini-3.5-flash-lite
+
+--------------------------------------------------------------------------------
+BƯỚC 3: KHỞI ĐỘNG CÔNG CỤ VÀ LÀM VIỆC HẰNG NGÀY
+--------------------------------------------------------------------------------
+1. Bật công cụ:
+   - Nhấp đúp chuột vào file:  khoi_dong.bat
+   - Trình duyệt web sẽ tự động mở trang giao diện tại:  http://127.0.0.1:8765
+   - (Lưu ý: Giữ nguyên cửa sổ đen nhỏ dưới thanh tác vụ trong lúc làm việc).
+
+2. Quy trình làm việc trên trình duyệt (40+ file mỗi ngày):
+   - Bước 2.1: Bấm nút "+ Thêm file .docx" ở góc trên bên trái -> Chọn toàn bộ
+     các file .docx của ngày hôm nay.
+   - Bước 2.2: Nếu ô "Tự động chạy AI ngay khi thêm file" đang được tick, công cụ
+     sẽ tự động chạy song song 4 file cùng lúc. (Hoặc bấm nút "▶ Chạy AI").
+   - Bước 2.3: Bấm vào từng file ở cột "Chờ duyệt" để kiểm tra:
+     + Xem 9 ô chỉ số (Từ gốc, Từ trích chọn, Compress, Từ biên soạn, Tỉ lệ B/T,
+       Edit/Độ bám, ROUGE-2 ≥ 33%, BARTScore ≥ -2.56, G-Eval ≥ 4.25).
+     + Có thể tick/bỏ tick câu ở cột văn bản gốc bên trái hoặc sửa trực tiếp chữ
+       bên phải (mọi thay đổi đều tự động lưu ngầm và kiểm tra lỗi tức thì).
+     + Bấm nút "Duyệt & Ghi .docx" ở góc trên bên phải -> File sẽ tự động chuyển
+       sang cột "Đã duyệt".
+   - Bước 2.4: Cuối ngày, bấm nút màu xanh lá "⬇ Tải ZIP ngày DD/MM" ở chân cột
+     "Đã duyệt" để tải toàn bộ file .docx đã hoàn thành về máy.
+   - Bước 2.5: Sau khi đã tải file ZIP xong, bấm nút "🧹 Xóa hết" (hoặc "🗑 Xóa
+     các file đã duyệt") để dọn sạch danh sách, sẵn sàng cho ngày làm việc mới!
+     (Mọi bài bạn đã duyệt đều đã được công cụ lưu kinh nghiệm vào bộ nhớ tự học
+      "work\learned_memory.json" để các ngày sau AI làm ngày càng chuẩn hơn).
+
+3. Khi muốn tắt công cụ:
+   - Nhấp đúp chuột vào file:  tat_server.bat  (hoặc đóng cửa sổ đen).
+================================================================================

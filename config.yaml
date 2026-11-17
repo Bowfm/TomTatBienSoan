@@ -1,0 +1,101 @@
+# =====================================================================
+# Cấu hình công cụ tomtat. Mọi ngưỡng và hằng số nằm ở đây.
+# File phải lưu bằng UTF-8.
+# =====================================================================
+
+paths:                        # đường dẫn tương đối tính từ thư mục dự án
+  input: input
+  output: output
+  work: work
+  prompts: prompts
+  report: output/baocao.xlsx
+
+# ---------------- Gemini (Đã tối ưu cho Paid Tier 1: 1.000 RPM / 2M TPM / Unlimited RPD) ----------------
+gemini:
+  model: gemini-4-carbon        # Cấp 1 (Cao nhất): Gemini 4 Carbon (1K RPM, 2M TPM, Unlimited RPD)
+  fallback_models:              # Thứ tự hạ cấp tự động từ cao xuống thấp khi model trên bị lỗi/nghẽn:
+    - gemini-4-argon            # Cấp 2: Gemini 4 Argon (1K RPM, 2M TPM, Unlimited RPD)
+    - gemini-4-hydrogen         # Cấp 3: Gemini 4 Hydrogen (1K RPM, 2M TPM, 10K RPD)
+    - gemini-3.8-flash          # Cấp 4: Gemini 3.8 Flash (1K RPM, 2M TPM, 10K RPD)
+    - gemini-3.6-flash          # Cấp 5: Gemini 3.6 Flash (1K RPM, 2M TPM, 10K RPD)
+    - gemini-3.5-flash-lite     # Cấp 6: Gemini 3.5 Flash Lite (4K RPM, 4M TPM, 150K RPD)
+    - gemini-3.1-flash-lite     # Cấp 7: Gemini 3.1 Flash Lite (4K RPM, 4M TPM, 150K RPD)
+  timeout_s: 120                # timeout mỗi lượt gọi (giây)
+  max_retries: 3                # thử lại tới 3 lần trên gemini-4-carbon để ưu tiên dùng 4-carbon tối đa cho mọi file
+  backoff_base_s: 2
+  backoff_max_s: 10
+  max_output_tokens: 32768      # gồm cả token "suy nghĩ"
+  temperature: null             # null = để mặc định của model
+  # thinking_level cho từng bước trên dòng Gemini 4: low | medium | high
+  thinking_level:
+    label: low                  # phân loại nhãn dùng low để phản hồi nhanh (~10-15s)
+    extract: low                # chọn ID câu dùng low để nhanh và chuẩn xác
+    abstract: medium            # biên soạn văn bản dùng medium để câu văn mượt và chuẩn quy tắc 70%
+    judge: low
+  max_concurrent_calls: 6       # Paid Tier 1 có 1.000 RPM -> cho phép 6 luồng gọi song song thực sự
+
+workers: 4                      # số file xử lý song song cùng lúc (cả CLI và nút ▶ Chạy AI trên web)
+
+# ---------------- Đếm từ ----------------
+word_count:
+  # whitespace_alnum: đếm token tách bằng khoảng trắng có >= 1 chữ/số (gần với đếm âm tiết)
+  mode: whitespace_alnum
+
+# ---------------- Tách câu ----------------
+sentence_split:
+  # Từ viết tắt (viết thường, không có dấu chấm): dấu chấm sau chúng không kết thúc câu.
+  abbreviations: [tp, ts, pgs, gs, ths, th, bs, ks, cn, tt, tx, q, p, đ, nxb, vd, tr, st,
+                  ncs, mr, mrs, ms, dr, no, đc, ubnd, hđnd, sđd, tlđd]
+  # Từ dẫn đề mục: "Điều 5. Tên điều" không bị tách sau "5."
+  heading_words: [điều, chương, mục, phần, khoản, bài, tiết, phụ lục]
+
+# ---------------- Ngưỡng chấm (tham khảo) ----------------
+grading:
+  rouge2_min: 0.33
+  bartscore_min: -2.56
+  geval_min: 4.25
+  edit_min: 0.10
+  compress_min: 0.10
+  compress_max: 0.50
+  p_required: 1.0
+
+# ---------------- Trích chọn ----------------
+extract:
+  target: 0.30                # tỉ lệ nhắm tới
+  target_low: 0.20            # khoảng an toàn; ngoài khoảng này -> thử lại / cảnh báo
+  target_high: 0.40
+  max_attempts: 3             # số lần gọi AI tối đa cho bước trích chọn
+
+# ---------------- Biên soạn ----------------
+abstract:
+  ratio_limit: 0.70           # quy tắc 70%: B/T <= 0,70 (ngắn hơn) hoặc T/B <= 0,70 (dài hơn)
+  short_target_low: 0.55      # khi viết ngắn hơn: nhắm B/T trong [0,55; 0,68]
+  short_target_high: 0.68
+  long_target_factor: 1.55    # khi viết dài hơn: nhắm B ~ T * 1,55 (tối thiểu T / 0,70)
+  allow_longer_below_words: 80  # chỉ cho phép viết dài hơn khi bản trích chọn < 80 từ
+  too_short_warn: 0.40        # B/T < 0,40 -> cảnh báo quá ngắn
+  max_attempts: 3             # số lần gọi AI tối đa cho bước biên soạn
+  coverage_warn: 0.35         # tỉ lệ cặp từ của bản biên soạn có trong bản gốc < 0,35 -> cảnh báo
+  # Mã cảnh báo vẫn kích hoạt thử lại và được gửi cho model
+  retry_on_warnings: [number_missing, decimal_point_suspect]
+
+# ---------------- Nhãn ----------------
+label:
+  ok_confidence: [cao]        # mức chắc chắn khác các giá trị này -> cờ "cần xem kỹ nhãn"
+
+# ---------------- Chấm G-Eval tự động ----------------
+judge:
+  enabled: true               # bật tự chấm G-Eval trên Paid Tier 1 để đảm bảo G-Eval >= 4.25 (tự động viết lại nếu < 4.25)
+  min_average: 4.25
+  rewrite_once_if_below: true
+
+# ---------------- Bố cục file ----------------
+layout:
+  check_filename_convention: true   # M... = đa văn bản (>= 2), S... = đơn văn bản (= 1)
+  on_mismatch: stop                 # stop: dừng, đánh dấu cần xử lý tay | continue: chạy tiếp nhưng cảnh báo
+
+# ---------------- Giao diện duyệt ----------------
+review:
+  host: 127.0.0.1
+  port: 8765
+  open_browser: true

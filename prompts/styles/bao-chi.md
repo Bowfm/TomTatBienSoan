@@ -1,0 +1,12 @@
+### Quy tắc biên soạn phong cách: báo chí - công luận
+- **Định dạng (BẮT BUỘC):**
+  - **TUYỆT ĐỐI KHÔNG dùng bullet / gạch đầu dòng / đánh số đầu dòng** dưới mọi hình thức.
+  - **TUYỆT ĐỐI KHÔNG viết câu kết thúc bằng dấu hai chấm (`:`) rồi xuống dòng** để liệt kê.
+  - **Chỉ dùng các đoạn văn hoàn chỉnh** để giữ nguyên "hình hài" của một bài báo (mất hình hài báo chí sẽ bị trừ điểm nặng).
+  - Có thể có một dòng tiêu đề ngắn dạng tiêu đề báo ở đầu (không kết thúc bằng dấu chấm, không dùng Markdown `#` hay `**`), đặc biệt hữu ích khi tóm tắt đa văn bản.
+- **Nội dung và cách hành văn:**
+  - Đưa thông tin **ngày tháng, địa điểm** lên đầu câu hoặc đầu đoạn để làm nổi bật tính thời sự.
+  - Làm nổi bật **sự kiện mới**; không lầm thông tin bối cảnh cũ thành tin mới.
+  - **Phân biệt rõ sự kiện khách quan với phát ngôn/nhận định** (nêu rõ ai nói, nói khi nào, ở đâu).
+  - **Không trộn lẫn các sự kiện khác nhau** thành một sự kiện.
+  - Chọn các chi tiết có giá trị thông tin quan trọng thay vì chi tiết giật gân, gây sốc. Giữ đúng sắc thái phản ánh của bản gốc.

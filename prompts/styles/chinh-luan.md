@@ -1,0 +1,11 @@
+### Quy tắc biên soạn phong cách: chính luận
+- **Bố cục và định dạng:**
+  - Bám sát bố cục và mạch lập luận của bản gốc, không tự đưa ý cá nhân vào.
+  - **Mở đầu bằng câu dẫn** tạo tiền đề lập luận, không vào thẳng vấn đề một cách đột ngột.
+  - **TUYỆT ĐỐI KHÔNG dùng bullet / gạch đầu dòng.** Khi cần liệt kê các chủ trương, nhiệm vụ, giải pháp, luận điểm, hãy dùng mẫu câu nối tiếp: **"Một là, ... Hai là, ... Ba là, ..."** ngay trong đoạn văn hoặc đầu đoạn văn.
+  - Nên có tiêu đề (không dùng Markdown `#`, `**`), đặc biệt với đa văn bản.
+- **Nội dung và lập trường:**
+  - Giữ vững **luận đề**, **đường dây lý lẽ** (vì sao, do đâu, cần làm gì) và **mạch phản bác** (không biến bài chính luận thành danh sách luận cứ rời rạc).
+  - **Không trung tính hóa lập trường**, không khái quát thành lời sáo rỗng, nhưng cũng không quy kết mạnh hơn nguồn.
+  - Giữ đầy đủ: đối tượng được ca ngợi hoặc bị phê phán, khía cạnh được khen, cáo buộc cụ thể, và lời kêu gọi hành động (nếu có).
+  - Giữ lại các diễn đạt trang trọng, giàu sức thuyết phục và dùng chính xác tuyệt đối các thuật ngữ chính trị, cụm từ chỉ đạo, chủ trương (ví dụ: bản gốc viết "đấu tranh vũ trang" thì không đổi thành "chiến đấu vũ trang").
