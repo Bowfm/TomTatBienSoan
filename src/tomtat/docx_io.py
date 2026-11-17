@@ -137,7 +137,19 @@ def _find_ref_rpr(cell):
 
 
 def _set_cell_text(cell, text: str, ref_rpr=None) -> None:
-    paras = [ln for ln in nfc(text).split("\n") if ln.strip()]
+    # Tách các dòng nhưng bảo toàn các dòng trống phân cách đoạn (rút gọn nhiều dòng trống liên tiếp thành 1)
+    raw_lines = [ln.strip() for ln in nfc(text).split("\n")]
+    paras: list[str] = []
+    prev_blank = False
+    for ln in raw_lines:
+        if ln:
+            paras.append(ln)
+            prev_blank = False
+        elif not prev_blank and paras:
+            paras.append("")
+            prev_blank = True
+    while paras and paras[-1] == "":
+        paras.pop()
     if not paras:
         paras = [""]
     first = cell.paragraphs[0]

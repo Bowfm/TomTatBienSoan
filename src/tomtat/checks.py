@@ -17,6 +17,145 @@ NUM_RE = re.compile(r"\d+(?:[.,]\d+)*")
 DEC_POINT_RE = re.compile(r"(?<![\d.,])\d+\.\d{1,2}(?!\d|\.\d)")
 NO_BULLET_STYLES = ("sinh hoạt hằng ngày", "báo chí - công luận", "chính luận")
 
+# Cụm từ dẫn dắt nối đoạn cấm dùng trong biên soạn đa văn bản (mỗi bài là độc lập)
+FORBIDDEN_TRANSITIONS_RE = re.compile(
+    r"^(?:"
+    r"(?:Trong|Ở|Tại)\s+(?:một\s+)?(?:chia sẻ|bài viết|bài đăng|văn bản|nội dung|trường hợp|nghiên cứu|thông tin|câu chuyện)\s+khác,?\s*"
+    r"|(?:Một\s+)?(?:chia sẻ|bài viết|bài đăng)\s+khác(?:\s+(?:cho biết|cho rằng|nêu rõ|chia sẻ|nhấn mạnh)),?\s*"
+    r"|(?:Theo\s+(?:một\s+)?(?:chia sẻ|bài viết|bài đăng)\s+khác,?\s*)"
+    r"|(?:Bên cạnh đó|Mặt khác|Ngoài ra|Đồng thời|Mặt khác nữa|Song song đó|Tiếp theo|Cùng với đó|Ở một khía cạnh khác),?\s*"
+    r"|(?:Đối với|Về phía)\s+(?:văn bản|bài viết|nội dung)\s+(?:thứ\s+\w+|\d+|này|kia),?\s*"
+    r"|(?:Văn bản|Văn bản số|Bài|Bài số)\s+\d+\s*[:–-]\s*"
+    r"|(?:Trong khi đó),?\s*"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Từ khóa nhận diện nội dung chuyển tiền / biên lai giao dịch ngân hàng
+BANK_KEYWORDS = {
+    "chuyển khoản", "chuyển tiền", "số tài khoản", "stk", "ngân hàng", "mã giao dịch",
+    "giao dịch thành công", "thụ hưởng", "người thụ hưởng", "tài khoản nguồn", "tài khoản nhận",
+    "biên lai", "lệnh chuyển", "biến động số dư", "vietcombank", "techcombank", "vietinbank",
+    "bidv", "mbbank", "acb", "tpbank", "vpbank", "agribank", "sacombank", "vnpay", "momo",
+    "nội dung chuyển", "nội dung giao dịch", "số dư khả dụng", "ngày hạch toán"
+}
+
+VI_STOPWORDS = {
+    "và", "của", "các", "có", "cho", "là", "trong", "để", "với", "những", "người", "được",
+    "khi", "đã", "sẽ", "ở", "này", "đó", "ra", "vào", "về", "thì", "mà", "như", "theo",
+    "tại", "một", "lại", "từ", "phải", "lên", "bị", "hay", "cũng", "đến", "trên", "rất",
+    "nhiều", "nhưng", "bởi", "vì", "do", "tự", "nào", "cả", "nữa", "qua", "sau", "trước"
+}
+
+
+def clean_multi_doc_abstract(abstract: str, n_docs: int = 1) -> str:
+    """Chuẩn hóa bản biên soạn đa văn bản:
+    1. Giữa các đoạn tóm tắt của từng văn bản để trống 1 dòng (\\n\\n).
+    2. Loại bỏ câu nối/từ dẫn dắt giữa các đoạn và viết hoa trực tiếp nội dung văn bản.
+    """
+    if not abstract:
+        return ""
+    paras = [p.strip() for p in re.split(r"\n+", nfc(abstract).strip()) if p.strip()]
+    if not paras:
+        return ""
+    if n_docs > 1:
+        cleaned_paras: list[str] = []
+        for p in paras:
+            cleaned = FORBIDDEN_TRANSITIONS_RE.sub("", p).strip()
+            if cleaned:
+                cleaned = cleaned[0].upper() + cleaned[1:]
+            cleaned_paras.append(cleaned)
+        return "\n\n".join(cleaned_paras)
+    return "\n".join(paras)
+
+
+def check_suspicious_document(data: dict) -> list[str]:
+    """Phát hiện các file có dấu hiệu lỗi bất thường có thể bị hủy:
+    1. File chỉ có nội dung chuyển tiền / giao dịch ngân hàng
+    2. File lặp từ (lặp 1 từ bất thường hoặc lặp câu liên tiếp)
+    3. File cách đoạn không có nghĩa (bị phân mảnh vụn vặt hoặc ký tự rác)
+    4. File không có nội dung chính / quá ngắn
+    """
+    reasons: list[str] = []
+    docs = data.get("docs") or []
+    if not docs:
+        return ["File không có nội dung văn bản nào."]
+
+    all_units = [u for d in docs for u in d.get("units") or []]
+    all_text = nfc(" ".join(u.get("text", "") for u in all_units)).strip()
+    total_w = count_words(all_text)
+
+    # 1. File quá ngắn / không có nội dung chính
+    if total_w < 35:
+        reasons.append(f"File quá ngắn (chỉ có {total_w} từ < 35 từ), không đủ nội dung chính để tóm tắt và biên soạn.")
+
+    text_lower = all_text.lower()
+
+    # 2. File chỉ có nội dung chuyển tiền / biên lai ngân hàng
+    matched_bank = [kw for kw in BANK_KEYWORDS if kw in text_lower]
+    is_bank_transfer = False
+    if "giao dịch thành công" in text_lower or "chuyển khoản thành công" in text_lower:
+        is_bank_transfer = True
+    elif ("thụ hưởng" in text_lower or "người thụ hưởng" in text_lower) and (
+        "số tài khoản" in text_lower or "stk" in text_lower or "ngân hàng" in text_lower
+    ):
+        is_bank_transfer = True
+    elif len(matched_bank) >= 3 and total_w < 150:
+        is_bank_transfer = True
+    elif len(matched_bank) >= 4:
+        is_bank_transfer = True
+
+    if is_bank_transfer:
+        reasons.append(f"File chỉ có nội dung chuyển tiền / giao dịch ngân hàng ({', '.join(matched_bank[:4])}).")
+
+    # 3. File lặp từ bất thường
+    tokens = re.findall(r"\b\w+\b", text_lower)
+    if len(tokens) >= 30:
+        from collections import Counter
+        content_tokens = [t for t in tokens if len(t) >= 2 and t not in VI_STOPWORDS and not t.isdigit()]
+        if content_tokens:
+            counts = Counter(content_tokens)
+            top_word, top_cnt = counts.most_common(1)[0]
+            pct_content = top_cnt / len(content_tokens)
+            pct_total = top_cnt / len(tokens)
+            if (pct_content > 0.18 and top_cnt >= 6) or (pct_total > 0.14 and top_cnt >= 8):
+                reasons.append(f"File lặp từ bất thường: từ “{top_word}” lặp lại {top_cnt} lần (chiếm {pct_total:.1%} văn bản).")
+
+        # Độ đa dạng từ vựng quá thấp
+        if len(tokens) >= 60:
+            vocab_div = len(set(tokens)) / len(tokens)
+            if vocab_div < 0.22:
+                reasons.append(f"File có độ đa dạng từ vựng quá thấp ({vocab_div:.1%}), nghi lỗi lặp từ/lặp đoạn.")
+
+    # Lặp lại các câu/unit nguyên văn liên tiếp
+    for d in docs:
+        units = d.get("units") or []
+        consec = 0
+        for i in range(1, len(units)):
+            u_prev = norm(units[i - 1].get("text", ""))
+            u_curr = norm(units[i].get("text", ""))
+            if len(u_curr) > 12 and u_curr == u_prev:
+                consec += 1
+                if consec >= 2:  # 3 câu giống nhau liên tiếp
+                    reasons.append("File có các đoạn/câu lặp lại nguyên văn liên tiếp.")
+                    break
+            else:
+                consec = 0
+
+    # 4. File cách đoạn không có nghĩa / phân mảnh vụn vặt / ký tự lạ
+    if len(all_units) >= 6:
+        avg_w = sum(u.get("words", 0) for u in all_units) / len(all_units)
+        if avg_w < 2.5:
+            reasons.append(f"File cách đoạn không có nghĩa: văn bản bị cắt vụn quá mức (trung bình {avg_w:.1f} từ/đoạn).")
+
+    if len(all_text) >= 40:
+        std_chars = len(re.findall(r"[\w\s.,;:!?\"'()–—\-/]", all_text))
+        noise_ratio = (len(all_text) - std_chars) / len(all_text)
+        if noise_ratio > 0.15:
+            reasons.append(f"File chứa quá nhiều ký tự lạ/ký hiệu bất thường ({noise_ratio:.1%}).")
+
+    return reasons
+
 ERROR, WARNING, INFO = "error", "warning", "info"
 LEVEL_VI = {ERROR: "LỖI", WARNING: "CẢNH BÁO", INFO: "GHI CHÚ"}
 
@@ -201,7 +340,7 @@ def _source_index(data: dict):
             t = norm(u["text"])
             if parts:
                 pos += 1  # khoảng trắng nối
-            spans.append((pos, pos + len(t), d["n"], u["id"]))
+            spans.append((pos, pos + len(t), d.get("n", 1), u.get("id", 1)))
             parts.append(t)
             pos += len(t)
     return " ".join(parts), spans
@@ -381,6 +520,29 @@ def check_abstract(data: dict, style: str, extract: str, abstract: str, cfg: dic
     if style != "sinh hoạt hằng ngày" and len(data["docs"]) > 1 and not heads:
         res.add(INFO, "multi_heading", "Đa văn bản: nên có tiêu đề để văn bản mạch lạc.")
 
+    # Đa văn bản: giữa các đoạn tóm tắt của từng văn bản phải để trống 1 dòng, không dùng từ nối dẫn dắt
+    if len(data.get("docs", [])) > 1:
+        non_empty_paras = [ln.strip() for ln in abstract.split("\n") if ln.strip()]
+        if len(non_empty_paras) > 1 and "\n\n" not in abstract:
+            res.add(
+                WARNING,
+                "multi_doc_no_blank_line",
+                "Đa văn bản: giữa các đoạn tóm tắt của từng văn bản cần để trống 1 dòng (dòng trắng phân cách) "
+                "để các bài độc lập nhau.",
+                "abstract",
+            )
+        for idx, p in enumerate(non_empty_paras):
+            m = FORBIDDEN_TRANSITIONS_RE.match(p)
+            if m:
+                lead = m.group(0).strip()
+                res.add(
+                    ERROR,
+                    "multi_doc_transition",
+                    f"Đa văn bản: đoạn {idx + 1} có cụm từ dẫn dắt “{lead}”. "
+                    "Mỗi bài ở file đa văn bản là độc lập, không thêm câu nối dẫn dắt mà đâm thẳng vào tóm tắt nội dung.",
+                    "abstract",
+                )
+
     # chính tả / định dạng cơ học
     if re.search(r"[ \t]{2,}", abstract):
         res.add(WARNING, "double_space", "Bản biên soạn có khoảng trắng kép.")
@@ -454,6 +616,18 @@ def run_checks(data: dict, style: str | None, extract: str | None, abstract: str
     style = nfc(style or "").strip()
     extract = nfc(extract or "")
     abstract = nfc(abstract or "")
+
+    # Kiểm tra file bất thường có thể bị hủy
+    suspicious_reasons = check_suspicious_document(data)
+    if suspicious_reasons:
+        res.metrics["is_suspicious"] = True
+        res.metrics["suspicious_reasons"] = suspicious_reasons
+        for reason in suspicious_reasons:
+            res.add(WARNING, "suspicious_file", f"[CẢNH BÁO HỦY BÀI] {reason}", "extract")
+    else:
+        res.metrics["is_suspicious"] = False
+        res.metrics["suspicious_reasons"] = []
+
     if not style:
         res.add(ERROR, "label_missing", "Chưa có nhãn phong cách chức năng.", "label")
     elif style not in STYLES:

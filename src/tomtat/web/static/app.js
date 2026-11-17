@@ -106,9 +106,12 @@ function renderFileList() {
       li.dataset.stem = stem;
       const pillClass = isRunning ? "st-running" : `st-${r.status}`;
       const pillText = isRunning ? "⏳ Đang chạy AI..." : r.status_vi;
+      const suspBadge = r.is_suspicious
+        ? `<span class="badge-suspicious" title="${escapeHtml((r.suspicious_reasons || []).join('; ') || 'File có dấu hiệu lỗi cần hủy')}">⚠️ Nghi hủy</span>`
+        : "";
       li.innerHTML = `
         <div class="file-item-top">
-          <span>${escapeHtml(r.file)}</span>
+          <span style="display:inline-flex;align-items:center;gap:6px">${escapeHtml(r.file)} ${suspBadge}</span>
           <span style="display:flex;align-items:center;gap:4px">
             <span class="status-pill ${pillClass}">${escapeHtml(pillText)}</span>
             <button class="btn-del-item" data-del-stem="${stem}" title="Xóa file ${escapeHtml(r.file)}">✕</button>
@@ -159,6 +162,9 @@ function renderDoneList() {
     for (const r of doneFiles) {
       const stem = r.file.replace(/\.docx$/i, "");
       const checked = DONE_SELECTED.has(stem);
+      const suspBadge = r.is_suspicious
+        ? `<span class="badge-suspicious" title="${escapeHtml((r.suspicious_reasons || []).join('; ') || 'File có dấu hiệu lỗi cần hủy')}">⚠️ Nghi hủy</span>`
+        : "";
       const li = document.createElement("li");
       li.className = "file-item" + (stem === CURRENT_STEM ? " active" : "");
       li.dataset.stem = stem;
@@ -167,6 +173,7 @@ function renderDoneList() {
           <label class="chk-inline" title="Tick để đưa vào file ZIP" onclick="event.stopPropagation()">
             <input type="checkbox" data-done-stem="${stem}" ${checked ? "checked" : ""}>
             <strong>${escapeHtml(r.file)}</strong>
+            ${suspBadge}
           </label>
           <span style="display:flex;align-items:center;gap:4px">
             <span class="status-pill st-${r.status}">Đã duyệt</span>
@@ -540,12 +547,22 @@ function renderChecks(chk) {
   const list = $("issues-list");
   list.innerHTML = "";
   const issues = chk.issues || [];
-  if (!issues.length) {
+
+  if (m.is_suspicious) {
+    const banner = document.createElement("div");
+    banner.className = "alert-suspicious";
+    const reasonsStr = (m.suspicious_reasons || []).join(" · ") || "File có dấu hiệu lỗi bất thường";
+    banner.innerHTML = `⚠️ <strong>CẢNH BÁO HỦY BÀI:</strong> ${escapeHtml(reasonsStr)}. Người duyệt nên cân nhắc hủy bài này!`;
+    list.appendChild(banner);
+  }
+
+  if (!issues.length && !m.is_suspicious) {
     list.innerHTML = `<div class="issue-item issue-ok">✓ Không có lỗi hay cảnh báo cơ học.</div>`;
   } else {
     for (const iss of issues) {
       const div = document.createElement("div");
-      div.className = `issue-item issue-${iss.level}`;
+      const isSusp = iss.code === "suspicious_file" || (iss.message && iss.message.includes("[CẢNH BÁO HỦY BÀI]"));
+      div.className = `issue-item issue-${iss.level}${isSusp ? " issue-suspicious" : ""}`;
       div.textContent = `[${iss.level_vi}] ${iss.message}`;
       list.appendChild(div);
     }

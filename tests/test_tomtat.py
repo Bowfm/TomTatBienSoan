@@ -310,8 +310,12 @@ def test_pipeline_and_web_api_on_sample(tmp_path):
     assert not (tmp_path / "input" / "M99999.docx").exists()
 
 
-def test_get_api_keys_multi_format(monkeypatch):
+def test_get_api_keys_multi_format(tmp_path, monkeypatch):
+    import tomtat.config
     from tomtat.config import get_api_keys
+
+    # Tránh nạp file api_keys.txt thật của dự án trong lúc test
+    monkeypatch.setattr(tomtat.config, "PROJECT_ROOT", tmp_path)
 
     # Kiểm tra tách bằng dấu phẩy
     monkeypatch.setenv("GEMINI_API_KEY", "key_a, key_b, key_c")
@@ -324,4 +328,143 @@ def test_get_api_keys_multi_format(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY_2", "key_two")
     keys = get_api_keys()
     assert keys == ["key_one", "key_two"]
+
+    # Kiểm tra nạp từ api_keys.txt
+    monkeypatch.delenv("GEMINI_API_KEY_1", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY_2", raising=False)
+    (tmp_path / "api_keys.txt").write_text("key_file_1\n# comment\nkey_file_2\n", encoding="utf-8")
+    keys = get_api_keys()
+    assert keys == ["key_file_1", "key_file_2"]
+
+
+def test_check_suspicious_document():
+    from tomtat.checks import check_suspicious_document
+
+    # 1. File quá ngắn (< 35 từ)
+    data_short = {
+        "docs": [{"units": [{"text": "Bài viết này quá ngắn không có nội dung.", "words": 9}]}]
+    }
+    reasons = check_suspicious_document(data_short)
+    assert any("quá ngắn" in r for r in reasons)
+
+    # 2. File biên lai giao dịch chuyển tiền
+    data_bank = {
+        "docs": [{
+            "units": [
+                {"text": "Ngân hàng Vietcombank thông báo giao dịch thành công.", "words": 8},
+                {"text": "Số tài khoản người thụ hưởng 0123456789.", "words": 6},
+                {"text": "Nội dung chuyển khoản thanh toán tiền hàng.", "words": 7},
+                {"text": "Mã giao dịch FT12345678.", "words": 4},
+                {"text": "Số dư biến động tăng.", "words": 5},
+                {"text": "Cảm ơn quý khách đã sử dụng dịch vụ.", "words": 8},
+            ]
+        }]
+    }
+    reasons = check_suspicious_document(data_bank)
+    assert any("chuyển tiền" in r for r in reasons)
+
+    # 3. File lặp từ bất thường
+    data_loop = {
+        "docs": [{
+            "units": [
+                {"text": "khóa học " * 20, "words": 40},
+                {"text": "khóa học " * 15, "words": 30},
+            ]
+        }]
+    }
+    reasons = check_suspicious_document(data_loop)
+    assert any("lặp từ bất thường" in r or "đa dạng từ vựng quá thấp" in r for r in reasons)
+
+    # 4. File cách đoạn vô nghĩa (cắt vụn < 2.5 từ/đoạn)
+    data_fragmented = {
+        "docs": [{
+            "units": [
+                {"text": "Đoạn một", "words": 2},
+                {"text": "Đoạn hai", "words": 2},
+                {"text": "Đoạn ba", "words": 2},
+                {"text": "Đoạn bốn", "words": 2},
+                {"text": "Đoạn năm", "words": 2},
+                {"text": "Đoạn sáu", "words": 2},
+            ]
+        }]
+    }
+    reasons = check_suspicious_document(data_fragmented)
+    assert any("cắt vụn quá mức" in r for r in reasons)
+
+    # 5. File bình thường hợp lệ -> không có cảnh báo
+    data_valid = {
+        "docs": [{
+            "units": [
+                {"text": "Đây là bài viết phân tích về tình hình phát triển kinh tế xã hội của đất nước trong năm qua.", "words": 19},
+                {"text": "Các chuyên gia đã đưa ra nhiều khuyến nghị quan trọng nhằm thúc đẩy tăng trưởng bền vững.", "words": 16},
+                {"text": "Đồng thời cần chú trọng nâng cao chất lượng nguồn nhân lực và phát triển khoa học công nghệ.", "words": 17},
+            ]
+        }]
+    }
+    assert check_suspicious_document(data_valid) == []
+
+
+def test_multi_doc_abstract_cleaning_and_blank_line():
+    from tomtat.checks import check_abstract, clean_multi_doc_abstract, run_checks
+    from tomtat.config import load_config
+
+    cfg = load_config()
+
+    # Thử hàm làm sạch biên soạn đa văn bản:
+    # 1) Bỏ "Trong chia sẻ khác," ở đầu đoạn 2 và viết hoa chữ tiếp theo
+    # 2) Đảm bảo ngăn cách giữa 2 đoạn là dòng trống (\n\n)
+    raw_abs = (
+        "Cuối năm 2011, Tony tranh thủ học nhiều chứng chỉ nghề vào cuối tuần để nâng cao kỹ năng.\n"
+        "Trong chia sẻ khác, ngành dịch vụ được xem là ngành nghề dạy người ta biết nhẫn nhịn và bền bỉ."
+    )
+    cleaned = clean_multi_doc_abstract(raw_abs, n_docs=2)
+    assert "\n\n" in cleaned
+    assert "Trong chia sẻ khác" not in cleaned
+    assert "Ngành dịch vụ được xem là" in cleaned
+
+    # Thử check_abstract khi có từ dẫn dắt cấm:
+    data_multi = {
+        "docs": [
+            {"n": 1, "units": [{"id": 1, "text": "Văn bản một có nội dung này.", "words": 7}]},
+            {"n": 2, "units": [{"id": 2, "text": "Văn bản hai có nội dung kia.", "words": 7}]},
+        ],
+        "budget": {"total_words": 100, "extract_min": 10, "extract_max": 50, "extract_target_mid": 30},
+    }
+    # Bản nháp chứa "Trong chia sẻ khác" và không có dòng trống \n\n
+    bad_abs = (
+        "Văn bản một có nội dung này.\n"
+        "Trong chia sẻ khác, văn bản hai có nội dung kia."
+    )
+    chk = run_checks(data_multi, "báo chí - công luận", "Văn bản một có nội dung này.", bad_abs, cfg)
+    codes = [i.code for i in chk.issues]
+    assert "multi_doc_transition" in codes
+    assert "multi_doc_no_blank_line" in codes
+
+    # Bản nháp đã chuẩn hóa: có dòng trống \n\n và không có từ dẫn dắt
+    good_abs = (
+        "Văn bản một có nội dung này.\n\n"
+        "Văn bản hai có nội dung kia."
+    )
+    chk_good = run_checks(data_multi, "báo chí - công luận", "Văn bản một có nội dung này.", good_abs, cfg)
+    codes_good = [i.code for i in chk_good.issues]
+    assert "multi_doc_transition" not in codes_good
+    assert "multi_doc_no_blank_line" not in codes_good
+
+
+def test_docx_set_cell_text_preserves_blank_lines(tmp_path):
+    from docx import Document
+    from tomtat.docx_io import _set_cell_text
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.rows[0].cells[0]
+
+    text_with_blank = "Đoạn 1 tóm tắt văn bản 1.\n\nĐoạn 2 tóm tắt văn bản 2."
+    _set_cell_text(cell, text_with_blank)
+
+    # Kiểm tra số paragraph trong cell: phải có 3 (đoạn 1, dòng trống, đoạn 2)
+    assert len(cell.paragraphs) == 3
+    assert cell.paragraphs[0].text == "Đoạn 1 tóm tắt văn bản 1."
+    assert cell.paragraphs[1].text == ""
+    assert cell.paragraphs[2].text == "Đoạn 2 tóm tắt văn bản 2."
 

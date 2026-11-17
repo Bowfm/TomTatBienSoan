@@ -422,6 +422,35 @@ kbd {
 .issue-warning { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid #fde68a; }
 .issue-info { background: #f1f5f9; color: #334155; }
 .issue-ok { background: var(--ok-bg); color: var(--ok-fg); font-weight: 600; }
+.issue-suspicious {
+  background: #fff1f2 !important;
+  color: #9f1239 !important;
+  border: 1px solid #fda4af !important;
+  font-weight: 600;
+}
+.alert-suspicious {
+  background: #fff1f2;
+  color: #9f1239;
+  border: 1px solid #f43f5e;
+  border-left: 5px solid #e11d48;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+.badge-suspicious {
+  background: #fee2e2;
+  color: #b91c1c;
+  border: 1px solid #f87171;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 5px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
 
 .label-row { display: flex; gap: 10px; align-items: center; }
 .style-select {

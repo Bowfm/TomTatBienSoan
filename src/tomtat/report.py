@@ -91,6 +91,14 @@ def collect_rows(cfg: dict, files: list[Path] | None = None) -> list[dict]:
             ratio_str = f"{metrics.get('ratio_name', 'B/T')} = {metrics['ratio']:.3f}"
 
         model_used = _infer_model_from_logs(ws, st)
+
+        # Kiểm tra file bất thường có thể bị hủy
+        susp_reasons = metrics.get("suspicious_reasons")
+        if susp_reasons is None and units:
+            from .checks import check_suspicious_document
+            susp_reasons = check_suspicious_document(units)
+        is_susp = bool(metrics.get("is_suspicious") or susp_reasons)
+
         rows.append({
             "file": st.get("file") or docx_path.name,
             "kind": units.get("kind") or filename_kind(docx_path.name) or "?",
@@ -109,6 +117,8 @@ def collect_rows(cfg: dict, files: list[Path] | None = None) -> list[dict]:
             "n_errors": chk.get("n_errors", 0),
             "n_warnings": chk.get("n_warnings", 0),
             "warnings": " | ".join(warn_msgs),
+            "is_suspicious": is_susp,
+            "suspicious_reasons": susp_reasons or [],
             "status": st.get("status"),
             "status_vi": STATUS_VI.get(st.get("status", ""), st.get("status", "")),
         })

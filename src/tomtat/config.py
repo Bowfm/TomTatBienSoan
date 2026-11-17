@@ -76,16 +76,15 @@ def get_api_keys() -> list[str]:
                 keys.append(k)
 
     # 3. Hoặc từ file api_keys.txt nếu có trong thư mục gốc
-    for key_file in (Path("api_keys.txt"), Path(__file__).resolve().parent.parent.parent / "api_keys.txt"):
-        if key_file.exists():
-            try:
-                for line in key_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#") and line not in keys:
-                        keys.append(line)
-            except Exception:
-                pass
-            break
+    kf = PROJECT_ROOT / "api_keys.txt"
+    if kf.exists():
+        try:
+            for line in kf.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and line not in keys:
+                    keys.append(line)
+        except Exception:
+            pass
 
     return keys
 

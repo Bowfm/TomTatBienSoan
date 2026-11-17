@@ -312,6 +312,10 @@ def _generate_abstract_loop(ws: FileWorkspace, units_data: dict, client: BaseCli
             context={"data": units_data, "extract": extract_text, "targets": targets, "style": style},
         )
         abs_text = nfc(res.data.get("abstract", "")).strip()
+        n_docs = len(units_data.get("docs", []))
+        if n_docs > 1:
+            from .checks import clean_multi_doc_abstract
+            abs_text = clean_multi_doc_abstract(abs_text, n_docs)
         note = nfc(res.data.get("note", "")).strip()
         chk = run_checks(units_data, style, extract_text, abs_text, cfg)
         key = quality_key(chk, target_mid)
