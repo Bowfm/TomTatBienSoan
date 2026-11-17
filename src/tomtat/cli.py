@@ -9,7 +9,7 @@ import webbrowser
 from pathlib import Path
 
 from .checks import run_checks
-from .config import Config, get_api_key, load_config
+from .config import Config, get_api_key, get_api_keys, load_config
 from .docx_io import DocxError, fill_docx
 from .llm import GeminiClient, MockClient
 from .pipeline import STEPS_ORDER, process_file, step_inspect
@@ -36,13 +36,13 @@ def _setup_utf8_console() -> None:
 def _build_client(cfg: Config, mock: bool):
     if mock:
         return MockClient(cfg)
-    key = get_api_key()
-    if not key:
+    keys = get_api_keys()
+    if not keys:
         sys.exit(
-            "LỖI: Chưa tìm thấy GEMINI_API_KEY (trong biến môi trường hoặc file .env).\n"
+            "LỖI: Chưa tìm thấy GEMINI_API_KEY (trong biến môi trường, file .env hoặc api_keys.txt).\n"
             "Hãy tạo file .env từ .env.example hoặc chạy thử bằng cờ --mock."
         )
-    return GeminiClient(cfg, key)
+    return GeminiClient(cfg, keys)
 
 
 def _print_file_summary(idx: int, total: int, res: dict) -> None:

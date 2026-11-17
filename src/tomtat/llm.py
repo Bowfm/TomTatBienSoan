@@ -50,13 +50,17 @@ def is_transient(exc: BaseException) -> bool:
     return isinstance(exc, (TimeoutError, ConnectionError))
 
 
-def _redact(text: str, secret: str | None) -> str:
-    if secret and text:
-        text = text.replace(secret, "***")
+def _redact(text: str, secret: str | list[str] | None) -> str:
+    if not text or not secret:
+        return text
+    secrets = [secret] if isinstance(secret, str) else secret
+    for s in secrets:
+        if s and isinstance(s, str):
+            text = text.replace(s, "***")
     return text
 
 
-def write_log(log_dir: Path | None, record: dict, secret: str | None = None) -> None:
+def write_log(log_dir: Path | None, record: dict, secret: str | list[str] | None = None) -> None:
     if not log_dir:
         return
     log_dir = Path(log_dir)
@@ -87,19 +91,34 @@ class BaseClient:
 
 
 class GeminiClient(BaseClient):
-    """Client thật. Key lấy từ GEMINI_API_KEY (hoặc .env), không bao giờ ghi vào log."""
+    """Client thật hỗ trợ xoay vòng nhiều API Key (Round-Robin & tự đổi key khi chạm giới hạn)."""
 
-    def __init__(self, cfg: dict, api_key: str):
+    def __init__(self, cfg: dict, api_key: str | list[str]):
         super().__init__(cfg)
         from google import genai  # nhập muộn để chế độ mock không cần SDK
-        self._api_key = api_key
-        self._client = genai.Client(api_key=api_key)
-        # Tắt retry ngầm kéo dài của Speakeasy SDK để kiểm soát timeout và fallback nhanh
-        try:
-            from google.genai._gaos.utils.retries import RetryConfig
-            self._client.interactions.sdk_configuration.retry_config = RetryConfig("none", None, False)
-        except Exception:  # noqa: BLE001
-            pass
+        from google.genai._gaos.utils.retries import RetryConfig
+
+        if isinstance(api_key, str):
+            raw_keys = [api_key]
+        else:
+            raw_keys = list(api_key)
+        self._api_keys = [k.strip() for k in raw_keys if k and k.strip()]
+        if not self._api_keys:
+            raise ValueError("Cần ít nhất một API Key hợp lệ.")
+
+        self._key_index = 0
+        self._key_lock = threading.Lock()
+        self._clients: dict[str, genai.Client] = {}
+
+        for k in self._api_keys:
+            c = genai.Client(api_key=k)
+            try:
+                c.interactions.sdk_configuration.retry_config = RetryConfig("none", None, False)
+            except Exception:
+                pass
+            self._clients[k] = c
+
+        self._api_key = self._api_keys[0]
         g = cfg["gemini"]
         self.model = g["model"]
         fallbacks = g.get("fallback_models") or []
@@ -108,6 +127,12 @@ class GeminiClient(BaseClient):
         self.max_retries = int(g.get("max_retries", 2))
         self.backoff_base = float(g.get("backoff_base_s", 2))
         self.backoff_max = float(g.get("backoff_max_s", 15))
+
+    def _next_key_client(self) -> tuple[str, any]:
+        with self._key_lock:
+            k = self._api_keys[self._key_index % len(self._api_keys)]
+            self._key_index += 1
+            return k, self._clients[k]
 
     def _gen_config(self, step: str, model_name: str = "") -> dict:
         g = self.cfg["gemini"]
@@ -122,8 +147,10 @@ class GeminiClient(BaseClient):
             gc["temperature"] = float(g["temperature"])
         return gc
 
-    def _call_once(self, model_name, step, system, prompt, schema):
-        resp = self._client.interactions.create(
+    def _call_once(self, model_name, step, system, prompt, schema, client=None):
+        if client is None:
+            _, client = self._next_key_client()
+        resp = client.interactions.create(
             model=model_name,
             input=prompt,
             system_instruction=system,
@@ -149,29 +176,30 @@ class GeminiClient(BaseClient):
             tries_for_model = (self.max_retries + 1) if model_idx == 0 else 1
             for net_try in range(tries_for_model):
                 t0 = time.time()
+                cur_key, cur_client = self._next_key_client()
                 record = {"step": step, "attempt": attempt, "net_try": net_try, "model": cur_model,
                           "started_at": datetime.now().isoformat(timespec="seconds"),
                           "generation_config": self._gen_config(step, cur_model),
                           "system": system, "prompt": prompt, "schema": schema}
                 try:
                     with self._semaphore:
-                        text, usage, status = self._call_once(cur_model, step, system, prompt, schema)
+                        text, usage, status = self._call_once(cur_model, step, system, prompt, schema, client=cur_client)
                     dur = time.time() - t0
                     record.update(duration_s=round(dur, 2), response_text=text, usage=usage, status=str(status))
                     data = _parse_json(text)
                     record["parsed_ok"] = True
-                    write_log(log_dir, record, self._api_key)
+                    write_log(log_dir, record, self._api_keys)
                     return LLMResult(data=data, text=text, usage=usage, duration_s=dur, model=cur_model)
                 except json.JSONDecodeError as exc:
                     record.update(duration_s=round(time.time() - t0, 2), error=f"JSON không hợp lệ: {exc}")
-                    write_log(log_dir, record, self._api_key)
+                    write_log(log_dir, record, self._api_keys)
                     last_exc = exc
                     if net_try >= 1:
                         break
                 except Exception as exc:  # noqa: BLE001
-                    err_str = _redact(f"{type(exc).__name__}: {exc}", self._api_key)
+                    err_str = _redact(f"{type(exc).__name__}: {exc}", self._api_keys)
                     record.update(duration_s=round(time.time() - t0, 2), error=err_str)
-                    write_log(log_dir, record, self._api_key)
+                    write_log(log_dir, record, self._api_keys)
                     last_exc = exc
                     # Nếu model này không được phép dùng trên Free Tier (limit: 0) hoặc 404, chuyển sang model dự phòng ngay
                     if "limit: 0" in err_str or _status_of(exc) == 404:
@@ -181,7 +209,7 @@ class GeminiClient(BaseClient):
                     if net_try + 1 < tries_for_model:
                         delay = min(self.backoff_max, self.backoff_base * (2 ** net_try))
                         time.sleep(delay * (0.5 + random.random() / 2))
-        msg = _redact(f"{type(last_exc).__name__}: {last_exc}", self._api_key)
+        msg = _redact(f"{type(last_exc).__name__}: {last_exc}", self._api_keys)
         st = _status_of(last_exc) if last_exc else None
         hint = ""
         if st in (401, 403):

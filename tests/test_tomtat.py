@@ -309,3 +309,19 @@ def test_pipeline_and_web_api_on_sample(tmp_path):
     assert r_del["count"] == 1
     assert not (tmp_path / "input" / "M99999.docx").exists()
 
+
+def test_get_api_keys_multi_format(monkeypatch):
+    from tomtat.config import get_api_keys
+
+    # Kiểm tra tách bằng dấu phẩy
+    monkeypatch.setenv("GEMINI_API_KEY", "key_a, key_b, key_c")
+    keys = get_api_keys()
+    assert keys == ["key_a", "key_b", "key_c"]
+
+    # Kiểm tra biến GEMINI_API_KEY_1, GEMINI_API_KEY_2
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY_1", "key_one")
+    monkeypatch.setenv("GEMINI_API_KEY_2", "key_two")
+    keys = get_api_keys()
+    assert keys == ["key_one", "key_two"]
+

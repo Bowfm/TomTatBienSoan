@@ -11,7 +11,7 @@ from flask import Flask, jsonify, render_template, request, send_file
 
 from .. import STYLES
 from ..checks import run_checks
-from ..config import Config, get_api_key, load_config
+from ..config import Config, get_api_key, get_api_keys, load_config
 from ..docx_io import DocxError, fill_docx
 from ..llm import GeminiClient, MockClient
 from ..memory import load_memory, record_approved_sample
@@ -56,13 +56,13 @@ def _resolve_files(cfg: Config) -> dict[str, Path]:
 def _make_client(cfg: Config, force_mock: bool = False):
     if force_mock:
         return MockClient(cfg)
-    key = get_api_key()
-    if not key:
+    keys = get_api_keys()
+    if not keys:
         raise RuntimeError(
-            "Chưa đặt GEMINI_API_KEY (trong biến môi trường hoặc file .env). "
+            "Chưa đặt GEMINI_API_KEY (trong biến môi trường, file .env hoặc api_keys.txt). "
             "Hãy cấu hình API key hoặc chạy review với cờ --mock."
         )
-    return GeminiClient(cfg, key)
+    return GeminiClient(cfg, keys)
 
 
 def create_app(cfg: Config, mock: bool = False) -> Flask:
@@ -95,6 +95,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
             "status_vi": STATUS_VI,
             "mock": mock,
             "has_api_key": bool(get_api_key()),
+            "api_key_count": len(get_api_keys()),
             "primary_model": g.get("model", ""),
             "fallback_models": g.get("fallback_models") or [],
             "learned_count": mem.get("total_approved_learned", 0),

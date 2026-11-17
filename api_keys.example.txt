@@ -1,0 +1,14 @@
+# =====================================================================
+# DANH SÁCH API KEYS GEMINI MIỄN PHÍ (TÙY CHỌN)
+# =====================================================================
+# Bạn có thể lưu các API Key miễn phí vào đây (mỗi dòng 1 key),
+# hoặc điền vào file .env (cách nhau bởi dấu phẩy).
+# Hệ thống sẽ tự động xoay vòng (Round-Robin) giữa các key để:
+# 1. Tăng tốc độ và hạn mức: 3 key = 45 lượt/phút, 5 key = 75 lượt/phút
+# 2. Tự động chuyển key tiếp theo nếu một key chạm giới hạn tạm thời
+# 
+# Cách dùng:
+# Đổi tên file này thành "api_keys.txt" và dán các key vào bên dưới:
+# AIzaSyKeySo1...
+# AIzaSyKeySo2...
+# AIzaSyKeySo3...

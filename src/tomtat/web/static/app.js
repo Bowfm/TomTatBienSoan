@@ -43,7 +43,8 @@ async function loadFileList(keepCurrent = true) {
   } else {
     const fb = (data.fallback_models || []).slice(0, 2).join(" → ");
     const learned = data.learned_count ? ` · 🧠 Đã học: ${data.learned_count} bài duyệt` : "";
-    badge.textContent = `Model chính: ${data.primary_model || "gemini-4-carbon"}${fb ? ` (dự phòng: ${fb}...)` : ""}${learned}`;
+    const keyInfo = data.api_key_count > 1 ? ` · 🔑 ${data.api_key_count} keys xoay vòng` : "";
+    badge.textContent = `Model: ${data.primary_model || "gemini-2.5-flash"}${fb ? ` (dự phòng: ${fb}...)` : ""}${keyInfo}${learned}`;
     badge.style.background = "#1d4ed8";
     badge.style.color = "#ffffff";
   }
@@ -286,6 +287,7 @@ function renderEditor(versions) {
   const pill = $("cur-status");
   pill.textContent = st.status_vi;
   pill.className = `status-pill st-${st.status}`;
+  syncRerunButtonsState();
 
   const flags = [...(st.flags || [])];
   if (st.stale_steps && st.stale_steps.length) {
@@ -619,9 +621,22 @@ async function saveDraft() {
   }
 }
 
+function syncRerunButtonsState() {
+  const isRunning = Boolean(CURRENT_STEM && RUNNING_STEMS.has(CURRENT_STEM));
+  document.querySelectorAll("button[data-rerun]").forEach((b) => {
+    b.disabled = isRunning;
+  });
+  const pill = $("cur-status");
+  if (pill && isRunning) {
+    pill.textContent = "⏳ Đang chạy AI...";
+    pill.className = "status-pill st-running";
+  }
+}
+
 async function rerunStep(step) {
   if (!CURRENT_STEM) return;
   const stem = CURRENT_STEM;
+  if (RUNNING_STEMS.has(stem)) return;
   const stepNames = {
     label: "Gán nhãn",
     extract: "Trích chọn",
@@ -631,30 +646,32 @@ async function rerunStep(step) {
   };
   const labelVi = stepNames[step] || step;
 
+  const chkMock = $("chk-mock");
+  const reqPayload = {
+    step,
+    note: $("ai-note").value,
+    mock: chkMock ? chkMock.checked : false,
+    style: $("sel-style").value,
+    extract: $("txt-extract").value,
+    abstract: $("txt-abstract").value,
+    ignore_mismatch: true,
+  };
+
   // Đánh dấu đang chạy ở cột bên trái và trên thanh trạng thái của bài
   RUNNING_STEMS.add(stem);
   renderFileList();
+  syncRerunButtonsState();
   const pill = $("cur-status");
-  if (pill) {
+  if (pill && CURRENT_STEM === stem) {
     pill.textContent = `⏳ Đang chạy (${labelVi})...`;
     pill.className = "status-pill st-running";
   }
-  document.querySelectorAll("button[data-rerun]").forEach((b) => (b.disabled = true));
   showToast(`⏳ Đang chạy '${labelVi}' cho ${stem}.docx...`);
 
   try {
-    const chkMock = $("chk-mock");
     const data = await api(`/api/file/${encodeURIComponent(stem)}/rerun`, {
       method: "POST",
-      body: JSON.stringify({
-        step,
-        note: $("ai-note").value,
-        mock: chkMock ? chkMock.checked : false,
-        style: $("sel-style").value,
-        extract: $("txt-extract").value,
-        abstract: $("txt-abstract").value,
-        ignore_mismatch: true,
-      }),
+      body: JSON.stringify(reqPayload),
     });
     RUNNING_STEMS.delete(stem);
     if (CURRENT_STEM === stem) {
@@ -673,7 +690,7 @@ async function rerunStep(step) {
     }
     showToast(err.message, true);
   } finally {
-    document.querySelectorAll("button[data-rerun]").forEach((b) => (b.disabled = false));
+    syncRerunButtonsState();
   }
 }
 
