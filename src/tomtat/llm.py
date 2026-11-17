@@ -201,8 +201,9 @@ class GeminiClient(BaseClient):
                     record.update(duration_s=round(time.time() - t0, 2), error=err_str)
                     write_log(log_dir, record, self._api_keys)
                     last_exc = exc
-                    # Nếu model này không được phép dùng trên Free Tier (limit: 0) hoặc 404, chuyển sang model dự phòng ngay
-                    if "limit: 0" in err_str or _status_of(exc) == 404:
+                    # Nếu model này không hỗ trợ (limit: 0, 404) hoặc cạn hạn mức trong ngày (per day), trượt ngay xuống model tiếp theo
+                    err_lower = err_str.lower()
+                    if "limit: 0" in err_str or _status_of(exc) == 404 or "per day" in err_lower or "perday" in err_lower:
                         break
                     if not is_transient(exc):
                         break

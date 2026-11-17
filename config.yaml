@@ -10,22 +10,26 @@ paths:                        # đường dẫn tương đối tính từ thư m
   prompts: prompts
   report: output/baocao.xlsx
 
-# ---------------- Gemini: Chế độ Miễn Phí (Free Tier 100%, 0 đồng) ----------------
-# Nếu sau này nạp tiền trở lại (Paid Tier), có thể đổi model về gemini-4-carbon
+# ---------------- Gemini: Chế độ Miễn Phí Tối Ưu (Free Tier 100%, 0 đồng) ----------------
+# Tự động ưu tiên model chất lượng cao nhất trước; khi hết 20 lượt/ngày sẽ tự trượt xuống model tiếp theo
 gemini:
-  model: gemini-2.5-flash        # Model chính: Gemini 2.5 Flash (Miễn phí 100%, thông minh và xử lý tiếng Việt rất tốt)
-  fallback_models:              # Tự động hạ cấp nếu model trên bận/chạm rate limit:
-    - gemini-2.5-flash-lite     # Dự phòng 1: Gemini 2.5 Flash Lite (Miễn phí, 30 RPM, cực nhanh)
-    - gemini-2.0-flash          # Dự phòng 2: Gemini 2.0 Flash (Miễn phí)
-  timeout_s: 90                 # timeout mỗi lượt gọi (giây)
+  model: gemini-4-hydrogen        # Cấp 1 (Chất lượng cao nhất Free Tier): Gemini 4 Hydrogen (20 RPD, 5 RPM)
+  fallback_models:                # Tự động trượt xuống model dưới khi chạm hạn mức ngày hoặc bận:
+    - gemini-3.8-flash            # Cấp 2: Gemini 3.8 Flash (20 RPD, 5 RPM)
+    - gemini-3.6-flash            # Cấp 3: Gemini 3.6 Flash (20 RPD, 5 RPM)
+    - gemini-2.5-flash            # Cấp 4: Gemini 2.5 Flash (20 RPD, 5 RPM)
+    - gemini-3.5-flash-lite       # Cấp 5 (Chủ lực cày số lượng): Gemini 3.5 Flash Lite (500 RPD, 15 RPM)
+    - gemini-3.1-flash-lite       # Cấp 6 (Dự phòng số lượng): Gemini 3.1 Flash Lite (500 RPD, 15 RPM)
+    - gemini-2.5-flash-lite       # Cấp 7: Gemini 2.5 Flash Lite (20 RPD, 10 RPM)
+  timeout_s: 90                   # timeout mỗi lượt gọi (giây)
   max_retries: 2
-  backoff_base_s: 3
-  backoff_max_s: 15
-  max_output_tokens: 8192
-  temperature: null             # null = để mặc định của model
-  max_concurrent_calls: 2       # Free Tier giới hạn 15 RPM -> chạy 2 luồng song song an toàn, không lo nghẽn
+  backoff_base_s: 2
+  backoff_max_s: 10
+  max_output_tokens: 16384
+  temperature: null               # null = để mặc định của model
+  max_concurrent_calls: 3         # số cuộc gọi đồng thời an toàn cho pool nhiều key
 
-workers: 2                      # số file xử lý song song trên Free Tier (tránh vượt 15 RPM)
+workers: 3                        # xử lý 3 file song song khi có từ 2-3 API keys trở lên
 
 # ---------------- Đếm từ ----------------
 word_count:
