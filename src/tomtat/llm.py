@@ -109,6 +109,7 @@ class GeminiClient(BaseClient):
         self._key_index = 0
         self._key_lock = threading.Lock()
         self._clients: dict[str, genai.Client] = {}
+        self._exhausted: set[tuple[str, str]] = set()  # (api_key, model) đã cạn hạn mức trong ngày
 
         for k in self._api_keys:
             c = genai.Client(api_key=k)
@@ -131,6 +132,15 @@ class GeminiClient(BaseClient):
     def _next_key_client(self) -> tuple[str, any]:
         with self._key_lock:
             k = self._api_keys[self._key_index % len(self._api_keys)]
+            self._key_index += 1
+            return k, self._clients[k]
+
+    def _get_available_key_client(self, model: str) -> tuple[str, any] | tuple[None, None]:
+        with self._key_lock:
+            available = [k for k in self._api_keys if (k, model) not in self._exhausted]
+            if not available:
+                return None, None
+            k = available[self._key_index % len(available)]
             self._key_index += 1
             return k, self._clients[k]
 
@@ -172,12 +182,17 @@ class GeminiClient(BaseClient):
     def generate_json(self, step, system, prompt, schema, *, log_dir=None, attempt=0, context=None):
         last_exc: BaseException | None = None
         for model_idx, cur_model in enumerate(self.models_chain):
-            # Model chính thử (max_retries + 1) lần; các model dự phòng thử 1 lần để trượt nhanh xuống tầng dưới nếu nghẽn
-            tries_for_model = (self.max_retries + 1) if model_idx == 0 else 1
-            for net_try in range(tries_for_model):
+            # Với mỗi model: tận dụng tối đa các key còn hạn mức trong pool
+            tries_left = max(len(self._api_keys) * 2, self.max_retries + 1)
+            while tries_left > 0:
+                tries_left -= 1
+                cur_key, cur_client = self._get_available_key_client(cur_model)
+                if cur_key is None:
+                    # Toàn bộ key trong pool đã cạn quota ngày cho cur_model -> trượt xuống model tiếp theo
+                    break
+
                 t0 = time.time()
-                cur_key, cur_client = self._next_key_client()
-                record = {"step": step, "attempt": attempt, "net_try": net_try, "model": cur_model,
+                record = {"step": step, "attempt": attempt, "model": cur_model,
                           "started_at": datetime.now().isoformat(timespec="seconds"),
                           "generation_config": self._gen_config(step, cur_model),
                           "system": system, "prompt": prompt, "schema": schema}
@@ -194,22 +209,23 @@ class GeminiClient(BaseClient):
                     record.update(duration_s=round(time.time() - t0, 2), error=f"JSON không hợp lệ: {exc}")
                     write_log(log_dir, record, self._api_keys)
                     last_exc = exc
-                    if net_try >= 1:
-                        break
+                    break
                 except Exception as exc:  # noqa: BLE001
                     err_str = _redact(f"{type(exc).__name__}: {exc}", self._api_keys)
                     record.update(duration_s=round(time.time() - t0, 2), error=err_str)
                     write_log(log_dir, record, self._api_keys)
                     last_exc = exc
-                    # Nếu model này không hỗ trợ (limit: 0, 404) hoặc cạn hạn mức trong ngày (per day), trượt ngay xuống model tiếp theo
                     err_lower = err_str.lower()
-                    if "limit: 0" in err_str or _status_of(exc) == 404 or "per day" in err_lower or "perday" in err_lower:
+                    if "per day" in err_lower or "perday" in err_lower or "limit: 0" in err_str:
+                        # Key này đã cạn quota ngày của cur_model -> đánh dấu để chuyển sang key khác trong pool
+                        with self._key_lock:
+                            self._exhausted.add((cur_key, cur_model))
+                        continue
+                    if _status_of(exc) == 404:
                         break
                     if not is_transient(exc):
                         break
-                    if net_try + 1 < tries_for_model:
-                        delay = min(self.backoff_max, self.backoff_base * (2 ** net_try))
-                        time.sleep(delay * (0.5 + random.random() / 2))
+                    time.sleep(min(self.backoff_max, self.backoff_base))
         msg = _redact(f"{type(last_exc).__name__}: {last_exc}", self._api_keys)
         st = _status_of(last_exc) if last_exc else None
         hint = ""
