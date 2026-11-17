@@ -43,8 +43,7 @@ async function loadFileList(keepCurrent = true) {
   } else {
     const fb = (data.fallback_models || []).slice(0, 2).join(" → ");
     const learned = data.learned_count ? ` · 🧠 Đã học: ${data.learned_count} bài duyệt` : "";
-    const keyInfo = data.api_key_count > 1 ? ` · 🔑 ${data.api_key_count} keys xoay vòng` : "";
-    badge.textContent = `Model: ${data.primary_model || "gemini-2.5-flash"}${fb ? ` (dự phòng: ${fb}...)` : ""}${keyInfo}${learned}`;
+    badge.textContent = `Model chính: ${data.primary_model || "gemini-4-hydrogen"}${fb ? ` (dự phòng: ${fb}...)` : ""}${learned}`;
     badge.style.background = "#1d4ed8";
     badge.style.color = "#ffffff";
   }
