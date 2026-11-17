@@ -61,9 +61,9 @@ grading:
 
 # ---------------- Trích chọn ----------------
 extract:
-  target: 0.30                # tỉ lệ nhắm tới
+  target: 0.33                # tỉ lệ nhắm tới (~33%, nâng nhẹ từ 0.30 để trích chọn nhiều từ hơn)
   target_low: 0.20            # khoảng an toàn; ngoài khoảng này -> thử lại / cảnh báo
-  target_high: 0.40
+  target_high: 0.45           # biên trên khoảng an toàn (chỉnh từ 0.40 lên 0.45 theo yêu cầu)
   max_attempts: 3             # số lần gọi AI tối đa cho bước trích chọn
 
 # ---------------- Biên soạn ----------------

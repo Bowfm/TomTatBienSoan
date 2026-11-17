@@ -158,8 +158,10 @@ def step_extract(ws: FileWorkspace, units_data: dict, client: BaseClient,
     ext_cfg = cfg["extract"]
     g_cfg = cfg["grading"]
     max_attempts = int(ext_cfg.get("max_attempts", 3))
-    budget = units_data["budget"]
-    total = budget["total_words"]
+    from .units import compute_budget
+    total = units_data["budget"]["total_words"]
+    budget = compute_budget(total, cfg)
+    units_data["budget"] = budget
 
     retry_msg = ""
     best = None
@@ -241,7 +243,7 @@ def step_extract(ws: FileWorkspace, units_data: dict, client: BaseClient,
             action = f"chọn thêm khoảng {delta} từ" if delta > 0 else f"bớt khoảng {-delta} từ"
             problems.append(
                 f"Tỉ lệ trích chọn hiện là {n_ext}/{total} từ ({ratio:.1%}), nằm ngoài khoảng an toàn "
-                f"20%-40% ({budget['extract_target_low']}-{budget['extract_target_high']} từ). Hãy {action}."
+                f"{ext_cfg['target_low']:.0%}-{ext_cfg['target_high']:.0%} ({budget['extract_target_low']}-{budget['extract_target_high']} từ). Hãy {action}."
             )
         if len(units_data["docs"]) > 1:
             missing_docs = [d["n"] for d in units_data["docs"] if not sel_map.get(d["n"])]

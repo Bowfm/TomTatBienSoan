@@ -34,6 +34,9 @@ def compute_budget(total: int, cfg: dict) -> dict:
         "extract_target_low": round(total * e["target_low"]),
         "extract_target_high": round(total * e["target_high"]),
         "extract_target_mid": round(total * e["target"]),
+        "target_low_pct": int(round(e["target_low"] * 100)),
+        "target_high_pct": int(round(e["target_high"] * 100)),
+        "target_mid_pct": int(round(e["target"] * 100)),
     }
 
 

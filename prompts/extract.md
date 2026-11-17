@@ -7,7 +7,7 @@ Hãy chọn các đơn vị câu/đề mục quan trọng nhất từ (các) vă
 2. **NGÂN SÁCH SỐ TỪ:**
    - Tổng số từ văn bản gốc: **{{ budget.total_words }} từ**.
    - Giới hạn bắt buộc (10% - 50%): từ **{{ budget.extract_min }}** đến **{{ budget.extract_max }} từ**.
-   - **Khoảng mục tiêu an toàn (20% - 40%): từ {{ budget.extract_target_low }} đến {{ budget.extract_target_high }} từ (lý tưởng khoảng {{ budget.extract_target_mid }} từ ~ 30%).**
+   - **Khoảng mục tiêu an toàn ({{ budget.target_low_pct }}% - {{ budget.target_high_pct }}%): từ {{ budget.extract_target_low }} đến {{ budget.extract_target_high }} từ (lý tưởng khoảng {{ budget.extract_target_mid }} từ ~ {{ budget.target_mid_pct }}%).**
    - Hãy cộng nhẩm số từ ghi trong ngoặc `(... từ)` của các đơn vị `[id]` bạn chọn để tổng số từ nằm gọn trong khoảng **{{ budget.extract_target_low }} - {{ budget.extract_target_high }} từ**.
 3. **CÁCH CHỌN NỘI DUNG:**
    {% if query %}

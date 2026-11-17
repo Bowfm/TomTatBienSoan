@@ -30,6 +30,16 @@ from ..textutil import configure as configure_textutil, count_words, nfc
 from ..units import assemble_extract, normalize_selections
 
 
+def _sync_config_non_paths(target_cfg: Config) -> None:
+    try:
+        fresh = load_config()
+        for k in ("extract", "abstract", "grading", "gemini", "word_count", "sentence_split", "judge", "workers"):
+            if k in fresh:
+                target_cfg[k] = fresh[k]
+    except Exception:
+        pass
+
+
 def _resolve_files(cfg: Config) -> dict[str, Path]:
     files = {p.stem: p for p in discover_docx_files(cfg.input_dir)}
     if cfg.work_dir.exists():
@@ -171,8 +181,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         stems = payload.get("stems") or []
 
         try:
-            fresh_cfg = load_config()
-            cfg["gemini"] = fresh_cfg.get("gemini", cfg.get("gemini"))
+            _sync_config_non_paths(cfg)
             client = _make_client(cfg, force_mock=use_mock)
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -202,6 +211,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
 
     @app.get("/api/file/<stem>")
     def api_get_file(stem: str):
+        _sync_config_non_paths(cfg)
         files_map = _resolve_files(cfg)
         if stem not in files_map:
             return jsonify({"error": f"Không tìm thấy file '{stem}'."}), 404
@@ -215,6 +225,9 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
             except DocxError as exc:
                 return jsonify({"error": str(exc)}), 400
         if units_data:
+            from ..units import compute_budget
+            if "total_words" in (units_data.get("budget") or {}):
+                units_data["budget"] = compute_budget(units_data["budget"]["total_words"], cfg)
             chk = run_checks(
                 units_data,
                 st.get("label", {}).get("value", ""),
@@ -274,6 +287,9 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         units_data = ws.load_units()
         if not units_data:
             return jsonify({"error": "File chưa được inspect."}), 400
+        from ..units import compute_budget
+        if "total_words" in (units_data.get("budget") or {}):
+            units_data["budget"] = compute_budget(units_data["budget"]["total_words"], cfg)
         payload = request.get_json(force=True) or {}
         selections = payload.get("selections") or {}
         style = payload.get("style") or ""
@@ -299,6 +315,9 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         units_data = ws.load_units()
         if not units_data:
             return jsonify({"error": "File chưa được inspect."}), 400
+        from ..units import compute_budget
+        if "total_words" in (units_data.get("budget") or {}):
+            units_data["budget"] = compute_budget(units_data["budget"]["total_words"], cfg)
         payload = request.get_json(force=True) or {}
         style = payload.get("style", "")
         extract = payload.get("extract", "")
@@ -317,6 +336,9 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         units_data = ws.load_units()
         if not units_data:
             units_data = step_inspect(ws, cfg, st)
+        if units_data and "total_words" in (units_data.get("budget") or {}):
+            from ..units import compute_budget
+            units_data["budget"] = compute_budget(units_data["budget"]["total_words"], cfg)
 
         payload = request.get_json(force=True) or {}
         style = nfc(payload.get("style", "")).strip()
@@ -380,8 +402,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         ws.save_state(st)
 
         try:
-            fresh_cfg = load_config()
-            cfg["gemini"] = fresh_cfg.get("gemini", cfg.get("gemini"))
+            _sync_config_non_paths(cfg)
             client = _make_client(cfg, force_mock=use_mock)
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 400
