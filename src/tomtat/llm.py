@@ -185,6 +185,8 @@ class GeminiClient(BaseClient):
         hint = ""
         if st in (401, 403):
             hint = " (kiểm tra GEMINI_API_KEY và quyền truy cập model)"
+        elif st == 402:
+            hint = " (Hết số dư tiền nạp trước trên Google AI Studio; vui lòng nạp thêm tiền tại https://ai.studio/projects hoặc https://ai.google.dev/gemini-api/docs/billing#prepay)"
         elif st == 404:
             hint = f" (model '{self.model}' không tồn tại hoặc tài khoản chưa được dùng; đổi gemini.model trong config.yaml)"
         elif st == 429:
