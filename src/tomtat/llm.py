@@ -109,11 +109,12 @@ class GeminiClient(BaseClient):
         self.backoff_base = float(g.get("backoff_base_s", 2))
         self.backoff_max = float(g.get("backoff_max_s", 15))
 
-    def _gen_config(self, step: str) -> dict:
+    def _gen_config(self, step: str, model_name: str = "") -> dict:
         g = self.cfg["gemini"]
         gc: dict = {}
         lvl = (g.get("thinking_level") or {}).get(step)
-        if lvl:
+        # thinking_level chỉ áp dụng cho dòng Gemini 3.x và 4.x
+        if lvl and not model_name.startswith("gemini-2."):
             gc["thinking_level"] = lvl
         if g.get("max_output_tokens"):
             gc["max_output_tokens"] = int(g["max_output_tokens"])
@@ -127,7 +128,7 @@ class GeminiClient(BaseClient):
             input=prompt,
             system_instruction=system,
             response_format={"type": "text", "mime_type": "application/json", "schema": schema},
-            generation_config=self._gen_config(step),
+            generation_config=self._gen_config(step, model_name),
             store=False,
             timeout=self.timeout,
         )
@@ -150,7 +151,7 @@ class GeminiClient(BaseClient):
                 t0 = time.time()
                 record = {"step": step, "attempt": attempt, "net_try": net_try, "model": cur_model,
                           "started_at": datetime.now().isoformat(timespec="seconds"),
-                          "generation_config": self._gen_config(step),
+                          "generation_config": self._gen_config(step, cur_model),
                           "system": system, "prompt": prompt, "schema": schema}
                 try:
                     with self._semaphore:

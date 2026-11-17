@@ -10,31 +10,22 @@ paths:                        # đường dẫn tương đối tính từ thư m
   prompts: prompts
   report: output/baocao.xlsx
 
-# ---------------- Gemini (Đã tối ưu cho Paid Tier 1: 1.000 RPM / 2M TPM / Unlimited RPD) ----------------
+# ---------------- Gemini: Chế độ Miễn Phí (Free Tier 100%, 0 đồng) ----------------
+# Nếu sau này nạp tiền trở lại (Paid Tier), có thể đổi model về gemini-4-carbon
 gemini:
-  model: gemini-4-carbon        # Cấp 1 (Cao nhất): Gemini 4 Carbon (1K RPM, 2M TPM, Unlimited RPD)
-  fallback_models:              # Thứ tự hạ cấp tự động từ cao xuống thấp khi model trên bị lỗi/nghẽn:
-    - gemini-4-argon            # Cấp 2: Gemini 4 Argon (1K RPM, 2M TPM, Unlimited RPD)
-    - gemini-4-hydrogen         # Cấp 3: Gemini 4 Hydrogen (1K RPM, 2M TPM, 10K RPD)
-    - gemini-3.8-flash          # Cấp 4: Gemini 3.8 Flash (1K RPM, 2M TPM, 10K RPD)
-    - gemini-3.6-flash          # Cấp 5: Gemini 3.6 Flash (1K RPM, 2M TPM, 10K RPD)
-    - gemini-3.5-flash-lite     # Cấp 6: Gemini 3.5 Flash Lite (4K RPM, 4M TPM, 150K RPD)
-    - gemini-3.1-flash-lite     # Cấp 7: Gemini 3.1 Flash Lite (4K RPM, 4M TPM, 150K RPD)
-  timeout_s: 120                # timeout mỗi lượt gọi (giây)
-  max_retries: 3                # thử lại tới 3 lần trên gemini-4-carbon để ưu tiên dùng 4-carbon tối đa cho mọi file
-  backoff_base_s: 2
-  backoff_max_s: 10
-  max_output_tokens: 32768      # gồm cả token "suy nghĩ"
+  model: gemini-2.5-flash        # Model chính: Gemini 2.5 Flash (Miễn phí 100%, thông minh và xử lý tiếng Việt rất tốt)
+  fallback_models:              # Tự động hạ cấp nếu model trên bận/chạm rate limit:
+    - gemini-2.5-flash-lite     # Dự phòng 1: Gemini 2.5 Flash Lite (Miễn phí, 30 RPM, cực nhanh)
+    - gemini-2.0-flash          # Dự phòng 2: Gemini 2.0 Flash (Miễn phí)
+  timeout_s: 90                 # timeout mỗi lượt gọi (giây)
+  max_retries: 2
+  backoff_base_s: 3
+  backoff_max_s: 15
+  max_output_tokens: 8192
   temperature: null             # null = để mặc định của model
-  # thinking_level cho từng bước trên dòng Gemini 4: low | medium | high
-  thinking_level:
-    label: low                  # phân loại nhãn dùng low để phản hồi nhanh (~10-15s)
-    extract: low                # chọn ID câu dùng low để nhanh và chuẩn xác
-    abstract: medium            # biên soạn văn bản dùng medium để câu văn mượt và chuẩn quy tắc 70%
-    judge: low
-  max_concurrent_calls: 6       # Paid Tier 1 có 1.000 RPM -> cho phép 6 luồng gọi song song thực sự
+  max_concurrent_calls: 2       # Free Tier giới hạn 15 RPM -> chạy 2 luồng song song an toàn, không lo nghẽn
 
-workers: 4                      # số file xử lý song song cùng lúc (cả CLI và nút ▶ Chạy AI trên web)
+workers: 2                      # số file xử lý song song trên Free Tier (tránh vượt 15 RPM)
 
 # ---------------- Đếm từ ----------------
 word_count:
@@ -85,9 +76,9 @@ label:
 
 # ---------------- Chấm G-Eval tự động ----------------
 judge:
-  enabled: true               # bật tự chấm G-Eval trên Paid Tier 1 để đảm bảo G-Eval >= 4.25 (tự động viết lại nếu < 4.25)
+  enabled: false               # Tắt trên Free Tier để tiết kiệm lượt gọi API (vẫn có điểm ước lượng cơ học trên giao diện)
   min_average: 4.25
-  rewrite_once_if_below: true
+  rewrite_once_if_below: false
 
 # ---------------- Bố cục file ----------------
 layout:
