@@ -169,7 +169,7 @@ def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
     print(f"Đang mở giao diện duyệt tại {url} (nhấn Ctrl+C để dừng)...")
     if not args.no_browser and cfg.get("review", {}).get("open_browser", True):
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+    app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)  # threaded: cần cho SSE
     return 0
 
 

@@ -939,7 +939,8 @@ function setBatchProgress(text) {
   }
 }
 
-let BATCH_POLL_TIMER = null;
+let BATCH_POLL_TIMER = null;   // dự phòng polling khi trình duyệt/kết nối không hỗ trợ SSE
+let BATCH_EVENTS = null;       // EventSource đang mở tới /api/batch/events
 let LAST_BATCH_DONE = -1;
 
 async function runBatchOnServer(stems, useMock) {
@@ -975,51 +976,116 @@ async function stopBatch() {
   }
 }
 
-function startBatchPolling() {
-  if (BATCH_POLL_TIMER) clearInterval(BATCH_POLL_TIMER);
-  LAST_BATCH_DONE = -1;
+function stopBatchTracking() {
+  if (BATCH_EVENTS) {
+    BATCH_EVENTS.close(); // bắt buộc: nếu không, EventSource sẽ tự kết nối lại
+    BATCH_EVENTS = null;
+  }
+  if (BATCH_POLL_TIMER) {
+    clearInterval(BATCH_POLL_TIMER);
+    BATCH_POLL_TIMER = null;
+  }
+}
 
+// Xử lý một bản tin trạng thái batch (dùng chung cho SSE và polling).
+async function handleBatchStatus(st) {
+  if (!st) return;
+
+  RUNNING_STEMS.clear();
+  (st.running || []).forEach((s) => RUNNING_STEMS.add(s));
+
+  if (st.active) {
+    const activeList = (st.running || []).map((s) => `${s}.docx`).join(", ");
+    setBatchProgress(
+      `⏳ Đang chạy song song ${RUNNING_STEMS.size} luồng (${st.done_count + st.err_count}/${st.total} xong) — Đang xử lý: ${activeList || "..."}`
+    );
+    if (st.done_count !== LAST_BATCH_DONE) {
+      LAST_BATCH_DONE = st.done_count;
+      await loadFileList(true);
+    } else {
+      renderFileList();
+    }
+    return;
+  }
+
+  stopBatchTracking();
+  RUNNING_STEMS.clear();
+  setBatchProgress("");
+  await loadFileList(true);
+  if (st.stopped) {
+    showToast(`Đã dừng theo yêu cầu (đã xong ${st.done_count}/${st.total} file).`);
+  } else if (st.total > 0) {
+    showToast(
+      `Hoàn tất chạy AI: thành công ${st.done_count}/${st.total} file` +
+        (st.err_count ? ` (${st.err_count} file lỗi).` : "!")
+    );
+  }
+}
+
+function startBatchPollingFallback() {
+  stopBatchTracking();
   const poll = async () => {
     try {
-      const st = await api("/api/batch/status");
-      if (!st) return;
-
-      RUNNING_STEMS.clear();
-      (st.running || []).forEach((s) => RUNNING_STEMS.add(s));
-
-      if (st.active) {
-        const activeList = (st.running || []).map((s) => `${s}.docx`).join(", ");
-        setBatchProgress(
-          `⏳ Đang chạy song song ${RUNNING_STEMS.size} luồng (${st.done_count + st.err_count}/${st.total} xong) — Đang xử lý: ${activeList || "..."}`
-        );
-        if (st.done_count !== LAST_BATCH_DONE) {
-          LAST_BATCH_DONE = st.done_count;
-          await loadFileList(true);
-        } else {
-          renderFileList();
-        }
-      } else {
-        clearInterval(BATCH_POLL_TIMER);
-        BATCH_POLL_TIMER = null;
-        RUNNING_STEMS.clear();
-        setBatchProgress("");
-        await loadFileList(true);
-        if (st.stopped) {
-          showToast(`Đã dừng theo yêu cầu (đã xong ${st.done_count}/${st.total} file).`);
-        } else if (st.total > 0) {
-          showToast(
-            `Hoàn tất chạy AI: thành công ${st.done_count}/${st.total} file` +
-              (st.err_count ? ` (${st.err_count} file lỗi).` : "!")
-          );
-        }
-      }
+      await handleBatchStatus(await api("/api/batch/status"));
     } catch (err) {
       console.warn("Lỗi poll batch status:", err);
     }
   };
-
   BATCH_POLL_TIMER = setInterval(poll, 1000);
   poll();
+}
+
+function startBatchPolling() {
+  stopBatchTracking();
+  LAST_BATCH_DONE = -1;
+
+  if (typeof EventSource === "undefined") {
+    startBatchPollingFallback();
+    return;
+  }
+
+  const es = new EventSource("/api/batch/events");
+  BATCH_EVENTS = es;
+  let latest = null;   // bản tin mới nhất chưa xử lý
+  let busy = false;    // tránh chạy chồng loadFileList khi bản tin đến dồn dập
+
+  const drain = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      while (latest) {
+        const st = latest;
+        latest = null;
+        await handleBatchStatus(st);
+      }
+    } catch (err) {
+      console.warn("Lỗi xử lý SSE batch:", err);
+    } finally {
+      busy = false;
+    }
+  };
+
+  es.onmessage = (ev) => {
+    try {
+      latest = JSON.parse(ev.data);
+    } catch (err) {
+      console.warn("SSE batch: dữ liệu không hợp lệ", err);
+      return;
+    }
+    if (!latest.active) {
+      // Bản tin cuối: đóng ngay để server đóng stream không bị coi là lỗi (onerror).
+      es.close();
+      if (BATCH_EVENTS === es) BATCH_EVENTS = null;
+    }
+    drain();
+  };
+
+  es.onerror = () => {
+    // Mất kết nối giữa chừng (server khởi động lại, proxy cắt...) → chuyển sang polling.
+    if (BATCH_EVENTS !== es) return; // đã đóng chủ động sau khi batch xong
+    console.warn("SSE batch bị ngắt, chuyển sang polling.");
+    startBatchPollingFallback();
+  };
 }
 
 async function runPendingFiles() {

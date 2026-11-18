@@ -54,6 +54,41 @@ def test_api_batch_endpoints(tmp_path):
     assert r_stop.get_json()["ok"] is True
 
 
+def test_batch_sse_stream_until_done(tmp_path):
+    """SSE phải phát tiến độ trong lúc batch chạy và tự đóng stream khi batch kết thúc."""
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    sample = cfg.root / "samples" / "M54629.docx"
+    inp = tmp_path / "input" / "M54629.docx"
+    inp.parent.mkdir(parents=True, exist_ok=True)
+    inp.write_bytes(sample.read_bytes())
+
+    app = create_app(cfg, mock=True)
+    tc = app.test_client()
+    assert tc.post("/api/batch/start", json={"stems": ["M54629"], "mock": True}).get_json()["ok"]
+
+    # Stream tự kết thúc khi batch xong → get_data() trả về toàn bộ, không treo.
+    r = tc.get("/api/batch/events")
+    assert r.headers.get("Cache-Control") == "no-cache"
+    events = [
+        json.loads(line[len("data: "):])
+        for line in r.get_data(as_text=True).splitlines()
+        if line.startswith("data: ")
+    ]
+    assert events, "SSE không phát bản tin nào"
+    assert events[-1]["active"] is False
+    assert events[-1]["done_count"] == 1
+    # Mỗi bản tin phát ra phải khác bản tin trước (không phát trùng)
+    dumps = [json.dumps(e, sort_keys=True) for e in events]
+    assert all(a != b for a, b in zip(dumps, dumps[1:]))
+
+
 def test_check_update_endpoints(tmp_path, monkeypatch):
     monkeypatch.setattr("tomtat.updater.get_current_commit", lambda root=None: "aabbccddee")
     monkeypatch.setattr("tomtat.updater.get_remote_commit", lambda root=None: "aabbccddee")
