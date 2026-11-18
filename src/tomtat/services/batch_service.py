@@ -40,7 +40,7 @@ def make_client(cfg: Config, force_mock: bool = False):
     if not keys:
         raise RuntimeError(
             "Chưa đặt GEMINI_API_KEY (trong biến môi trường, file .env hoặc api_keys.txt). "
-            "Hãy cấu hình API key hoặc chạy review với cờ --mock."
+            "Hãy cấu hình API key (xem .env.example) hoặc chạy thử với cờ --mock."
         )
     global _CACHED_CLIENT, _CACHED_KEYS
     with _CLIENT_LOCK:

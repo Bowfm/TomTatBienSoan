@@ -8,10 +8,9 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from .config import Config, get_api_keys
-from .llm import GeminiClient, MockClient
+from .config import Config
 from .pipeline import STEPS_ORDER
-from .services import FileService
+from .services import FileService, make_client
 from .textutil import configure as configure_textutil
 
 
@@ -25,15 +24,11 @@ def _setup_utf8_console() -> None:
 
 
 def _build_client(cfg: Config, mock: bool):
-    if mock:
-        return MockClient(cfg)
-    keys = get_api_keys()
-    if not keys:
-        sys.exit(
-            "LỖI: Chưa tìm thấy GEMINI_API_KEY (trong biến môi trường, file .env hoặc api_keys.txt).\n"
-            "Hãy tạo file .env từ .env.example hoặc chạy thử bằng cờ --mock."
-        )
-    return GeminiClient(cfg, keys)
+    """Tạo client qua cùng đường với Web (services.make_client), chỉ khác cách báo lỗi."""
+    try:
+        return make_client(cfg, force_mock=mock)
+    except RuntimeError as exc:
+        sys.exit(f"LỖI: {exc}")
 
 
 def _print_file_summary(idx: int, total: int, res: dict) -> None:
@@ -75,11 +70,8 @@ def cmd_process(args: argparse.Namespace, cfg: Config) -> int:
     sc = cfg.get("sentence_split", {})
     configure_textutil(sc.get("abbreviations"), sc.get("heading_words"))
 
-    # Nếu chỉ chạy bước inspect thì không cần khởi tạo Gemini client
-    if args.only == "inspect":
-        client = MockClient(cfg)
-    else:
-        client = _build_client(cfg, args.mock)
+    # Nếu chỉ chạy bước inspect thì không cần API key → dùng mock client
+    client = _build_client(cfg, mock=args.mock or args.only == "inspect")
 
     workers = max(1, int(args.workers or cfg.get("workers", 2)))
     print(
