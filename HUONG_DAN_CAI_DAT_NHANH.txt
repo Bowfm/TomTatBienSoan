@@ -9,9 +9,9 @@ Bạn chỉ cần làm đúng 3 bước dưới đây trong lần đầu tiên (
 BƯỚC 1: GIẢI NÉN THƯ MỤC
 --------------------------------------------------------------------------------
 - Giải nén file "TomTatBienSoan_ChiaSe.zip" ra một thư mục trên máy tính
-  (ví dụ: D:\TomTatBienSoan hoặc Desktop\TomTatBienSoan).
-- Lưu ý: Phải GIẢI NÉN (Extract) ra thư mục thật, KHÔNG chạy trực tiếp bên trong
-  cửa sổ xem trước của WinRAR / 7-Zip.
+  (ví dụ: D:\TomTatBienSoan hoặc C:\TomTatBienSoan hoặc Desktop\TomTatBienSoan).
+- Lưu ý: Phải GIẢI NÉN (Extract All / Extract to...) ra thư mục thật, KHÔNG chạy
+  trực tiếp bên trong cửa sổ xem trước của WinRAR / 7-Zip.
 
 --------------------------------------------------------------------------------
 BƯỚC 2: CHẠY FILE "setup.bat" (CHỈ CẦN CHẠY 1 LẦN DUY NHẤT)
@@ -19,26 +19,20 @@ BƯỚC 2: CHẠY FILE "setup.bat" (CHỈ CẦN CHẠY 1 LẦN DUY NHẤT)
 1. Nhấp đúp chuột vào file:  setup.bat
 2. Những việc "setup.bat" sẽ tự động làm cho bạn:
    - Kiểm tra xem máy đã có Python 3.11+ chưa:
-     + Nếu CHƯA CÓ: script sẽ tự động cài đặt Python 3.12 giúp bạn (hoặc mở
+     + Nếu CHƯA CÓ: script sẽ tự động cài đặt Python 3.12 qua winget (hoặc mở
        trang tải Python chính thức tại https://www.python.org/downloads/windows/
-       — khi cài Python bằng tay, NHỚ TICK vào ô "Add python.exe to PATH").
-   - Tự động tạo môi trường ảo (.venv) và tải đầy đủ các thư viện cần thiết
-     (google-genai, python-docx, flask, pyyaml, jinja2, openpyxl...).
-   - Tự động tạo file ".env" và MỞ SẴN NOTEPAD để bạn dán khóa GEMINI_API_KEY.
+       — khi cài bằng tay, NHỚ TICK vào ô "Add python.exe to PATH").
+   - Tự động tạo môi trường ảo (.venv) và cài đặt đầy đủ các thư viện cần thiết.
+   - Tự động chuẩn bị file "api_keys.txt" và MỞ SẴN NOTEPAD để bạn dán API Keys.
 
-3. Điền khóa Gemini API vào file ".env":
-   - Trong cửa sổ Notepad vừa hiện ra, thay chữ "your_gemini_api_key_here" bằng
-     khóa Gemini API của bạn (lấy tại https://aistudio.google.com/apikey):
-       GEMINI_API_KEY=AIzaSy...khoa_cua_ban...
+3. Dán các Gemini API Keys vào file "api_keys.txt":
+   - Trong cửa sổ Notepad vừa hiện ra, dán các API Keys của bạn vào:
+     + Mỗi dòng 1 key (lấy miễn phí tại: https://aistudio.google.com/apikey).
+     + Bạn có thể dán từ 1 key cho đến 20, 30, 40+ keys (mỗi key từ một Google
+       Cloud Project khác nhau).
+     + Hệ thống sẽ tự động xoay vòng (Round-Robin) giữa các keys, tự động chuyển
+       key khác khi gặp giới hạn và phân phối cho nhiều luồng chạy cực nhanh!
    - Bấm Ctrl + S để lưu lại rồi đóng Notepad.
-
-   * Ghi chú về gói API (Paid Tier vs Free Tier):
-     - Mặc định trong file "config.yaml" đang đặt model cao cấp nhất là
-       "gemini-4-carbon" (dành cho tài khoản đã bật thanh toán Paid Tier 1).
-     - Nếu tài khoản của bạn dùng gói MIỄN PHÍ (Free Tier), công cụ vẫn tự động
-       chuyển xuống model miễn phí ("gemini-3.5-flash-lite"), hoặc bạn có thể mở
-       file "config.yaml" và sửa dòng:
-         model: gemini-3.5-flash-lite
 
 --------------------------------------------------------------------------------
 BƯỚC 3: KHỞI ĐỘNG CÔNG CỤ VÀ LÀM VIỆC HẰNG NGÀY
@@ -46,27 +40,41 @@ BƯỚC 3: KHỞI ĐỘNG CÔNG CỤ VÀ LÀM VIỆC HẰNG NGÀY
 1. Bật công cụ:
    - Nhấp đúp chuột vào file:  khoi_dong.bat
    - Trình duyệt web sẽ tự động mở trang giao diện tại:  http://127.0.0.1:8765
-   - (Lưu ý: Giữ nguyên cửa sổ đen nhỏ dưới thanh tác vụ trong lúc làm việc).
+   - (Giữ nguyên cửa sổ đen nhỏ dưới thanh tác vụ trong suốt lúc làm việc).
 
 2. Quy trình làm việc trên trình duyệt (40+ file mỗi ngày):
    - Bước 2.1: Bấm nút "+ Thêm file .docx" ở góc trên bên trái -> Chọn toàn bộ
-     các file .docx của ngày hôm nay.
-   - Bước 2.2: Nếu ô "Tự động chạy AI ngay khi thêm file" đang được tick, công cụ
-     sẽ tự động chạy song song 4 file cùng lúc. (Hoặc bấm nút "▶ Chạy AI").
-   - Bước 2.3: Bấm vào từng file ở cột "Chờ duyệt" để kiểm tra:
-     + Xem 9 ô chỉ số (Từ gốc, Từ trích chọn, Compress, Từ biên soạn, Tỉ lệ B/T,
-       Edit/Độ bám, ROUGE-2 ≥ 33%, BARTScore ≥ -2.56, G-Eval ≥ 4.25).
-     + Có thể tick/bỏ tick câu ở cột văn bản gốc bên trái hoặc sửa trực tiếp chữ
-       bên phải (mọi thay đổi đều tự động lưu ngầm và kiểm tra lỗi tức thì).
-     + Bấm nút "Duyệt & Ghi .docx" ở góc trên bên phải -> File sẽ tự động chuyển
-       sang cột "Đã duyệt".
-   - Bước 2.4: Cuối ngày, bấm nút màu xanh lá "⬇ Tải ZIP ngày DD/MM" ở chân cột
-     "Đã duyệt" để tải toàn bộ file .docx đã hoàn thành về máy.
-   - Bước 2.5: Sau khi đã tải file ZIP xong, bấm nút "🧹 Xóa hết" (hoặc "🗑 Xóa
-     các file đã duyệt") để dọn sạch danh sách, sẵn sàng cho ngày làm việc mới!
-     (Mọi bài bạn đã duyệt đều đã được công cụ lưu kinh nghiệm vào bộ nhớ tự học
-      "work\learned_memory.json" để các ngày sau AI làm ngày càng chuẩn hơn).
+     các file .docx cần làm hôm nay (hoặc kéo thả file trực tiếp vào trang web).
+   - Bước 2.2: Sắp xếp & Thứ tự chạy:
+     + Mặc định: Nút "🔻 Cuối lên đầu" đang bật (file ở cuối sẽ lên trên đỉnh
+       danh sách, file đầu về dưới cùng). Bạn có thể bấm vào nút này để đổi sang
+       "🔺 Đầu lên trước" bất cứ lúc nào.
+     + Menu chọn luồng: Hỗ trợ chạy song song 4, 6, 8 (mặc định), 10, 12 luồng
+       cùng lúc để khai thác tối đa pool 20 - 40 API keys.
+     + Nếu tick ô "Tự động chạy AI khi thêm file", hệ thống sẽ bắt đầu chạy ngay
+       từ các file trên cùng của danh sách và cuốn chiếu tuần tự xuống dưới.
+   - Bước 2.3: Nhận diện file lỗi & Quy tắc biên soạn:
+     + Cảnh báo "⚠️ Nghi hủy": Hệ thống tự động phát hiện các file lỗi cần hủy
+       (file lặp từ, phân đoạn vô nghĩa/cắt ngang, sao kê chuyển tiền ngân hàng,
+       danh bạ điện thoại, từ điển bộ thủ, lịch trình...).
+     + Biên soạn đa văn bản: Giữa các đoạn tóm tắt của các văn bản gốc luôn có
+       1 DÒNG TRỐNG (\n\n) để tách biệt rõ ràng. Tuyệt đối KHÔNG có từ nối dẫn
+       dắt ở đầu đoạn ("Trong chia sẻ khác...", "Ở chia sẻ khác...").
+   - Bước 2.4: Kiểm tra và Duyệt:
+     + Bấm vào từng file ở cột "Chờ duyệt" để xem 9 ô chỉ số (Từ gốc, Từ trích
+       chọn, Compress, Từ biên soạn, Tỉ lệ B/T, Edit/Độ bám, ROUGE-2, BARTScore, G-Eval).
+     + Có thể tick/bỏ tick câu bên trái hoặc sửa chữ trực tiếp bên phải.
+     + Bấm "Duyệt & Ghi .docx" -> File chuyển sang cột "Đã duyệt".
+   - Bước 2.5: Xuất file & Dọn dẹp:
+     + Bấm nút "⬇ Tải ZIP hôm nay" ở chân cột Đã duyệt -> Tải về file ZIP chứa
+       toàn bộ các bài hoàn thành, tên file tự đặt theo ngày (ví dụ: 18-11.zip).
+     + Sau khi tải ZIP xong, bấm "🧹 Xóa hết" hoặc "🗑 Xóa danh sách chờ duyệt"
+       để làm sạch danh sách và sẵn sàng cho ca làm việc mới.
+     + Mọi bài duyệt đều tự động lưu vào bộ nhớ tự học "work\learned_memory.json".
 
 3. Khi muốn tắt công cụ:
    - Nhấp đúp chuột vào file:  tat_server.bat  (hoặc đóng cửa sổ đen).
+
+4. Khi muốn cập nhật tính năng mới:
+   - Bấm nút "🔄 Tự cập nhật" trên thanh tiêu đề web (hoặc nhấp đúp cap_nhat.bat).
 ================================================================================

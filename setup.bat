@@ -2,6 +2,7 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
+set "PYTHONPATH=%~dp0src;%PYTHONPATH%"
 
 echo ============================================================================
 echo   CAI DAT TU DONG CONG CU "TOM TAT - BIEN SOAN" (.DOCX)
@@ -81,22 +82,29 @@ if not exist "output" mkdir "output"
 if not exist "work" mkdir "work"
 
 echo.
-echo [4/4] Kiem tra cau hinh khoa GEMINI_API_KEY trong file .env...
-if not exist ".env" (
-    copy /Y ".env.example" ".env" >nul
+echo [4/4] Kiem tra cau hinh khoa Gemini API trong file api_keys.txt...
+if not exist "api_keys.txt" (
+    if exist "api_keys.example.txt" (
+        copy /Y "api_keys.example.txt" "api_keys.txt" >nul
+    ) else (
+        echo # Dan cac API Key vao day (moi dong 1 key, bat dau bang AIzaSy...): > "api_keys.txt"
+    )
 )
 
-findstr /C:"your_gemini_api_key_here" ".env" >nul 2>nul
-if not errorlevel 1 (
+"%~dp0.venv\Scripts\python.exe" -c "from tomtat.config import get_api_keys; import sys; sys.exit(0 if get_api_keys() else 1)" >nul 2>nul
+if errorlevel 1 (
     echo.
     echo ============================================================================
-    echo   BUOC CUOI CUNG: DIEN KHOA GEMINI_API_KEY VAO FILE .env
+    echo   BUOC CUOI CUNG: DAN GEMINI API KEYS VAO FILE api_keys.txt
     echo ============================================================================
-    echo Cua so Notepad se mo file ".env" ngay bay gio.
-    echo Hay thay chu "your_gemini_api_key_here" bang API Key cua ban, bam Ctrl+S luu lai
-    echo roi dong Notepad de hoan tat!
-    notepad ".env"
+    echo Cua so Notepad se mo file "api_keys.txt" ngay bay gio.
+    echo Hay dan cac Gemini API Key cua ban vao day (moi dong 1 key, bat dau bang AIzaSy...).
+    echo Ban co the dan tu 1 key den 20, 30, 40 keys tuy y de chay song song sieu nhanh!
+    echo Bam Ctrl+S de luu lai roi dong Notepad de hoan tat!
+    notepad "%~dp0api_keys.txt"
 )
+
+"%~dp0.venv\Scripts\python.exe" -c "from tomtat.config import get_api_keys; keys = get_api_keys(); print(f'-> Da nhan dien thanh cong: {len(keys)} API keys san sang su dung!')" 2>nul
 
 echo.
 echo ============================================================================

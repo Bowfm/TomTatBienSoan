@@ -36,7 +36,7 @@ if errorlevel 1 (
 echo %DEFAULT_REPO%> ".github_repo_url"
 
 echo.
-echo Dang dong bo code, prompts, config.yaml va bo nho hoc tap ^(khong day .env^)...
+echo Dang dong bo code, prompts, config.yaml va bo nho hoc tap ^(tuyet doi khong day api_keys.txt hay .env^)...
 git add config.yaml .env.example .gitignore .github_repo_url requirements.txt *.bat *.md *.txt prompts src tests docs skill_ref samples
 if exist "work\learned_memory.json" git add -f "work\learned_memory.json"
 

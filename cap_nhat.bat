@@ -34,7 +34,7 @@ if exist ".github_repo_url" (
       "  Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force; " ^
       "  $sub = Get-ChildItem $tmpDir -Directory | Select-Object -First 1; " ^
       "  if ($sub) { " ^
-      "    foreach ($it in @('prompts','src','tests','requirements.txt','setup.bat','tomtat.bat','khoi_dong.bat','tat_server.bat','cap_nhat.bat','README.md','HUONG_DAN_CAI_DAT_NHANH.txt')) { " ^
+      "    foreach ($it in @('prompts','src','tests','requirements.txt','setup.bat','tomtat.bat','khoi_dong.bat','tat_server.bat','cap_nhat.bat','day_cap_nhat.bat','dong_goi_chia_se.bat','api_keys.example.txt','README.md','HUONG_DAN_CAI_DAT_NHANH.txt')) { " ^
       "      $s = Join-Path $sub.FullName $it; " ^
       "      if (Test-Path $s) { Copy-Item -Path $s -Destination (Join-Path '%~dp0' $it) -Recurse -Force } " ^
       "    }; " ^
