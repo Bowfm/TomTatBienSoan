@@ -221,6 +221,12 @@ class GeminiClient(BaseClient):
                         with self._key_lock:
                             self._exhausted.add((cur_key, cur_model))
                         continue
+                    if _status_of(exc) in (401, 403) or "unauthenticated" in err_lower or "not valid" in err_lower:
+                        # Key này lỗi xác thực/sai key -> loại bỏ khỏi danh sách và chuyển ngay sang key khác trong pool
+                        with self._key_lock:
+                            for m in self.models_chain:
+                                self._exhausted.add((cur_key, m))
+                        continue
                     if _status_of(exc) == 404:
                         break
                     if not is_transient(exc):

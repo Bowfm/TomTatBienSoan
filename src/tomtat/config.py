@@ -57,25 +57,11 @@ def _load_dotenv(root: Path) -> None:
 
 
 def get_api_keys() -> list[str]:
-    """Lấy danh sách các API Key từ GEMINI_API_KEY/GEMINI_API_KEYS (tách bằng phẩy/xuống dòng) hoặc api_keys.txt."""
+    """Lấy danh sách các API Key từ api_keys.txt (ưu tiên cao nhất) hoặc GEMINI_API_KEY/GEMINI_API_KEYS."""
     import re
     keys: list[str] = []
 
-    # 1. Từ biến môi trường GEMINI_API_KEYS hoặc GEMINI_API_KEY (hỗ trợ phân tách bằng dấu phẩy, chấm phẩy hoặc xuống dòng)
-    raw = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
-    for part in re.split(r"[,;\n\r]+", raw):
-        k = part.strip()
-        if k and k not in keys:
-            keys.append(k)
-
-    # 2. Hoặc từ các biến GEMINI_API_KEY_1, GEMINI_API_KEY_2...
-    for k_env, val in sorted(os.environ.items()):
-        if k_env.startswith("GEMINI_API_KEY_") and val.strip():
-            k = val.strip()
-            if k not in keys:
-                keys.append(k)
-
-    # 3. Hoặc từ file api_keys.txt nếu có trong thư mục gốc
+    # 1. Ưu tiên từ file api_keys.txt nếu có trong thư mục gốc
     kf = PROJECT_ROOT / "api_keys.txt"
     if kf.exists():
         try:
@@ -85,6 +71,20 @@ def get_api_keys() -> list[str]:
                     keys.append(line)
         except Exception:
             pass
+
+    # 2. Nếu chưa có từ api_keys.txt, lấy từ biến môi trường GEMINI_API_KEYS hoặc GEMINI_API_KEY
+    if not keys:
+        raw = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
+        for part in re.split(r"[,;\n\r]+", raw):
+            k = part.strip()
+            if k and k not in keys:
+                keys.append(k)
+
+        for k_env, val in sorted(os.environ.items()):
+            if k_env.startswith("GEMINI_API_KEY_") and val.strip():
+                k = val.strip()
+                if k not in keys:
+                    keys.append(k)
 
     return keys
 
