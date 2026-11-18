@@ -16,11 +16,9 @@ gemini:
   model: gemini-4-hydrogen        # Cấp 1 (Chất lượng cao nhất Free Tier): Gemini 4 Hydrogen (20 RPD, 5 RPM)
   fallback_models:                # Tự động trượt xuống model dưới khi chạm hạn mức ngày hoặc bận:
     - gemini-3.8-flash            # Cấp 2: Gemini 3.8 Flash (20 RPD, 5 RPM)
-    - gemini-3.7-flash            # Cấp 3: Gemini 3.7 Flash (20 RPD, 5 RPM)
-    - gemini-3.6-flash            # Cấp 4: Gemini 3.6 Flash (20 RPD, 5 RPM)
-    - gemini-3.5-flash            # Cấp 5: Gemini 3.5 Flash (20 RPD, 5 RPM)
-    - gemini-3.5-flash-lite       # Cấp 6 (Chủ lực cày số lượng): Gemini 3.5 Flash Lite (500 RPD, 15 RPM)
-    - gemini-3.1-flash-lite       # Cấp 7 (Dự phòng số lượng): Gemini 3.1 Flash Lite (500 RPD, 15 RPM)
+    - gemini-3.6-flash            # Cấp 3: Gemini 3.6 Flash (20 RPD, 5 RPM)
+    - gemini-3.5-flash-lite       # Cấp 4 (Chủ lực cày số lượng): Gemini 3.5 Flash Lite (500 RPD, 15 RPM)
+    - gemini-3.1-flash-lite       # Cấp 5 (Dự phòng số lượng): Gemini 3.1 Flash Lite (500 RPD, 15 RPM)
   timeout_s: 90                   # timeout mỗi lượt gọi (giây)
   max_retries: 2
   backoff_base_s: 2
