@@ -129,6 +129,39 @@ class GeminiClient(BaseClient):
         self.backoff_base = float(g.get("backoff_base_s", 2))
         self.backoff_max = float(g.get("backoff_max_s", 15))
 
+        # File lưu danh sách (key, model) đã cạn quota trong ngày để không gọi lại sau khi restart
+        work_path = cfg.work_dir if hasattr(cfg, "work_dir") else Path(cfg.get("paths", {}).get("work", "work"))
+        self._exhausted_file = Path(work_path) / "quota_exhausted.json"
+        self._load_exhausted()
+
+    def _load_exhausted(self) -> None:
+        if not self._exhausted_file.exists():
+            return
+        try:
+            data = json.loads(self._exhausted_file.read_text(encoding="utf-8"))
+            today = datetime.now().strftime("%Y-%m-%d")
+            if data.get("date") == today:
+                for item in data.get("exhausted", []):
+                    k = item.get("key")
+                    m = item.get("model")
+                    if k in self._clients and m:
+                        self._exhausted.add((k, m))
+        except Exception:
+            pass
+
+    def _mark_exhausted(self, key: str, model: str) -> None:
+        with self._key_lock:
+            self._exhausted.add((key, model))
+            try:
+                today = datetime.now().strftime("%Y-%m-%d")
+                items = [{"key": k, "model": m} for (k, m) in self._exhausted]
+                self._exhausted_file.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._exhausted_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"date": today, "exhausted": items}, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(tmp, self._exhausted_file)
+            except Exception:
+                pass
+
     def _next_key_client(self) -> tuple[str, any]:
         with self._key_lock:
             k = self._api_keys[self._key_index % len(self._api_keys)]
@@ -227,14 +260,12 @@ class GeminiClient(BaseClient):
                     )
                     if is_quota_exhausted:
                         # Key này đã cạn quota của cur_model -> đánh dấu để chuyển sang key khác trong pool
-                        with self._key_lock:
-                            self._exhausted.add((cur_key, cur_model))
+                        self._mark_exhausted(cur_key, cur_model)
                         continue
                     if _status_of(exc) in (401, 403) or "unauthenticated" in err_lower or "not valid" in err_lower:
                         # Key này lỗi xác thực/sai key -> loại bỏ khỏi danh sách và chuyển ngay sang key khác trong pool
-                        with self._key_lock:
-                            for m in self.models_chain:
-                                self._exhausted.add((cur_key, m))
+                        for m in self.models_chain:
+                            self._mark_exhausted(cur_key, m)
                         continue
                     if _status_of(exc) == 404:
                         break
