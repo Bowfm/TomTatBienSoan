@@ -781,25 +781,13 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
 
     @app.post("/api/self-update")
     def api_self_update():
-        """Kéo bản cập nhật code/prompt mới nhất từ GitHub (qua cap_nhat.bat)."""
-        import subprocess
+        """Kéo bản cập nhật code/prompt mới nhất từ GitHub."""
+        from ..updater import run_update
 
-        bat = cfg.root / "cap_nhat.bat"
-        if not bat.exists():
-            return jsonify({"error": "Không tìm thấy file cap_nhat.bat."}), 400
-        proc = subprocess.run(
-            ["cmd", "/c", str(bat)],
-            cwd=str(cfg.root),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=45,
-        )
-        out_txt = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        ok, msg = run_update(cfg.root)
         return jsonify({
-            "ok": proc.returncode == 0,
-            "output": out_txt.strip(),
+            "ok": ok,
+            "output": msg.strip(),
         })
 
     return app
