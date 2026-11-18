@@ -153,6 +153,9 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
                 continue
             processed_stems.append(dst.stem)
 
+        # Luôn sắp xếp thứ tự danh sách file theo thứ tự chuẩn từ trên xuống dưới
+        processed_stems.sort()
+
         if run_now and processed_stems:
             try:
                 client = _make_client(cfg, force_mock=use_mock)
@@ -167,7 +170,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         write_reports(cfg)
         return jsonify({
             "ok": True,
-            "added": [p.name for p in saved_paths],
+            "added": sorted([p.name for p in saved_paths]),
             "stems": processed_stems,
             "skipped_existing": skipped_existing,
             "errors": errors,

@@ -883,7 +883,13 @@ async function uploadFiles(fileList, overwrite = false) {
 
     // Bước 2: Nếu có tick "Tự động chạy AI ngay khi thêm file", chạy cuốn chiếu từng file vừa thêm
     if (runNow && data.stems && data.stems.length > 0) {
-      await runQueueOnStems(data.stems, useMock);
+      // Đảm bảo chạy đúng thứ tự từ trên xuống dưới theo danh sách hiển thị
+      const addedSet = new Set(data.stems);
+      const orderedStems = pendingFiles()
+        .map((r) => r.file.replace(/\.docx$/i, ""))
+        .filter((s) => addedSet.has(s));
+      const stemsToRun = orderedStems.length ? orderedStems : [...data.stems].sort();
+      await runQueueOnStems(stemsToRun, useMock);
     } else if (data.errors && data.errors.length > 0) {
       showToast(`Đã thêm (${data.added.length} file), có lưu ý: ${data.errors[0]}`, true);
     } else {
@@ -917,13 +923,15 @@ async function runQueueOnStems(stems, useMock) {
   let doneCount = 0;
   let errCount = 0;
   let startedCount = 0;
-  const concurrency = 4; // Chạy song song 4 file cùng lúc trên Paid Tier 1 (1.000 RPM)
+  // Chạy tuần tự 1 worker duy nhất theo đúng thứ tự từ trên xuống dưới, không chạy song song nhảy cóc/random
+  const concurrency = 1;
   let nextIdx = 0;
 
   const updateProgressBanner = () => {
     const activeList = Array.from(RUNNING_STEMS).map((s) => `${s}.docx`).join(", ");
+    const currentNum = Math.min(doneCount + errCount + 1, stems.length);
     setBatchProgress(
-      `⏳ Đang chạy song song (${doneCount + errCount}/${stems.length} xong) — Đang xử lý: ${activeList || "..."}`
+      `⏳ Đang xử lý file ${currentNum}/${stems.length}: ${activeList || "..."}`
     );
   };
 
@@ -977,7 +985,7 @@ async function runQueueOnStems(stems, useMock) {
 async function runPendingFiles() {
   const useMock = $("chk-mock") ? $("chk-mock").checked : false;
   await loadFileList(true);
-  const todo = FILES
+  const todo = pendingFiles()
     .filter((r) => r.status === "chua_xu_ly" || r.status === "loi" || r.status === "can_xu_ly_tay")
     .map((r) => r.file.replace(/\.docx$/i, ""));
   if (!todo.length) {
