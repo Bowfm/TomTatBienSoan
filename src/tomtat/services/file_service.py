@@ -92,6 +92,27 @@ class FileService:
             restart=restart,
         )
 
+    async def process_async(
+        self,
+        docx_path: Path,
+        client,
+        force: bool = False,
+        only_step: str | None = None,
+        user_note: str = "",
+        ignore_mismatch: bool = False,
+        restart: bool = False,
+    ) -> dict:
+        """Chạy pipeline AI bất đồng bộ (asyncio) cho một file docx."""
+        pipeline = Pipeline(self.cfg, client)
+        return await pipeline.process_async(
+            docx_path,
+            force=force,
+            only_step=only_step,
+            user_note=user_note,
+            ignore_mismatch=ignore_mismatch,
+            restart=restart,
+        )
+
     def save_draft(
         self,
         stem: str,

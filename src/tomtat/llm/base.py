@@ -118,6 +118,53 @@ class BaseClient:
                       context: dict | None = None) -> LLMResult:
         raise NotImplementedError
 
+    async def generate_json_async(
+        self,
+        step: str,
+        system: str,
+        prompt: str,
+        schema: dict,
+        *,
+        log_dir: Path | None = None,
+        attempt: int = 0,
+        context: dict | None = None,
+    ) -> LLMResult:
+        """Gọi model bất đồng bộ (asyncio) không chặn event loop."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.generate_json,
+            step=step,
+            system=system,
+            prompt=prompt,
+            schema=schema,
+            log_dir=log_dir,
+            attempt=attempt,
+            context=context,
+        )
+
+    async def generate_json_batch_async(self, calls: list[dict], max_concurrency: int = 4) -> list[LLMResult]:
+        """Gọi model bất đồng bộ hàng loạt bằng asyncio.gather + asyncio.Semaphore."""
+        import asyncio
+
+        if not calls:
+            return []
+        sem = asyncio.Semaphore(max(1, max_concurrency))
+
+        async def _run_one(c: dict) -> LLMResult:
+            async with sem:
+                return await self.generate_json_async(
+                    step=c["step"],
+                    system=c["system"],
+                    prompt=c["prompt"],
+                    schema=c["schema"],
+                    log_dir=c.get("log_dir"),
+                    attempt=c.get("attempt", 0),
+                    context=c.get("context"),
+                )
+
+        return list(await asyncio.gather(*(_run_one(c) for c in calls)))
+
     def generate_json_batch(self, calls: list[dict], max_workers: int = 4) -> list[LLMResult]:
         """Gọi model đồng thời cho nhiều yêu cầu bằng ThreadPoolExecutor."""
         from concurrent.futures import ThreadPoolExecutor

@@ -496,6 +496,50 @@ class Pipeline:
             renderer=self.renderer,
         )
 
+    async def process_async(
+        self,
+        docx_path: str | Path,
+        *,
+        force: bool = False,
+        only_step: str | None = None,
+        user_note: str = "",
+        ignore_mismatch: bool = False,
+        restart: bool = False,
+    ) -> dict:
+        """Xử lý bất đồng bộ (asyncio) một file .docx qua pipeline."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.process,
+            docx_path,
+            force=force,
+            only_step=only_step,
+            user_note=user_note,
+            ignore_mismatch=ignore_mismatch,
+            restart=restart,
+        )
+
+    async def process_batch_async(
+        self,
+        docx_paths: list[str | Path],
+        *,
+        max_concurrency: int = 4,
+        force: bool = False,
+        only_step: str | None = None,
+    ) -> list[dict]:
+        """Xử lý bất đồng bộ nhiều file .docx song song với giới hạn concurrency."""
+        import asyncio
+
+        if not docx_paths:
+            return []
+        sem = asyncio.Semaphore(max(1, max_concurrency))
+
+        async def _one(p: str | Path) -> dict:
+            async with sem:
+                return await self.process_async(p, force=force, only_step=only_step)
+
+        return list(await asyncio.gather(*(_one(p) for p in docx_paths)))
+
 
 def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
                  force: bool = False, only_step: str | None = None,

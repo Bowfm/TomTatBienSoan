@@ -194,3 +194,65 @@ def test_phase2_and_3_architecture_refactor(tmp_path):
     batch_res = client.generate_json_batch(calls, max_workers=2)
     assert len(batch_res) == 1
     assert batch_res[0].model == "mock"
+
+
+def test_phase4_es_modules_and_async_io(tmp_path):
+    """Kiểm thử Phase 4: ES modules frontend và Async I/O (asyncio) trong LLM / Pipeline / FileService."""
+    import asyncio
+    from tomtat.llm import MockClient
+    from tomtat.pipeline import Pipeline
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+
+    # 1. Kiểm tra index.html nạp app.js dưới dạng ES module và tất cả submodules đều truy cập được
+    app = create_app(cfg, mock=True)
+    tc = app.test_client()
+    r_idx = tc.get("/")
+    assert r_idx.status_code == 200
+    assert 'type="module" src="/static/app.js"' in r_idx.get_data(as_text=True)
+
+    for mod_name in ("state.js", "utils.js", "sidebar.js", "editor.js", "batch.js", "modals.js"):
+        r_mod = tc.get(f"/static/modules/{mod_name}")
+        assert r_mod.status_code == 200, f"Không tải được ES module {mod_name}"
+        assert "export " in r_mod.get_data(as_text=True)
+
+    # 2. Kiểm tra Async I/O: generate_json_async, generate_json_batch_async, Pipeline.process_batch_async
+    sample = cfg.root / "samples" / "M54629.docx"
+    inp = tmp_path / "input" / "M54629.docx"
+    inp.parent.mkdir(parents=True, exist_ok=True)
+    inp.write_bytes(sample.read_bytes())
+
+    client = MockClient(cfg)
+    call_spec = {
+        "step": "label",
+        "system": "sys",
+        "prompt": "prompt",
+        "schema": {},
+        "context": {"data": {"docs": [{"n": 1, "units": [{"text": "Điều 1.", "words": 2}], "words": 2}]}},
+    }
+
+    async def _run_async_suite():
+        single = await client.generate_json_async(**call_spec)
+        assert single.model == "mock"
+
+        batch = await client.generate_json_batch_async([call_spec, call_spec], max_concurrency=2)
+        assert len(batch) == 2
+
+        pipeline = Pipeline(cfg, client)
+        pipe_res = await pipeline.process_batch_async([inp], max_concurrency=2, force=True)
+        assert len(pipe_res) == 1
+        assert pipe_res[0]["state"]["label"]["value"] != ""
+
+        svc = FileService(cfg)
+        svc_res = await svc.process_async(inp, client, only_step="inspect")
+        assert svc_res["state"]["file"] == "M54629.docx"
+
+    asyncio.run(_run_async_suite())
+
