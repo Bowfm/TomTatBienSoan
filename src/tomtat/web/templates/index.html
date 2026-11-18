@@ -34,10 +34,21 @@
           <button id="btn-stop-batch" class="btn hidden" style="color:#b91c1c;border-color:#fca5a5">⏹ Dừng</button>
         </div>
         <div id="batch-progress" class="batch-progress hidden"></div>
-        <label class="chk-inline upload-opt">
-          <input type="checkbox" id="chk-run-on-upload" checked>
-          Tự động chạy AI ngay khi thêm file
-        </label>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
+          <label class="chk-inline upload-opt" style="margin:0">
+            <input type="checkbox" id="chk-run-on-upload" checked>
+            Tự động chạy AI khi thêm file
+          </label>
+          <label class="chk-inline" title="Số file chạy song song cùng lúc (tận dụng 29 API keys)" style="font-size:12px;color:var(--muted);gap:4px">
+            Luồng:
+            <select id="sel-concurrency" style="padding:1px 4px;font-size:12px;border-radius:4px;border:1px solid #cbd5e1;cursor:pointer">
+              <option value="4">4 luồng</option>
+              <option value="6" selected>6 luồng</option>
+              <option value="8">8 luồng</option>
+              <option value="10">10 luồng</option>
+            </select>
+          </label>
+        </div>
         <div class="counts-summary">
           <span>Tổng: <strong id="cnt-total">0</strong></span>
           <span>· Chờ duyệt: <strong id="cnt-pending">0</strong></span>

@@ -845,6 +845,8 @@ async function uploadFiles(fileList, overwrite = false) {
   // Sao chép FileList sang mảng tĩnh ngay lập tức để không bị mất khi xóa input.value
   const filesArr = Array.from(fileList || []);
   if (!filesArr.length) return;
+  // Sắp xếp tự nhiên tên file ngay trước khi nạp để đảm bảo đúng thứ tự M1, M2... từ trên xuống
+  filesArr.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" }));
   $("file-upload-input").value = "";
 
   const runNow = $("chk-run-on-upload") ? $("chk-run-on-upload").checked : false;
@@ -888,7 +890,9 @@ async function uploadFiles(fileList, overwrite = false) {
       const orderedStems = pendingFiles()
         .map((r) => r.file.replace(/\.docx$/i, ""))
         .filter((s) => addedSet.has(s));
-      const stemsToRun = orderedStems.length ? orderedStems : [...data.stems].sort();
+      const stemsToRun = orderedStems.length
+        ? orderedStems
+        : [...data.stems].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
       await runQueueOnStems(stemsToRun, useMock);
     } else if (data.errors && data.errors.length > 0) {
       showToast(`Đã thêm (${data.added.length} file), có lưu ý: ${data.errors[0]}`, true);
@@ -923,15 +927,15 @@ async function runQueueOnStems(stems, useMock) {
   let doneCount = 0;
   let errCount = 0;
   let startedCount = 0;
-  // Chạy tuần tự 1 worker duy nhất theo đúng thứ tự từ trên xuống dưới, không chạy song song nhảy cóc/random
-  const concurrency = 1;
+  // Lấy số luồng song song từ selectbox (mặc định 6 luồng để khai thác tối đa 29 API keys)
+  const concurrencyVal = $("sel-concurrency") ? Number($("sel-concurrency").value) || 6 : 6;
+  const concurrency = Math.min(concurrencyVal, stems.length);
   let nextIdx = 0;
 
   const updateProgressBanner = () => {
     const activeList = Array.from(RUNNING_STEMS).map((s) => `${s}.docx`).join(", ");
-    const currentNum = Math.min(doneCount + errCount + 1, stems.length);
     setBatchProgress(
-      `⏳ Đang xử lý file ${currentNum}/${stems.length}: ${activeList || "..."}`
+      `⏳ Đang chạy song song ${RUNNING_STEMS.size} luồng (${doneCount + errCount}/${stems.length} xong) — Đang xử lý: ${activeList || "..."}`
     );
   };
 

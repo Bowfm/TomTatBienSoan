@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+import re
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -72,7 +73,10 @@ def collect_rows(cfg: dict, files: list[Path] | None = None) -> list[dict]:
                 src = Path(st_tmp.get("source_path") or (d / f"{d.name}.docx"))
                 known[d.name] = src
     rows = []
-    for stem in sorted(known):
+    def _natural_key(s: str) -> list[int | str]:
+        return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(s))]
+
+    for stem in sorted(known, key=_natural_key):
         docx_path = known[stem]
         ws = FileWorkspace(cfg.work_dir, docx_path)
         st = ws.load_state()

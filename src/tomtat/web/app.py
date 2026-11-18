@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 import io
 from pathlib import Path
+import re
 import shutil
 import zipfile
 
@@ -110,6 +111,9 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         run_now = request.form.get("run_now", "false").lower() in ("1", "true", "yes", "on")
         use_mock = request.form.get("mock", "false").lower() in ("1", "true", "yes", "on") or mock
         overwrite = request.form.get("overwrite", "false").lower() in ("1", "true", "yes", "on")
+
+        # Sắp xếp danh sách file nạp theo thứ tự tự nhiên (M1, M2... M50401, M50581) ngay từ đầu
+        uploaded.sort(key=lambda f: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(getattr(f, "filename", "") or ""))])
 
         cfg.input_dir.mkdir(parents=True, exist_ok=True)
         saved_paths: list[Path] = []
