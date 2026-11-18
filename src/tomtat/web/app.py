@@ -25,7 +25,7 @@ from ..state import (
     STATUS_DRAFT,
     STATUS_EXPORTED,
     STATUS_MANUAL,
-    STATUS_PARTIAL,
+    STATUS_PENDING,
     STATUS_VI,
     FileWorkspace,
     discover_docx_files,
@@ -516,7 +516,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         chk = run_checks(units_data, style, extract, abstract, cfg)
         st["checks"] = chk.to_dict()
         if st["status"] not in (STATUS_APPROVED, STATUS_EXPORTED):
-            st["status"] = STATUS_DRAFT if chk.ok else STATUS_PARTIAL
+            st["status"] = STATUS_DRAFT if chk.ok else STATUS_PENDING
         ver = ws.save_draft_version(st, source="user", note=note or "Lưu nháp thủ công")
         ws.save_state(st)
         write_reports(cfg)

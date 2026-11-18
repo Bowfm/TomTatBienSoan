@@ -7,21 +7,21 @@ from datetime import datetime
 from pathlib import Path
 
 STATUS_PENDING = "chua_xu_ly"
-STATUS_PARTIAL = "dang_lam_do"
+STATUS_PARTIAL = "chua_xu_ly"  # Alias tương thích ngược
 STATUS_DRAFT = "da_co_nhap"
-STATUS_MANUAL = "dang_lam_do"  # Alias tương thích
+STATUS_MANUAL = "chua_xu_ly"   # Alias tương thích ngược
 STATUS_APPROVED = "da_duyet"
 STATUS_EXPORTED = "da_xuat"
 STATUS_ERROR = "loi"
 
 STATUS_VI = {
     STATUS_PENDING: "chưa xử lý",
-    STATUS_PARTIAL: "đang làm dở",
     STATUS_DRAFT: "đã có nháp",
     STATUS_APPROVED: "đã duyệt",
     STATUS_EXPORTED: "đã xuất",
     STATUS_ERROR: "lỗi",
-    "can_xu_ly_tay": "đang làm dở",  # Tương thích file cũ trên ổ đĩa
+    "dang_lam_do": "chưa xử lý",      # Tương thích file cũ trên ổ đĩa
+    "can_xu_ly_tay": "chưa xử lý",    # Tương thích file cũ trên ổ đĩa
 }
 
 DONE_STATUSES = {STATUS_DRAFT, STATUS_APPROVED, STATUS_EXPORTED}

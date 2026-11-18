@@ -148,8 +148,8 @@ def step_label(ws: FileWorkspace, units_data: dict, client: BaseClient,
         "model_used": res.model,
     }
     st["model_used"] = res.model
-    if st.get("status") not in (STATUS_DRAFT, "da_duyet", "da_xuat"):
-        st["status"] = STATUS_PARTIAL
+    if st.get("status") not in DONE_STATUSES:
+        st["status"] = STATUS_PENDING
     _clear_stale(st, "label")
     ws.save_state(st)
 
@@ -260,8 +260,8 @@ def step_extract(ws: FileWorkspace, units_data: dict, client: BaseClient,
 
     st["extract"] = best or candidate
     st["model_used"] = (st["extract"] or {}).get("model_used") or st.get("model_used", "")
-    if st.get("status") not in (STATUS_DRAFT, "da_duyet", "da_xuat"):
-        st["status"] = STATUS_PARTIAL
+    if st.get("status") not in DONE_STATUSES:
+        st["status"] = STATUS_PENDING
     _clear_stale(st, "extract")
     ws.save_state(st)
 
@@ -444,8 +444,8 @@ def finalize_status(units_data: dict, st: dict, cfg: dict,
         and cfg.get("layout", {}).get("on_mismatch", "stop") == "stop"
         and not ignore_mismatch
     )
-    if not chk.ok or mismatch_stop or not st.get("abstract", {}).get("text"):
-        st["status"] = STATUS_PARTIAL
+    if not chk.ok or mismatch_stop or not (st.get("abstract") or {}).get("text"):
+        st["status"] = STATUS_PENDING
     else:
         st["status"] = STATUS_DRAFT
     return st
@@ -494,7 +494,7 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
             elif only_step == "judge":
                 step_judge(ws, units_data, client, renderer, cfg, st)
             _mark_stale_after(st, only_step)
-            if st["extract"]["text"] and st["abstract"]["text"]:
+            if (st.get("extract") or {}).get("text") and (st.get("abstract") or {}).get("text"):
                 finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch)
             ws.save_draft_version(st, source=f"ai:{only_step}", note=user_note)
             ws.save_state(st)
@@ -520,32 +520,47 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
             and cfg.get("layout", {}).get("on_mismatch", "stop") == "stop"
             and not ignore_mismatch
         ):
-            st["status"] = STATUS_PARTIAL
+            st["status"] = STATUS_PENDING
             ws.save_state(st)
             return {"skipped": False, "state": st}
 
         # Bước 1: Gán nhãn phong cách chức năng (label)
-        has_valid_label = bool((st.get("label") or {}).get("value") in STYLES)
+        has_valid_label = bool(
+            (st.get("label") or {}).get("value") in STYLES
+            and (st.get("label") or {}).get("confidence")
+        )
         if restart or not has_valid_label or (user_note and "nhãn" in user_note.lower()):
+            st["label"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
             step_label(ws, units_data, client, renderer, cfg, st, user_note=user_note)
-            has_valid_label = bool((st.get("label") or {}).get("value") in STYLES)
+            has_valid_label = bool(
+                (st.get("label") or {}).get("value") in STYLES
+                and (st.get("label") or {}).get("confidence")
+            )
 
         # Bước 2: Trích chọn câu (extract)
+        # 100% hoàn thành nghĩa là: có text, selections hợp lệ, words > 0, và không có lỗi error
         prev_ext_text = (st.get("extract") or {}).get("text", "")
+        prev_ext_sels = (st.get("extract") or {}).get("selections") or {}
+        prev_ext_words = (st.get("extract") or {}).get("words", 0)
         has_valid_extract = False
-        if prev_ext_text and has_valid_label:
+        if prev_ext_text and prev_ext_sels and prev_ext_words > 0 and has_valid_label:
             chk_prev = run_checks(units_data, st["label"]["value"], prev_ext_text, "ok.", cfg)
             has_valid_extract = len(chk_prev.of(level="error", target="extract")) == 0
 
         if restart or not has_valid_extract or (user_note and "trích" in user_note.lower()):
+            st["extract"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
             step_extract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
             prev_ext_text = (st.get("extract") or {}).get("text", "")
-            has_valid_extract = bool(prev_ext_text)
+            prev_ext_sels = (st.get("extract") or {}).get("selections") or {}
+            prev_ext_words = (st.get("extract") or {}).get("words", 0)
+            has_valid_extract = bool(prev_ext_text and prev_ext_sels and prev_ext_words > 0)
 
         # Bước 3: Biên soạn tóm tắt (abstract)
+        # 100% hoàn thành nghĩa là: có text, words > 0, và chk_abs.ok
         prev_abs_text = (st.get("abstract") or {}).get("text", "")
+        prev_abs_words = (st.get("abstract") or {}).get("words", 0)
         has_valid_abstract = False
-        if prev_abs_text and has_valid_label and has_valid_extract:
+        if prev_abs_text and prev_abs_words > 0 and has_valid_label and has_valid_extract:
             chk_abs = run_checks(units_data, st["label"]["value"], st["extract"]["text"], prev_abs_text, cfg)
             has_valid_abstract = chk_abs.ok
             if not has_valid_abstract:
@@ -559,6 +574,7 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
             else:
                 st["checks"] = chk_abs.to_dict()
         else:
+            st["abstract"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
             step_abstract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
 
         # Bước 4: Tự chấm G-Eval (nếu được bật và chưa có điểm)
@@ -573,7 +589,7 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
         ws.save_state(st)
         return {"skipped": False, "state": st}
     except (DocxError, LLMError) as exc:
-        st["status"] = STATUS_PARTIAL if isinstance(exc, DocxError) else STATUS_ERROR
+        st["status"] = STATUS_PENDING if isinstance(exc, DocxError) else STATUS_ERROR
         st["error_message"] = str(exc)
         _add_flag(st, str(exc))
         ws.save_state(st)

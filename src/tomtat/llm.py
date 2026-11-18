@@ -184,6 +184,7 @@ class GeminiClient(BaseClient):
         for model_idx, cur_model in enumerate(self.models_chain):
             # Với mỗi model: tận dụng tối đa các key còn hạn mức trong pool
             tries_left = max(len(self._api_keys) * 2, self.max_retries + 1)
+            model_503_count = 0
             while tries_left > 0:
                 tries_left -= 1
                 cur_key, cur_client = self._get_available_key_client(cur_model)
@@ -216,8 +217,16 @@ class GeminiClient(BaseClient):
                     write_log(log_dir, record, self._api_keys)
                     last_exc = exc
                     err_lower = err_str.lower()
-                    if "per day" in err_lower or "perday" in err_lower or "limit: 0" in err_str:
-                        # Key này đã cạn quota ngày của cur_model -> đánh dấu để chuyển sang key khác trong pool
+                    is_quota_exhausted = (
+                        "per day" in err_lower
+                        or "perday" in err_lower
+                        or "limit: 0" in err_str
+                        or "exceeded a quota" in err_lower
+                        or "quota exceeded" in err_lower
+                        or "resource has been exhausted" in err_lower
+                    )
+                    if is_quota_exhausted:
+                        # Key này đã cạn quota của cur_model -> đánh dấu để chuyển sang key khác trong pool
                         with self._key_lock:
                             self._exhausted.add((cur_key, cur_model))
                         continue
@@ -229,8 +238,16 @@ class GeminiClient(BaseClient):
                         continue
                     if _status_of(exc) == 404:
                         break
+                    if _status_of(exc) in (502, 503) and ("high demand" in err_lower or "service_unavailable" in err_lower):
+                        model_503_count += 1
+                        if model_503_count >= 3:
+                            # Model đang quá tải diện rộng -> chuyển ngay sang model tiếp theo trong chain
+                            break
                     if not is_transient(exc):
                         break
+                    if _status_of(exc) == 429:
+                        # 429 tạm thời (RPM) -> chuyển ngay sang key khác trong pool không cần chờ
+                        continue
                     time.sleep(min(self.backoff_max, self.backoff_base))
         msg = _redact(f"{type(last_exc).__name__}: {last_exc}", self._api_keys)
         st = _status_of(last_exc) if last_exc else None

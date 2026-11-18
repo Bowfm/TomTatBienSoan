@@ -581,4 +581,45 @@ def test_process_file_resume_partial(tmp_path):
     assert st2["status"] == "da_co_nhap"
 
 
+def test_incomplete_step_discarded_and_rerun(tmp_path):
+    """Kiểm tra: nếu một bước mới làm dở (30%-50% hoặc lỗi), bước đó bị coi là chưa làm gì và làm lại từ đầu."""
+    from tomtat.config import load_config
+    from tomtat.llm import MockClient
+    from tomtat.pipeline import process_file
+    from tomtat.state import FileWorkspace
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    sample = cfg.root / "samples" / "M54629.docx"
+    inp = tmp_path / "input" / "M54629.docx"
+    inp.parent.mkdir(parents=True, exist_ok=True)
+    inp.write_bytes(sample.read_bytes())
+
+    client = MockClient(cfg)
+    ws = FileWorkspace(cfg.work_dir, inp)
+
+    # 1. Giả lập: label đã hoàn thành 100%, nhưng extract mới làm dở (selections rỗng, words=0)
+    process_file(inp, cfg, client, only_step="label")
+    st = ws.load_state()
+    assert st["label"]["value"]
+    # Cố tình giả lập extract bị dở dang/bỏ dở
+    st["extract"] = {"text": "doan van do dang...", "selections": {}, "words": 0}
+    ws.save_state(st)
+
+    # 2. Chạy tiếp process_file: extract dở dang phải bị xóa và chạy lại 100% từ đầu
+    out = process_file(inp, cfg, client, force=True, restart=False)
+    st_res = out["state"]
+    assert st_res["extract"]["words"] > 0
+    assert len(st_res["extract"]["selections"]) > 0
+    assert st_res["abstract"]["text"]
+    assert st_res["status"] == "da_co_nhap"
+
+
+
 
