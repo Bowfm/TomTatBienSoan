@@ -42,8 +42,9 @@ async function loadFileList(keepCurrent = true) {
     badge.textContent = data.has_api_key ? "Chế độ giả lập (--mock)" : "Chưa có GEMINI_API_KEY (dùng --mock)";
   } else {
     const fb = (data.fallback_models || []).slice(0, 2).join(" → ");
+    const keysCount = data.api_key_count ? ` · 🔑 ${data.api_key_count} keys` : "";
     const learned = data.learned_count ? ` · 🧠 Đã học: ${data.learned_count} bài duyệt` : "";
-    badge.textContent = `Model chính: ${data.primary_model || "gemini-4-hydrogen"}${fb ? ` (dự phòng: ${fb}...)` : ""}${learned}`;
+    badge.textContent = `Model chính: ${data.primary_model || "gemini-4-hydrogen"}${fb ? ` (dự phòng: ${fb}...)` : ""}${keysCount}${learned}`;
     badge.style.background = "#1d4ed8";
     badge.style.color = "#ffffff";
   }

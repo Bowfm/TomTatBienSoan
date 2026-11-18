@@ -10,3 +10,5 @@ input/*.docx
 !input/.gitkeep
 !output/.gitkeep
 !work/.gitkeep
+*.zip
+
