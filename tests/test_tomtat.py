@@ -351,10 +351,10 @@ def test_check_suspicious_document():
     data_bank = {
         "docs": [{
             "units": [
-                {"text": "Ngân hàng Vietcombank thông báo giao dịch thành công.", "words": 8},
-                {"text": "Số tài khoản người thụ hưởng 0123456789.", "words": 6},
-                {"text": "Nội dung chuyển khoản thanh toán tiền hàng.", "words": 7},
-                {"text": "Mã giao dịch FT12345678.", "words": 4},
+                {"text": "Ngân hàng Vietcombank thông báo chuyển khoản thành công.", "words": 8},
+                {"text": "Số tài khoản: 0123456789.", "words": 4},
+                {"text": "Số tiền: 500.000 VND.", "words": 4},
+                {"text": "Mã giao dịch: FT12345678.", "words": 4},
                 {"text": "Số dư biến động tăng.", "words": 5},
                 {"text": "Cảm ơn quý khách đã sử dụng dịch vụ.", "words": 8},
             ]
@@ -378,20 +378,46 @@ def test_check_suspicious_document():
     # 4. File cách đoạn vô nghĩa (cắt vụn < 2.5 từ/đoạn)
     data_fragmented = {
         "docs": [{
-            "units": [
-                {"text": "Đoạn một", "words": 2},
-                {"text": "Đoạn hai", "words": 2},
-                {"text": "Đoạn ba", "words": 2},
-                {"text": "Đoạn bốn", "words": 2},
-                {"text": "Đoạn năm", "words": 2},
-                {"text": "Đoạn sáu", "words": 2},
-            ]
+            "units": [{"text": f"Đoạn {i}", "words": 2} for i in range(1, 10)]
         }]
     }
     reasons = check_suspicious_document(data_fragmented)
     assert any("cắt vụn quá mức" in r for r in reasons)
 
-    # 5. File bình thường hợp lệ -> không có cảnh báo
+    # 5. File URL dump (danh sách link facebook)
+    data_urls = {
+        "docs": [{
+            "units": [
+                {"text": f"Đề thi {i} môn Văn https://facebook.com/post/{i}", "words": 7}
+                for i in range(1, 8)
+            ]
+        }]
+    }
+    assert any("URL liên kết" in r for r in check_suspicious_document(data_urls))
+
+    # 6. File danh bạ địa chỉ quán xá (nhiều dấu chấm phẩy)
+    data_addresses = {
+        "docs": [{
+            "units": [
+                {"text": "Quán A-123 Đường B; Quán C-456 Đường D; " * 15, "words": 60}
+            ]
+        }]
+    }
+    assert any("địa chỉ quán xá" in r for r in check_suspicious_document(data_addresses))
+
+    # 7. File trading tài chính bình thường (như M54341 có từ ngân hàng, giao dịch thành công) -> KHÔNG ĐƯỢC BÁO LỖI
+    data_trading = {
+        "docs": [{
+            "units": [
+                {"text": "Hầu hết các trader không giao dịch với áp lực kiểu như thế, phần lớn các trader huyền thoại là nhà quản lý tiền tệ hoặc làm việc cho các ngân hàng hoặc quỹ đầu tư.", "words": 34},
+                {"text": "Bạn cần phải có một lịch sử giao dịch đủ dài để biết liệu bạn có thể giao dịch thành công hay không trước khi thực hiện các bước nhảy vọt tiếp theo.", "words": 31},
+                {"text": "Hãy chuẩn bị tâm lý thật vững vàng và kỷ luật quản lý vốn khi bước vào thị trường tài chính đầy thử thách.", "words": 23},
+            ]
+        }]
+    }
+    assert check_suspicious_document(data_trading) == []
+
+    # 8. File bình thường hợp lệ -> không có cảnh báo
     data_valid = {
         "docs": [{
             "units": [
