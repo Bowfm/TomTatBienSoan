@@ -34,7 +34,6 @@ def _get_quota_cycle_date() -> str:
 
 TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504}
 _RPM_WINDOW_S = 60.0        # cửa sổ trượt đếm RPM (giây)
-_RPM_SOFT_LIMIT = 4          # ưu tiên key dưới ngưỡng này (Free Tier phổ biến: 5 RPM)
 _COOLDOWN_S = 30             # thời gian cooldown sau khi key bị 429 (giây)
 
 

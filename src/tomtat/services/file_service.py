@@ -49,12 +49,18 @@ class FileService:
         path = files.get(docx_path_or_stem) or (self.cfg.input_dir / f"{docx_path_or_stem}.docx")
         return FileWorkspace(self.cfg.work_dir, path)
 
-    def inspect_file(self, docx_path: Path, force: bool = False) -> tuple[FileWorkspace, dict, dict]:
-        """Kiểm tra và bóc tách các câu/đơn vị từ file .docx."""
+    def inspect_file(
+        self, docx_path: Path, force: bool = False, reset: bool = False
+    ) -> tuple[FileWorkspace, dict, dict | None]:
+        """Kiểm tra và bóc tách các câu/đơn vị từ file .docx.
+
+        - force: luôn chạy lại bước inspect.
+        - reset: bỏ state cũ, bắt đầu từ state mặc định (dùng khi upload ghi đè).
+        """
         ws = FileWorkspace(self.cfg.work_dir, docx_path)
-        st = ws.load_state()
-        units = ws.load_units()
-        if units is None or force:
+        st = ws.default_state() if reset else ws.load_state()
+        units = None if (force or reset) else ws.load_units()
+        if units is None and docx_path.exists():
             units = step_inspect(ws, self.cfg, st)
         if units and "total_words" in (units.get("budget") or {}):
             units["budget"] = compute_budget(units["budget"]["total_words"], self.cfg)

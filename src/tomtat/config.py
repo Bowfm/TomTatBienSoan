@@ -40,6 +40,17 @@ class Config(dict):
     def prompts_dir(self) -> Path:
         return self.path("prompts")
 
+    def reload(self) -> None:
+        """Nạp lại các mục config non-path từ disk (extract, abstract, grading, gemini, ...)."""
+        try:
+            fresh = load_config(root=getattr(self, "root", None))
+            for k in ("extract", "abstract", "grading", "gemini", "word_count",
+                      "sentence_split", "judge", "workers"):
+                if k in fresh:
+                    self[k] = fresh[k]
+        except Exception:
+            pass
+
     def validate(self, raise_on_error: bool = False) -> list[str]:
         """Kiểm tra tính toàn vẹn của cấu hình hệ thống."""
         errors: list[str] = []

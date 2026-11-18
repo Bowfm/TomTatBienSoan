@@ -15,9 +15,6 @@ from .routes import register_routes
 # Re-exports cho backward compatibility (tests và các module khác)
 __all__ = ["create_app", "BatchManager", "make_client", "resolve_files"]
 
-_resolve_files = resolve_files
-_make_client = make_client
-
 
 def create_app(cfg: Config, mock: bool = False) -> Flask:
     """Tạo Flask application instance với các route blueprints đã được modularize."""

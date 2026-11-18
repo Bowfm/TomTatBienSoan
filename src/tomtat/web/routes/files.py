@@ -6,15 +6,13 @@ from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
 
-from ...checks import run_checks
 from ...config import get_api_key, get_api_keys, load_config
 from ...docx_io import DocxError
 from ...memory import load_memory
-from ...pipeline import step_inspect
-from ...report import _infer_model_from_logs, collect_rows, infer_step_models_from_logs, write_reports
-from ...state import FileWorkspace
+from ...report import _infer_model_from_logs, infer_step_models_from_logs
+from ...services.file_service import FileService
 from ...textutil import nfc
-from ..batch import make_client, resolve_files
+from ..batch import make_client
 
 bp = Blueprint("files", __name__)
 
@@ -27,25 +25,17 @@ def _mock():
     return current_app.config.get("TOMTAT_MOCK", False)
 
 
-def _sync_config():
-    """Reload config non-paths từ disk vào cfg live."""
-    try:
-        fresh = load_config()
-        cfg = _cfg()
-        for k in ("extract", "abstract", "grading", "gemini", "word_count",
-                  "sentence_split", "judge", "workers"):
-            if k in fresh:
-                cfg[k] = fresh[k]
-    except Exception:
-        pass
+def _service() -> FileService:
+    return FileService(_cfg())
 
 
 @bp.get("/api/files")
 def api_files():
     cfg = _cfg()
     fresh_cfg = load_config()
-    files_map = resolve_files(cfg)
-    rows = collect_rows(cfg, list(files_map.values()))
+    svc = _service()
+    files_map = svc.resolve_files()
+    rows = svc.get_status_rows()
     g = fresh_cfg.get("gemini", {})
     mem = load_memory(cfg.work_dir)
     from ... import STYLES
@@ -67,6 +57,7 @@ def api_files():
 def api_upload():
     """Tải một hoặc nhiều file .docx từ trình duyệt vào thư mục input\\ (và tùy chọn chạy AI ngay)."""
     cfg = _cfg()
+    svc = _service()
     uploaded = request.files.getlist("files")
     if not uploaded:
         return jsonify({"error": "Chưa chọn file .docx nào."}), 400
@@ -111,32 +102,27 @@ def api_upload():
 
     processed_stems: list[str] = []
     for dst in saved_paths:
-        ws = FileWorkspace(cfg.work_dir, dst)
-        st = ws.load_state()
-        if overwrite:
-            st = ws.default_state()
         try:
-            step_inspect(ws, cfg, st)
+            svc.inspect_file(dst, force=True, reset=overwrite)
+            processed_stems.append(dst.stem)
         except DocxError as exc:
             errors.append(f"{dst.name}: {exc}")
             continue
-        processed_stems.append(dst.stem)
 
     processed_stems.sort()
 
     if run_now and processed_stems:
-        from ...pipeline import process_file
         try:
             client = make_client(cfg, force_mock=use_mock)
             for stem in processed_stems:
                 dst = cfg.input_dir / f"{stem}.docx"
-                res = process_file(dst, cfg, client, force=True)
+                res = svc.process(dst, client, force=True)
                 if res.get("error"):
                     errors.append(f"{dst.name}: {res['error']}")
         except RuntimeError as exc:
             errors.append(str(exc))
 
-    write_reports(cfg)
+    svc.write_reports()
     return jsonify({
         "ok": True,
         "added": sorted([p.name for p in saved_paths]),
@@ -149,23 +135,18 @@ def api_upload():
 @bp.get("/api/file/<stem>")
 def api_get_file(stem: str):
     cfg = _cfg()
-    _sync_config()
-    files_map = resolve_files(cfg)
+    cfg.reload()
+    svc = _service()
+    files_map = svc.resolve_files()
     if stem not in files_map:
         return jsonify({"error": f"Không tìm thấy file '{stem}'."}), 404
     docx_path = files_map[stem]
-    ws = FileWorkspace(cfg.work_dir, docx_path)
-    st = ws.load_state()
-    units_data = ws.load_units()
-    if units_data is None and docx_path.exists():
-        try:
-            units_data = step_inspect(ws, cfg, st)
-        except DocxError as exc:
-            return jsonify({"error": str(exc)}), 400
+    try:
+        ws, st, units_data = svc.inspect_file(docx_path)
+    except DocxError as exc:
+        return jsonify({"error": str(exc)}), 400
     if units_data:
-        from ...units import compute_budget
-        if "total_words" in (units_data.get("budget") or {}):
-            units_data["budget"] = compute_budget(units_data["budget"]["total_words"], cfg)
+        from ...checks import run_checks
         chk = run_checks(
             units_data,
             st.get("label", {}).get("value", ""),
@@ -192,8 +173,8 @@ def api_get_file(stem: str):
 @bp.get("/api/file/<stem>/logs")
 def api_get_logs(stem: str):
     """Trả về danh sách các lần gọi Gemini (logs) của file để xem trực tiếp trên web."""
-    cfg = _cfg()
-    ws = FileWorkspace(cfg.work_dir, cfg.input_dir / f"{stem}.docx")
+    svc = _service()
+    ws = svc.get_workspace(stem)
     items = []
     if ws.logs_dir.exists():
         import json
