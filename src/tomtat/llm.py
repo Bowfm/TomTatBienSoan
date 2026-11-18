@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import threading
@@ -58,6 +59,29 @@ def _redact(text: str, secret: str | list[str] | None) -> str:
         if s and isinstance(s, str):
             text = text.replace(s, "***")
     return text
+
+
+def _get_quota_cycle_date() -> str:
+    """Trả về ngày theo chu kỳ reset hạn mức của Google Gemini (00:00 Pacific Time, tức 15h VN mùa đông / 14h VN mùa hè)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    # Tự tính chuẩn theo múi giờ US/Pacific (PST UTC-8 / PDT UTC-7) không phụ thuộc thư viện ngoài
+    import calendar
+    from datetime import datetime, timedelta, timezone
+
+    now_utc = datetime.now(timezone.utc)
+    year = now_utc.year
+    w_mar = calendar.weekday(year, 3, 1)
+    dst_start = datetime(year, 3, 1 + (6 - w_mar) % 7 + 7, 10, 0, tzinfo=timezone.utc)
+    w_nov = calendar.weekday(year, 11, 1)
+    dst_end = datetime(year, 11, 1 + (6 - w_nov) % 7, 9, 0, tzinfo=timezone.utc)
+
+    offset_hours = -7 if dst_start <= now_utc < dst_end else -8
+    pt_time = now_utc + timedelta(hours=offset_hours)
+    return pt_time.strftime("%Y-%m-%d")
 
 
 def write_log(log_dir: Path | None, record: dict, secret: str | list[str] | None = None) -> None:
@@ -129,31 +153,47 @@ class GeminiClient(BaseClient):
         self.backoff_base = float(g.get("backoff_base_s", 2))
         self.backoff_max = float(g.get("backoff_max_s", 15))
 
-        # File lưu danh sách (key, model) đã cạn quota trong ngày để không gọi lại sau khi restart
+        # File lưu danh sách (key, model) đã cạn quota trong ngày (theo chu kỳ 00:00 Pacific Time = 15:00 VN)
         work_path = cfg.work_dir if hasattr(cfg, "work_dir") else Path(cfg.get("paths", {}).get("work", "work"))
         self._exhausted_file = Path(work_path) / "quota_exhausted.json"
+        self._current_cycle_date = _get_quota_cycle_date()
         self._load_exhausted()
+
+    def _check_and_reset_cycle(self) -> None:
+        """Tự động xóa danh sách cạn hạn mức khi bước sang chu kỳ ngày mới (15:00 VN)."""
+        today = _get_quota_cycle_date()
+        if today != self._current_cycle_date:
+            self._current_cycle_date = today
+            self._exhausted.clear()
+            try:
+                if self._exhausted_file.exists():
+                    self._exhausted_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _load_exhausted(self) -> None:
         if not self._exhausted_file.exists():
             return
         try:
             data = json.loads(self._exhausted_file.read_text(encoding="utf-8"))
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = _get_quota_cycle_date()
             if data.get("date") == today:
                 for item in data.get("exhausted", []):
                     k = item.get("key")
                     m = item.get("model")
                     if k in self._clients and m:
                         self._exhausted.add((k, m))
+            else:
+                self._exhausted_file.unlink(missing_ok=True)
         except Exception:
             pass
 
     def _mark_exhausted(self, key: str, model: str) -> None:
         with self._key_lock:
+            self._check_and_reset_cycle()
             self._exhausted.add((key, model))
             try:
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = self._current_cycle_date
                 items = [{"key": k, "model": m} for (k, m) in self._exhausted]
                 self._exhausted_file.parent.mkdir(parents=True, exist_ok=True)
                 tmp = self._exhausted_file.with_suffix(".tmp")
@@ -170,6 +210,7 @@ class GeminiClient(BaseClient):
 
     def _get_available_key_client(self, model: str) -> tuple[str, any] | tuple[None, None]:
         with self._key_lock:
+            self._check_and_reset_cycle()
             available = [k for k in self._api_keys if (k, model) not in self._exhausted]
             if not available:
                 return None, None

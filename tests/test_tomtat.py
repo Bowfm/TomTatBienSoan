@@ -621,5 +621,49 @@ def test_incomplete_step_discarded_and_rerun(tmp_path):
     assert st_res["status"] == "da_co_nhap"
 
 
+def test_quota_cycle_pacific_time(tmp_path, monkeypatch):
+    import json
+    from datetime import datetime, timezone
+    from tomtat.llm import _get_quota_cycle_date, GeminiClient
+
+    today_pt = _get_quota_cycle_date()
+    assert len(today_pt) == 10 and today_pt[4] == "-" and today_pt[7] == "-"
+
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+
+    client = GeminiClient(cfg, ["dummy_key_1", "dummy_key_2"])
+
+    # 1. Đánh dấu cạn hạn mức cho key 1 với model gemini-4-hydrogen
+    client._mark_exhausted("dummy_key_1", "gemini-4-hydrogen")
+    assert ("dummy_key_1", "gemini-4-hydrogen") in client._exhausted
+
+    # File quota_exhausted.json được tạo với date theo Pacific Time
+    data = json.loads(client._exhausted_file.read_text(encoding="utf-8"))
+    assert data["date"] == today_pt
+    assert len(data["exhausted"]) == 1
+
+    # 2. Key 2 vẫn dùng được cho gemini-4-hydrogen
+    k, _ = client._get_available_key_client("gemini-4-hydrogen")
+    assert k == "dummy_key_2"
+
+    # Đánh dấu cạn tiếp key 2
+    client._mark_exhausted("dummy_key_2", "gemini-4-hydrogen")
+    k, _ = client._get_available_key_client("gemini-4-hydrogen")
+    assert k is None  # Hết key cho gemini-4-hydrogen
+
+    # Model fallback vẫn dùng được vì chưa cạn
+    k, _ = client._get_available_key_client("gemini-3.8-flash")
+    assert k in ("dummy_key_1", "dummy_key_2")
+
+    # 3. Giả lập sang ngày mới ở Pacific Time (15:00 VN):
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2099-12-31")
+    # Khi gọi _get_available_key_client, chu kỳ mới tự động kích hoạt và reset
+    k, _ = client._get_available_key_client("gemini-4-hydrogen")
+    assert k is not None  # Các key đã được mở lại hoàn toàn!
+    assert len(client._exhausted) == 0
+
+
+
 
 
