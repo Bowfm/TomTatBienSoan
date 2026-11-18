@@ -63,14 +63,75 @@ def run_update(root_dir: Path | str | None = None) -> tuple[bool, str]:
     clean_url = repo_url.rstrip("/").removesuffix(".git")
     zip_url = f"{clean_url}/archive/refs/heads/main.zip"
 
-    try:
-        req = urllib.request.Request(
-            zip_url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TomTatUpdater/2.0"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            zip_bytes = resp.read()
+    zip_bytes = None
+    last_err = None
 
+    # Tải archive ZIP từ GitHub với nhiều lớp bọc dự phòng (chống lỗi SSL trên máy Windows)
+    import ssl
+
+    ssl_context = None
+    try:
+        import certifi
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+
+    req = urllib.request.Request(
+        zip_url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TomTatUpdater/2.0"},
+    )
+
+    # Lớp 1: urllib với SSL mặc định / certifi
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=ssl_context) as resp:
+            zip_bytes = resp.read()
+    except Exception as exc:
+        last_err = exc
+
+    # Lớp 2: urllib với unverified SSL (nếu máy tính thiếu chứng chỉ root CA)
+    if zip_bytes is None:
+        try:
+            unverified_ctx = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=30, context=unverified_ctx) as resp:
+                zip_bytes = resp.read()
+        except Exception as exc:
+            last_err = exc
+
+    # Lớp 3: curl.exe (tích hợp sẵn trên Windows 10/11)
+    if zip_bytes is None:
+        try:
+            curl_res = subprocess.run(
+                ["curl.exe", "-sSL", "-k", zip_url],
+                capture_output=True,
+                timeout=45,
+            )
+            if curl_res.returncode == 0 and len(curl_res.stdout) > 1000:
+                zip_bytes = curl_res.stdout
+        except Exception as exc:
+            last_err = exc
+
+    # Lớp 4: PowerShell WebClient
+    if zip_bytes is None:
+        try:
+            ps_script = (
+                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+                "[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}; "
+                f"$wc = New-Object System.Net.WebClient; $wc.DownloadData('{zip_url}')"
+            )
+            ps_res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                timeout=45,
+            )
+            if ps_res.returncode == 0 and len(ps_res.stdout) > 1000:
+                zip_bytes = ps_res.stdout
+        except Exception as exc:
+            last_err = exc
+
+    if not zip_bytes:
+        return False, f"Không thể cập nhật từ {zip_url}: {last_err}"
+
+    try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
         namelist = zf.namelist()
         if not namelist:
