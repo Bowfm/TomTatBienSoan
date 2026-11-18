@@ -21,15 +21,7 @@ PROTECTED_ENTRIES = {
 }
 
 
-def get_current_commit(root_dir: Path | str | None = None) -> str:
-    root = Path(root_dir) if root_dir else Path.cwd()
-    if (root / ".git").exists():
-        try:
-            res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(root), timeout=5)
-            if res.returncode == 0 and res.stdout.strip():
-                return res.stdout.strip()
-        except Exception:
-            pass
+def _read_version_commit(root: Path) -> str:
     v_file = root / "version.json"
     if v_file.exists():
         try:
@@ -39,6 +31,35 @@ def get_current_commit(root_dir: Path | str | None = None) -> str:
         except Exception:
             pass
     return ""
+
+
+def _is_git_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    """Kiểm tra xem commit `ancestor` đã nằm trong lịch sử của `descendant` chưa."""
+    if not ancestor or not descendant or not (root / ".git").exists():
+        return False
+    try:
+        res = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+            timeout=5,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def get_current_commit(root_dir: Path | str | None = None) -> str:
+    root = Path(root_dir) if root_dir else Path.cwd()
+    if (root / ".git").exists():
+        try:
+            res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(root), timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    return _read_version_commit(root)
 
 
 def get_remote_commit(root_dir: Path | str | None = None) -> str:
@@ -128,7 +149,14 @@ def check_update(root_dir: Path | str | None = None) -> dict:
             "message": f"Có bản cập nhật mới trên GitHub (bản mới: {rem_short})",
         }
 
-    if cur_short.lower() == rem_short.lower() or current.lower() == remote.lower():
+    v_commit = _read_version_commit(root)
+    v_short = v_commit[:7] if v_commit else ""
+
+    if (
+        cur_short.lower() == rem_short.lower()
+        or current.lower() == remote.lower()
+        or (v_short and v_short.lower() == rem_short.lower())
+    ):
         return {
             "has_update": False,
             "status": "up_to_date",
@@ -136,14 +164,24 @@ def check_update(root_dir: Path | str | None = None) -> dict:
             "latest_commit": rem_short,
             "message": f"Đã là phiên bản mới nhất ({cur_short}).",
         }
-    else:
+
+    # Nếu bản trên GitHub là tổ tiên của HEAD hiện tại (máy local có commit mới hơn chưa push lên GitHub)
+    if _is_git_ancestor(root, remote, current):
         return {
-            "has_update": True,
-            "status": "update_available",
+            "has_update": False,
+            "status": "up_to_date",
             "current_commit": cur_short,
             "latest_commit": rem_short,
-            "message": f"Có bản cập nhật mới trên GitHub! (bản mới: {rem_short}, hiện tại: {cur_short})",
+            "message": f"Đã là phiên bản mới nhất ({cur_short}, mới hơn GitHub {rem_short}).",
         }
+
+    return {
+        "has_update": True,
+        "status": "update_available",
+        "current_commit": cur_short,
+        "latest_commit": rem_short,
+        "message": f"Có bản cập nhật mới trên GitHub! (bản mới: {rem_short}, hiện tại: {cur_short})",
+    }
 
 
 def run_update(root_dir: Path | str | None = None) -> tuple[bool, str]:
@@ -158,8 +196,19 @@ def run_update(root_dir: Path | str | None = None) -> tuple[bool, str]:
     git_dir = root / ".git"
     if git_dir.exists():
         try:
+            current_sha = get_current_commit(root)
+            remote_sha = get_remote_commit(root)
+            if remote_sha and current_sha and (
+                current_sha[:7].lower() == remote_sha[:7].lower()
+                or _is_git_ancestor(root, remote_sha, current_sha)
+            ):
+                _save_version(root, current_sha)
+                return True, f"[Git] Đã ở phiên bản mới nhất ({current_sha[:7]})."
+
             where_res = subprocess.run(["where", "git"], capture_output=True, text=True, cwd=str(root))
             if where_res.returncode == 0:
+                # Khôi phục version.json nếu bị sửa tạm để không chặn git pull
+                subprocess.run(["git", "checkout", "--", "version.json"], capture_output=True, cwd=str(root))
                 pull = subprocess.run(
                     ["git", "pull", "--ff-only", "origin", "main"],
                     capture_output=True,

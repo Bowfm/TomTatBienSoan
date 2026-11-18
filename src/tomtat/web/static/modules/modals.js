@@ -84,8 +84,11 @@ export async function initUpdateChecker() {
     if (btn) btn.disabled = true;
     if (btnBannerUpdate) btnBannerUpdate.disabled = true;
     try {
-      await api("/api/self-update", { method: "POST", body: "{}" });
-      showToast("Đã cập nhật xong! Đang tải lại giao diện...");
+      const res = await api("/api/self-update", { method: "POST", body: "{}" });
+      if (!res.ok) {
+        throw new Error(res.output || "Cập nhật thất bại.");
+      }
+      showToast(res.output ? res.output.split("\n")[0] : "Đã cập nhật xong! Đang tải lại giao diện...");
       setTimeout(() => window.location.reload(), 900);
     } catch (err) {
       showToast(err.message, true);
