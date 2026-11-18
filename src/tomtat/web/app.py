@@ -538,6 +538,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         user_note = nfc(payload.get("note", "")).strip()
         use_mock = bool(payload.get("mock", mock))
         ignore_mismatch = bool(payload.get("ignore_mismatch", False))
+        restart = bool(payload.get("restart", False))
 
         # Lưu tạm các chỉnh sửa trên màn hình trước khi chạy bước tiếp theo
         ws = FileWorkspace(cfg.work_dir, docx_path)
@@ -566,6 +567,7 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
             only_step=step if step != "all" else None,
             user_note=user_note,
             ignore_mismatch=ignore_mismatch,
+            restart=restart,
         )
         write_reports(cfg)
         if out.get("error"):

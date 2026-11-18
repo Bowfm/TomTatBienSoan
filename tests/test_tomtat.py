@@ -539,3 +539,46 @@ def test_api_batch_endpoints(tmp_path):
     assert r_stop.get_json()["ok"] is True
 
 
+def test_process_file_resume_partial(tmp_path):
+    from tomtat.config import load_config
+    from tomtat.llm import MockClient
+    from tomtat.pipeline import process_file
+    from tomtat.state import FileWorkspace
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    sample = cfg.root / "samples" / "M54629.docx"
+    inp = tmp_path / "input" / "M54629.docx"
+    inp.parent.mkdir(parents=True, exist_ok=True)
+    inp.write_bytes(sample.read_bytes())
+
+    client = MockClient(cfg)
+
+    # 1. Chạy chỉ bước label và extract (giả lập file bị dừng giữa chừng)
+    process_file(inp, cfg, client, only_step="label")
+    process_file(inp, cfg, client, only_step="extract")
+
+    ws = FileWorkspace(cfg.work_dir, inp)
+    st1 = ws.load_state()
+    saved_label = st1["label"]["value"]
+    saved_extract = st1["extract"]["text"]
+    assert saved_label
+    assert saved_extract
+    assert not st1["abstract"]["text"]  # Chưa có abstract
+
+    # 2. Chạy tiếp process_file bình thường -> Phải giữ nguyên label & extract, chỉ chạy tiếp abstract
+    out2 = process_file(inp, cfg, client, force=True, restart=False)
+    st2 = out2["state"]
+    assert st2["label"]["value"] == saved_label
+    assert st2["extract"]["text"] == saved_extract
+    assert st2["abstract"]["text"]  # Giờ đã được hoàn thiện
+    assert st2["status"] == "da_co_nhap"
+
+
+

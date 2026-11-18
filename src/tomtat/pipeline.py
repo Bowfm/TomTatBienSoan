@@ -447,7 +447,8 @@ def finalize_status(units_data: dict, st: dict, cfg: dict,
 
 def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
                  force: bool = False, only_step: str | None = None,
-                 user_note: str = "", ignore_mismatch: bool = False) -> dict:
+                 user_note: str = "", ignore_mismatch: bool = False,
+                 restart: bool = False) -> dict:
     """Xử lý một file .docx (toàn bộ pipeline hoặc chỉ một bước)."""
     ws = FileWorkspace(cfg.work_dir, docx_path)
     st = ws.load_state()
@@ -493,20 +494,21 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
             ws.save_state(st)
             return {"skipped": False, "state": st}
 
-        # Chạy toàn bộ (nếu đang chạy tiếp từ trạng thái 'lỗi' hoặc 'cần xử lý tay' và không có user_note mới,
-        # giữ lại các bước trước đã đạt yêu cầu và gửi danh sách lỗi cụ thể để AI sửa thành 'đã có nháp')
-        resume_partial = (st.get("status") in (STATUS_ERROR, STATUS_MANUAL) and not user_note)
-        if not resume_partial:
+        # Chạy toàn bộ pipeline: tự động kế thừa thông minh những bước đã làm xong đạt chuẩn,
+        # chỉ gọi AI cho những bước còn thiếu hoặc cần sửa, trừ khi có yêu cầu restart từ đầu.
+        if restart:
+            st["label"] = {}
+            st["extract"] = {}
+            st["abstract"] = {}
+            st["judge"] = None
+            st["checks"] = {}
             st["flags"] = []
-        else:
-            st["flags"] = [
-                f for f in (st.get("flags") or [])
-                if not f.startswith("Gọi Gemini thất bại")
-            ]
 
-        units_data = ws.load_units() if resume_partial else None
+        # Tải units_data đã tách câu (nếu chưa có thì gọi step_inspect)
+        units_data = ws.load_units()
         if units_data is None:
             units_data = step_inspect(ws, cfg, st)
+
         if (
             units_data.get("filename_mismatch")
             and cfg.get("layout", {}).get("on_mismatch", "stop") == "stop"
@@ -516,41 +518,50 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
             ws.save_state(st)
             return {"skipped": False, "state": st}
 
-        # Kiểm tra xem bước label và extract đã hợp lệ chưa
+        # Bước 1: Gán nhãn phong cách chức năng (label)
         has_valid_label = bool((st.get("label") or {}).get("value") in STYLES)
+        if restart or not has_valid_label or (user_note and "nhãn" in user_note.lower()):
+            step_label(ws, units_data, client, renderer, cfg, st, user_note=user_note)
+            has_valid_label = bool((st.get("label") or {}).get("value") in STYLES)
+
+        # Bước 2: Trích chọn câu (extract)
         prev_ext_text = (st.get("extract") or {}).get("text", "")
         has_valid_extract = False
-        if resume_partial and prev_ext_text:
-            chk_prev = run_checks(units_data, st["label"].get("value") or STYLES[0], prev_ext_text, "ok.", cfg)
+        if prev_ext_text and has_valid_label:
+            chk_prev = run_checks(units_data, st["label"]["value"], prev_ext_text, "ok.", cfg)
             has_valid_extract = len(chk_prev.of(level="error", target="extract")) == 0
 
-        if not (resume_partial and has_valid_label):
-            step_label(ws, units_data, client, renderer, cfg, st, user_note=user_note)
-        if not (resume_partial and has_valid_extract):
+        if restart or not has_valid_extract or (user_note and "trích" in user_note.lower()):
             step_extract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
+            prev_ext_text = (st.get("extract") or {}).get("text", "")
+            has_valid_extract = bool(prev_ext_text)
 
-        # Với bước abstract: nếu đang ở 'cần xử lý tay' do lỗi ở abstract, truyền luôn danh sách lỗi cũ vào để AI sửa
+        # Bước 3: Biên soạn tóm tắt (abstract)
         prev_abs_text = (st.get("abstract") or {}).get("text", "")
-        if resume_partial and prev_abs_text:
+        has_valid_abstract = False
+        if prev_abs_text and has_valid_label and has_valid_extract:
             chk_abs = run_checks(units_data, st["label"]["value"], st["extract"]["text"], prev_abs_text, cfg)
-            fb = retry_feedback(chk_abs, cfg, target="abstract")
-            if fb or not chk_abs.ok:
+            has_valid_abstract = chk_abs.ok
+            if not has_valid_abstract:
+                # Nếu abstract cũ có lỗi cơ học, gửi lỗi cũ để AI sửa
+                fb = retry_feedback(chk_abs, cfg, target="abstract")
                 err_list = fb or [i.message for i in chk_abs.errors]
                 _generate_abstract_loop(
                     ws, units_data, client, renderer, cfg, st,
                     user_note=user_note, extra_errors=err_list,
                 )
             else:
-                # Bản abstract đã sạch lỗi cơ học
                 st["checks"] = chk_abs.to_dict()
         else:
             step_abstract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
-        if cfg.get("judge", {}).get("enabled", False):
+
+        # Bước 4: Tự chấm G-Eval (nếu được bật và chưa có điểm)
+        if cfg.get("judge", {}).get("enabled", False) and (restart or not st.get("judge")):
             try:
                 step_judge(ws, units_data, client, renderer, cfg, st)
             except LLMError as judge_exc:
-                # Bước judge là tùy chọn: nếu timeout/lỗi mạng thì giữ nguyên 3 hàng đã làm xong
                 _add_flag(st, f"Bỏ qua bước tự chấm G-Eval do quá thời gian chờ ({judge_exc}).")
+
         finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch)
         ws.save_draft_version(st, source="ai:pipeline", note=user_note)
         ws.save_state(st)
