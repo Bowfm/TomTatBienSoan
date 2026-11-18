@@ -53,6 +53,7 @@ class GeminiClient(BaseClient):
         self._exhausted: set[tuple[str, str]] = set()  # (api_key, model) đã cạn hạn mức trong ngày
         self._key_cooldown: dict[str, float] = {}       # key -> timestamp hết cooldown (sau 429)
         self._rpm_tracker: dict[str, list[float]] = {}  # key -> danh sách timestamp request gần đây
+        self._idle_429_strikes: dict[tuple[str, str], int] = {}  # đếm số lần 429 khi key đang nhàn rỗi (RPM=0)
 
         self._api_key = self._api_keys[0]
         g = cfg["gemini"]
@@ -205,76 +206,113 @@ class GeminiClient(BaseClient):
 
     def generate_json(self, step, system, prompt, schema, *, log_dir=None, attempt=0, context=None):
         last_exc: BaseException | None = None
-        for model_idx, cur_model in enumerate(self.models_chain):
-            # Với mỗi model: tận dụng tối đa các key còn hạn mức trong pool
-            tries_left = max(len(self._api_keys) * 2, self.max_retries + 1)
-            model_503_count = 0
-            while tries_left > 0:
-                tries_left -= 1
-                cur_key, cur_client = self._get_available_key_client(cur_model)
-                if cur_key is None:
-                    # Toàn bộ key trong pool đã cạn quota ngày cho cur_model -> trượt xuống model tiếp theo
-                    break
+        attempted_any_call = False
 
-                t0 = time.time()
-                record = {"step": step, "attempt": attempt, "model": cur_model,
-                          "started_at": datetime.now().isoformat(timespec="seconds"),
-                          "generation_config": self._gen_config(step, cur_model),
-                          "system": system, "prompt": prompt, "schema": schema}
-                try:
-                    with self._semaphore:
-                        text, usage, status = self._call_once(cur_model, step, system, prompt, schema, client=cur_client)
-                    self._record_request(cur_key)
-                    dur = time.time() - t0
-                    record.update(duration_s=round(dur, 2), response_text=text, usage=usage, status=str(status))
-                    data = _parse_json(text)
-                    record["parsed_ok"] = True
-                    write_log(log_dir, record, self._api_keys)
-                    return LLMResult(data=data, text=text, usage=usage, duration_s=dur, model=cur_model)
-                except json.JSONDecodeError as exc:
-                    record.update(duration_s=round(time.time() - t0, 2), error=f"JSON không hợp lệ: {exc}")
-                    write_log(log_dir, record, self._api_keys)
-                    last_exc = exc
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    err_str = _redact(f"{type(exc).__name__}: {exc}", self._api_keys)
-                    record.update(duration_s=round(time.time() - t0, 2), error=err_str)
-                    write_log(log_dir, record, self._api_keys)
-                    last_exc = exc
-                    err_lower = err_str.lower()
-                    is_quota_exhausted = (
-                        "per day" in err_lower
-                        or "perday" in err_lower
-                        or "limit: 0" in err_str
-                        or "exceeded a quota" in err_lower
-                        or "quota exceeded" in err_lower
-                        or "resource has been exhausted" in err_lower
-                    )
-                    if is_quota_exhausted:
-                        # Key này đã cạn quota của cur_model -> đánh dấu để chuyển sang key khác trong pool
-                        self._mark_exhausted(cur_key, cur_model)
-                        continue
-                    if _status_of(exc) in (401, 403) or "unauthenticated" in err_lower or "not valid" in err_lower:
-                        # Key này lỗi xác thực/sai key -> loại bỏ khỏi danh sách và chuyển ngay sang key khác trong pool
-                        for m in self.models_chain:
-                            self._mark_exhausted(cur_key, m)
-                        continue
-                    if _status_of(exc) == 404:
+        for _rescue_pass in range(2):
+            for model_idx, cur_model in enumerate(self.models_chain):
+                # Với mỗi model: tận dụng tối đa các key còn hạn mức trong pool
+                tries_left = max(len(self._api_keys) * 2, self.max_retries + 1)
+                model_503_count = 0
+                while tries_left > 0:
+                    tries_left -= 1
+                    cur_key, cur_client = self._get_available_key_client(cur_model)
+                    if cur_key is None:
+                        # Toàn bộ key trong pool đã cạn quota ngày cho cur_model -> trượt xuống model tiếp theo
                         break
-                    if _status_of(exc) in (502, 503) and ("high demand" in err_lower or "service_unavailable" in err_lower):
-                        model_503_count += 1
-                        if model_503_count >= 3:
-                            # Model đang quá tải diện rộng -> chuyển ngay sang model tiếp theo trong chain
+
+                    attempted_any_call = True
+                    t0 = time.time()
+                    record = {"step": step, "attempt": attempt, "model": cur_model,
+                              "started_at": datetime.now().isoformat(timespec="seconds"),
+                              "generation_config": self._gen_config(step, cur_model),
+                              "system": system, "prompt": prompt, "schema": schema}
+                    try:
+                        with self._semaphore:
+                            text, usage, status = self._call_once(cur_model, step, system, prompt, schema, client=cur_client)
+                        self._record_request(cur_key)
+                        self._idle_429_strikes.pop((cur_key, cur_model), None)
+                        dur = time.time() - t0
+                        record.update(duration_s=round(dur, 2), response_text=text, usage=usage, status=str(status))
+                        data = _parse_json(text)
+                        record["parsed_ok"] = True
+                        write_log(log_dir, record, self._api_keys)
+                        return LLMResult(data=data, text=text, usage=usage, duration_s=dur, model=cur_model)
+                    except json.JSONDecodeError as exc:
+                        record.update(duration_s=round(time.time() - t0, 2), error=f"JSON không hợp lệ: {exc}")
+                        write_log(log_dir, record, self._api_keys)
+                        last_exc = exc
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        err_str = _redact(f"{type(exc).__name__}: {exc}", self._api_keys)
+                        record.update(duration_s=round(time.time() - t0, 2), error=err_str)
+                        write_log(log_dir, record, self._api_keys)
+                        last_exc = exc
+                        err_lower = err_str.lower()
+                        # Chỉ đánh dấu cạn quota ngày ngay lập tức nếu lỗi ghi rõ per day / daily / limit: 0
+                        is_explicit_daily_quota = (
+                            "per day" in err_lower
+                            or "perday" in err_lower
+                            or "per_day" in err_lower
+                            or "daily" in err_lower
+                            or "limit: 0" in err_str
+                        )
+                        is_generic_quota_429 = (
+                            _status_of(exc) == 429
+                            or "exceeded a quota" in err_lower
+                            or "quota exceeded" in err_lower
+                            or "resource has been exhausted" in err_lower
+                        )
+                        if is_explicit_daily_quota:
+                            self._mark_exhausted(cur_key, cur_model)
+                            continue
+                        if is_generic_quota_429:
+                            # Phân biệt 429 RPM (đang gọi dồn dập trong 60s) với 429 RPD (key nhàn rỗi vẫn bị 429 nhiều lần)
+                            with self._key_lock:
+                                recent_rpm = self._rpm_count(cur_key)
+                            self._set_cooldown(cur_key)
+                            if recent_rpm == 0:
+                                strikes = self._idle_429_strikes.get((cur_key, cur_model), 0) + 1
+                                self._idle_429_strikes[(cur_key, cur_model)] = strikes
+                                if strikes >= 2:
+                                    self._mark_exhausted(cur_key, cur_model)
+                            continue
+                        if _status_of(exc) in (401, 403) or "unauthenticated" in err_lower or "not valid" in err_lower:
+                            # Key này lỗi xác thực/sai key -> loại bỏ khỏi danh sách và chuyển ngay sang key khác trong pool
+                            for m in self.models_chain:
+                                self._mark_exhausted(cur_key, m)
+                            continue
+                        if _status_of(exc) == 404:
                             break
-                    if not is_transient(exc):
-                        break
-                    if _status_of(exc) == 429:
-                        # 429 tạm thời (RPM) -> cooldown key 30s và chuyển ngay sang key khác
-                        self._set_cooldown(cur_key)
-                        continue
-                    time.sleep(min(self.backoff_max, self.backoff_base))
+                        if _status_of(exc) in (502, 503) and ("high demand" in err_lower or "service_unavailable" in err_lower):
+                            model_503_count += 1
+                            if model_503_count >= 3:
+                                # Model đang quá tải diện rộng -> chuyển ngay sang model tiếp theo trong chain
+                                break
+                        if not is_transient(exc):
+                            break
+                        time.sleep(min(self.backoff_max, self.backoff_base))
+
+            # Nếu lượt đầu không gọi được API nào vì toàn bộ (key, model) đều bị đánh dấu trong quota_exhausted.json
+            # (có thể do bị khóa nhầm khi chạm RPM), tự động xóa cache cạn hạn mức để thử lại 1 lượt thật.
+            if not attempted_any_call and self._exhausted:
+                with self._key_lock:
+                    self._exhausted.clear()
+                    self._key_cooldown.clear()
+                    try:
+                        if self._exhausted_file.exists():
+                            self._exhausted_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                continue
+            break
+
+        if last_exc is None:
+            raise LLMError(
+                f"Gọi Gemini thất bại ở bước {step}: Tất cả {len(self._api_keys)} API key đều đang chạm giới hạn hạn mức "
+                f"trên mọi model ({', '.join(self.models_chain)}). Vui lòng chờ 1 phút rồi thử lại."
+            )
         msg = _redact(f"{type(last_exc).__name__}: {last_exc}", self._api_keys)
-        st = _status_of(last_exc) if last_exc else None
+        st = _status_of(last_exc)
         hint = ""
         if st in (401, 403):
             hint = " (kiểm tra GEMINI_API_KEY và quyền truy cập model)"
@@ -283,5 +321,5 @@ class GeminiClient(BaseClient):
         elif st == 404:
             hint = f" (model '{self.model}' không tồn tại hoặc tài khoản chưa được dùng; đổi gemini.model trong config.yaml)"
         elif st == 429:
-            hint = " (vượt giới hạn tốc độ/hạn mức; giảm --workers hoặc chờ)"
+            hint = " (vượt giới hạn tốc độ/hạn mức; giảm số luồng hoặc chờ 1 phút)"
         raise LLMError(f"Gọi Gemini thất bại ở bước {step}: {msg}{hint}")
