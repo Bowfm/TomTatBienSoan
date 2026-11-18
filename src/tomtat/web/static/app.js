@@ -944,8 +944,8 @@ async function runQueueOnStems(stems, useMock) {
   let doneCount = 0;
   let errCount = 0;
   let startedCount = 0;
-  // Lấy số luồng song song từ selectbox (mặc định 6 luồng để khai thác tối đa 29 API keys)
-  const concurrencyVal = $("sel-concurrency") ? Number($("sel-concurrency").value) || 6 : 6;
+  // Lấy số luồng song song từ selectbox (mặc định 8 luồng để khai thác tối đa 39 API keys)
+  const concurrencyVal = $("sel-concurrency") ? Number($("sel-concurrency").value) || 8 : 8;
   const concurrency = Math.min(concurrencyVal, stems.length);
   let nextIdx = 0;
 
