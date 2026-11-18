@@ -494,3 +494,48 @@ def test_docx_set_cell_text_preserves_blank_lines(tmp_path):
     assert cell.paragraphs[1].text == ""
     assert cell.paragraphs[2].text == "Đoạn 2 tóm tắt văn bản 2."
 
+
+def test_api_batch_endpoints(tmp_path):
+    import time
+    from tomtat.config import load_config
+    from tomtat.web import create_app
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    sample = cfg.root / "samples" / "M54629.docx"
+    inp = tmp_path / "input" / "M54629.docx"
+    inp.parent.mkdir(parents=True, exist_ok=True)
+    inp.write_bytes(sample.read_bytes())
+
+    app = create_app(cfg, mock=True)
+    tc = app.test_client()
+
+    # Kiểm tra khởi động batch trên server
+    r_start = tc.post("/api/batch/start", json={"stems": ["M54629"], "concurrency": 2, "mock": True})
+    assert r_start.status_code == 200
+    assert r_start.get_json()["ok"] is True
+
+    # Chờ tiến trình nền hoàn tất
+    for _ in range(50):
+        r_st = tc.get("/api/batch/status")
+        assert r_st.status_code == 200
+        data = r_st.get_json()
+        if not data["active"]:
+            break
+        time.sleep(0.1)
+
+    assert data["done_count"] == 1
+    assert "M54629" in data["completed"]
+
+    # Kiểm tra lệnh stop khi không có batch
+    r_stop = tc.post("/api/batch/stop")
+    assert r_stop.status_code == 200
+    assert r_stop.get_json()["ok"] is True
+
+

@@ -910,7 +910,7 @@ async function uploadFiles(fileList, overwrite = false) {
             const cmp = a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
             return SORT_ORDER === "desc" ? -cmp : cmp;
           });
-      await runQueueOnStems(stemsToRun, useMock);
+      await runBatchOnServer(stemsToRun, useMock);
     } else if (data.errors && data.errors.length > 0) {
       showToast(`Đã thêm (${data.added.length} file), có lưu ý: ${data.errors[0]}`, true);
     } else {
@@ -938,69 +938,87 @@ function setBatchProgress(text) {
   }
 }
 
-async function runQueueOnStems(stems, useMock) {
-  if (!stems || !stems.length) return;
-  STOP_BATCH_REQUESTED = false;
-  let doneCount = 0;
-  let errCount = 0;
-  let startedCount = 0;
-  // Lấy số luồng song song từ selectbox (mặc định 8 luồng để khai thác tối đa 39 API keys)
-  const concurrencyVal = $("sel-concurrency") ? Number($("sel-concurrency").value) || 8 : 8;
-  const concurrency = Math.min(concurrencyVal, stems.length);
-  let nextIdx = 0;
+let BATCH_POLL_TIMER = null;
+let LAST_BATCH_DONE = -1;
 
-  const updateProgressBanner = () => {
-    const activeList = Array.from(RUNNING_STEMS).map((s) => `${s}.docx`).join(", ");
-    setBatchProgress(
-      `⏳ Đang chạy song song ${RUNNING_STEMS.size} luồng (${doneCount + errCount}/${stems.length} xong) — Đang xử lý: ${activeList || "..."}`
-    );
+async function runBatchOnServer(stems, useMock) {
+  if (!stems || !stems.length) return;
+  const concurrencyVal = $("sel-concurrency") ? Number($("sel-concurrency").value) || 8 : 8;
+
+  try {
+    const res = await api("/api/batch/start", {
+      method: "POST",
+      body: JSON.stringify({
+        stems,
+        concurrency: concurrencyVal,
+        mock: useMock,
+      }),
+    });
+    if (!res.ok) {
+      showToast(res.message || "Không thể khởi động batch", true);
+      return;
+    }
+    showToast(res.message);
+    startBatchPolling();
+  } catch (err) {
+    showToast(err.message, true);
+  }
+}
+
+async function stopBatch() {
+  try {
+    const res = await api("/api/batch/stop", { method: "POST" });
+    showToast(res.message || "Đã gửi yêu cầu dừng.");
+  } catch (err) {
+    showToast(err.message, true);
+  }
+}
+
+function startBatchPolling() {
+  if (BATCH_POLL_TIMER) clearInterval(BATCH_POLL_TIMER);
+  LAST_BATCH_DONE = -1;
+
+  const poll = async () => {
+    try {
+      const st = await api("/api/batch/status");
+      if (!st) return;
+
+      RUNNING_STEMS.clear();
+      (st.running || []).forEach((s) => RUNNING_STEMS.add(s));
+
+      if (st.active) {
+        const activeList = (st.running || []).map((s) => `${s}.docx`).join(", ");
+        setBatchProgress(
+          `⏳ Đang chạy song song ${RUNNING_STEMS.size} luồng (${st.done_count + st.err_count}/${st.total} xong) — Đang xử lý: ${activeList || "..."}`
+        );
+        if (st.done_count !== LAST_BATCH_DONE) {
+          LAST_BATCH_DONE = st.done_count;
+          await loadFileList(true);
+        } else {
+          renderFileList();
+        }
+      } else {
+        clearInterval(BATCH_POLL_TIMER);
+        BATCH_POLL_TIMER = null;
+        RUNNING_STEMS.clear();
+        setBatchProgress("");
+        await loadFileList(true);
+        if (st.stopped) {
+          showToast(`Đã dừng theo yêu cầu (đã xong ${st.done_count}/${st.total} file).`);
+        } else if (st.total > 0) {
+          showToast(
+            `Hoàn tất chạy AI: thành công ${st.done_count}/${st.total} file` +
+              (st.err_count ? ` (${st.err_count} file lỗi).` : "!")
+          );
+        }
+      }
+    } catch (err) {
+      console.warn("Lỗi poll batch status:", err);
+    }
   };
 
-  async function worker() {
-    while (!STOP_BATCH_REQUESTED) {
-      const i = nextIdx++;
-      if (i >= stems.length) break;
-      const stem = stems[i];
-      startedCount++;
-      RUNNING_STEMS.add(stem);
-      renderFileList();
-      updateProgressBanner();
-
-      try {
-        await api(`/api/file/${encodeURIComponent(stem)}/rerun`, {
-          method: "POST",
-          body: JSON.stringify({ step: "all", mock: useMock, ignore_mismatch: false }),
-        });
-        doneCount++;
-      } catch (err) {
-        errCount++;
-        showToast(`${stem}.docx: ${err.message}`, true);
-      } finally {
-        RUNNING_STEMS.delete(stem);
-      }
-
-      await loadFileList(true);
-      updateProgressBanner();
-      if (CURRENT_STEM === stem || doneCount === 1) {
-        await selectFile(stem);
-      }
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, stems.length) }, () => worker());
-  await Promise.all(workers);
-
-  RUNNING_STEMS.clear();
-  setBatchProgress("");
-  await loadFileList(true);
-  if (STOP_BATCH_REQUESTED) {
-    showToast(`Đã dừng theo yêu cầu (đã xong ${doneCount}/${stems.length} file).`);
-  } else {
-    showToast(
-      `Hoàn tất chạy AI: thành công ${doneCount}/${stems.length} file` +
-        (errCount ? ` (${errCount} file lỗi).` : "!")
-    );
-  }
+  BATCH_POLL_TIMER = setInterval(poll, 1000);
+  poll();
 }
 
 async function runPendingFiles() {
@@ -1013,7 +1031,7 @@ async function runPendingFiles() {
     showToast("Tất cả các file trong danh sách đều đã ở trạng thái 'đã có nháp' hoặc 'đã duyệt'!");
     return;
   }
-  await runQueueOnStems(todo, useMock);
+  await runBatchOnServer(todo, useMock);
 }
 
 async function deleteFiles(mode, stems = [], confirmMsg = "") {
@@ -1076,10 +1094,7 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   }
   if ($("btn-stop-batch")) {
-    $("btn-stop-batch").addEventListener("click", () => {
-      STOP_BATCH_REQUESTED = true;
-      showToast("Đang dừng sau khi xong file hiện tại...");
-    });
+    $("btn-stop-batch").addEventListener("click", stopBatch);
   }
   $("btn-download-zip").addEventListener("click", downloadDoneZip);
   $("chk-done-all").addEventListener("change", (e) => {
@@ -1146,4 +1161,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   loadFileList(false);
+  api("/api/batch/status").then((st) => {
+    if (st && st.active) startBatchPolling();
+  }).catch(() => {});
 });

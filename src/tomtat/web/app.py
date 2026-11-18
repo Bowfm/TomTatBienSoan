@@ -1,11 +1,13 @@
 """Flask server cho giao diện duyệt local (chỉ lắng nghe trên 127.0.0.1)."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import io
 from pathlib import Path
 import re
 import shutil
+import threading
 import zipfile
 
 from flask import Flask, jsonify, render_template, request, send_file
@@ -54,6 +56,11 @@ def _resolve_files(cfg: Config) -> dict[str, Path]:
     return files
 
 
+_CLIENT_LOCK = threading.Lock()
+_CACHED_CLIENT: GeminiClient | None = None
+_CACHED_KEYS: list[str] = []
+
+
 def _make_client(cfg: Config, force_mock: bool = False):
     if force_mock:
         return MockClient(cfg)
@@ -63,7 +70,122 @@ def _make_client(cfg: Config, force_mock: bool = False):
             "Chưa đặt GEMINI_API_KEY (trong biến môi trường, file .env hoặc api_keys.txt). "
             "Hãy cấu hình API key hoặc chạy review với cờ --mock."
         )
-    return GeminiClient(cfg, keys)
+    global _CACHED_CLIENT, _CACHED_KEYS
+    with _CLIENT_LOCK:
+        if _CACHED_CLIENT is None or _CACHED_KEYS != keys:
+            _CACHED_CLIENT = GeminiClient(cfg, keys)
+            _CACHED_KEYS = list(keys)
+        return _CACHED_CLIENT
+
+
+class BatchManager:
+    """Quản lý tiến trình chạy AI hàng loạt ở tầng server bằng ThreadPoolExecutor.
+
+    Giải phóng hoàn toàn kết nối HTTP của trình duyệt (tránh giới hạn 6 socket
+    của Chrome khiến giao diện bị đơ/lag, không ấn được nút Duyệt hoặc Xem log).
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.is_active = False
+        self.stop_requested = False
+        self.total = 0
+        self.done_count = 0
+        self.err_count = 0
+        self.stems: list[str] = []
+        self.running_stems: set[str] = set()
+        self.completed_stems: list[str] = []
+        self.errors: dict[str, str] = {}
+        self.executor: ThreadPoolExecutor | None = None
+
+    def start(self, stems: list[str], concurrency: int = 8, use_mock: bool = False) -> dict:
+        with self.lock:
+            if self.is_active:
+                return {"ok": False, "message": "Tiến trình batch đang chạy dở."}
+            if not stems:
+                return {"ok": False, "message": "Danh sách file rỗng."}
+            self.is_active = True
+            self.stop_requested = False
+            self.stems = list(stems)
+            self.total = len(stems)
+            self.done_count = 0
+            self.err_count = 0
+            self.running_stems = set()
+            self.completed_stems = []
+            self.errors = {}
+            concurrency = max(1, min(concurrency, len(stems)))
+            self.executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="tomtat_batch")
+
+        threading.Thread(target=self._run_all, args=(stems, use_mock), daemon=True).start()
+        return {"ok": True, "message": f"Đã khởi động xử lý {len(stems)} file trên {concurrency} luồng."}
+
+    def _run_all(self, stems: list[str], use_mock: bool):
+        files_map = _resolve_files(self.cfg)
+        client = _make_client(self.cfg, force_mock=use_mock)
+
+        def _process_one(stem: str):
+            if self.stop_requested:
+                return
+            with self.lock:
+                self.running_stems.add(stem)
+
+            try:
+                docx_path = files_map.get(stem) or (self.cfg.input_dir / f"{stem}.docx")
+                process_file(docx_path, self.cfg, client, force=True, ignore_mismatch=False)
+                with self.lock:
+                    self.done_count += 1
+                    self.completed_stems.append(stem)
+            except Exception as e:
+                with self.lock:
+                    self.err_count += 1
+                    self.errors[stem] = str(e)
+            finally:
+                with self.lock:
+                    self.running_stems.discard(stem)
+
+        # Chạy từng file qua thread pool theo đúng thứ tự stems
+        futures = []
+        for s in stems:
+            if self.stop_requested:
+                break
+            futures.append(self.executor.submit(_process_one, s))
+
+        for f in futures:
+            try:
+                f.result()
+            except Exception:
+                pass
+
+        try:
+            write_reports(self.cfg)
+        except Exception:
+            pass
+
+        with self.lock:
+            self.is_active = False
+            self.running_stems.clear()
+            if self.executor:
+                self.executor.shutdown(wait=False)
+                self.executor = None
+
+    def stop(self) -> dict:
+        with self.lock:
+            self.stop_requested = True
+            return {"ok": True, "message": "Đã gửi tín hiệu dừng tới các luồng AI."}
+
+    def status(self) -> dict:
+        with self.lock:
+            return {
+                "active": self.is_active,
+                "total": self.total,
+                "done_count": self.done_count,
+                "err_count": self.err_count,
+                "running": list(self.running_stems),
+                "completed": list(self.completed_stems),
+                "errors": dict(self.errors),
+                "stopped": self.stop_requested,
+            }
 
 
 def create_app(cfg: Config, mock: bool = False) -> Flask:
@@ -82,6 +204,24 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
     @app.get("/")
     def index():
         return render_template("index.html", styles=STYLES, status_vi=STATUS_VI, mock=mock)
+
+    batch_mgr = BatchManager(cfg)
+
+    @app.post("/api/batch/start")
+    def api_batch_start():
+        payload = request.get_json(force=True) or {}
+        stems = payload.get("stems") or []
+        concurrency = int(payload.get("concurrency") or 8)
+        use_mock = bool(payload.get("mock", mock))
+        return jsonify(batch_mgr.start(stems, concurrency, use_mock))
+
+    @app.get("/api/batch/status")
+    def api_batch_status():
+        return jsonify(batch_mgr.status())
+
+    @app.post("/api/batch/stop")
+    def api_batch_stop():
+        return jsonify(batch_mgr.stop())
 
     @app.get("/api/files")
     def api_files():

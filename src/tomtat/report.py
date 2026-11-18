@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 import re
+import threading
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -129,57 +130,61 @@ def collect_rows(cfg: dict, files: list[Path] | None = None, reverse: bool = Tru
     return rows
 
 
+_REPORT_LOCK = threading.Lock()
+
+
 def write_reports(cfg: dict, out_xlsx: Path | None = None, files: list[Path] | None = None) -> tuple[Path, Path]:
-    xlsx_path = Path(out_xlsx) if out_xlsx else cfg.path("report")
-    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
-    csv_path = xlsx_path.with_suffix(".csv")
-    rows = collect_rows(cfg, files)
+    with _REPORT_LOCK:
+        xlsx_path = Path(out_xlsx) if out_xlsx else cfg.path("report")
+        xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_path = xlsx_path.with_suffix(".csv")
+        rows = collect_rows(cfg, files)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Tổng hợp"
-    ws.append(HEADERS)
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
-    for col_idx in range(1, len(HEADERS) + 1):
-        c = ws.cell(row=1, column=col_idx)
-        c.fill = header_fill
-        c.font = header_font
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Tổng hợp"
+        ws.append(HEADERS)
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        header_font = Font(color="FFFFFF", bold=True)
+        for col_idx in range(1, len(HEADERS) + 1):
+            c = ws.cell(row=1, column=col_idx)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    for r in rows:
-        ws.append([
-            r["file"],
-            r["kind"],
-            r["n_docs"],
-            r["label"],
-            r["confidence"],
-            r["total_words"],
-            r["extract_words"],
-            r["abstract_words"],
-            r["compress"],
-            r["ratio_display"],
-            r["edit"],
-            r["coverage"],
-            r["geval"],
-            r["n_errors"],
-            r["n_warnings"],
-            r["warnings"],
-            r["status_vi"],
-        ])
-    widths = [20, 10, 12, 22, 16, 12, 15, 15, 14, 18, 10, 14, 12, 10, 12, 55, 16]
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-    wb.save(str(xlsx_path))
-
-    with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(HEADERS)
         for r in rows:
-            writer.writerow([
-                r["file"], r["kind"], r["n_docs"], r["label"], r["confidence"],
-                r["total_words"], r["extract_words"], r["abstract_words"], r["compress"],
-                r["ratio_display"], r["edit"], r["coverage"], r["geval"],
-                r["n_errors"], r["n_warnings"], r["warnings"], r["status_vi"],
+            ws.append([
+                r["file"],
+                r["kind"],
+                r["n_docs"],
+                r["label"],
+                r["confidence"],
+                r["total_words"],
+                r["extract_words"],
+                r["abstract_words"],
+                r["compress"],
+                r["ratio_display"],
+                r["edit"],
+                r["coverage"],
+                r["geval"],
+                r["n_errors"],
+                r["n_warnings"],
+                r["warnings"],
+                r["status_vi"],
             ])
-    return xlsx_path, csv_path
+        widths = [20, 10, 12, 22, 16, 12, 15, 15, 14, 18, 10, 14, 12, 10, 12, 55, 16]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+        wb.save(str(xlsx_path))
+
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(HEADERS)
+            for r in rows:
+                writer.writerow([
+                    r["file"], r["kind"], r["n_docs"], r["label"], r["confidence"],
+                    r["total_words"], r["extract_words"], r["abstract_words"], r["compress"],
+                    r["ratio_display"], r["edit"], r["coverage"], r["geval"],
+                    r["n_errors"], r["n_warnings"], r["warnings"], r["status_vi"],
+                ])
+        return xlsx_path, csv_path
