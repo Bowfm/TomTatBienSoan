@@ -4,6 +4,11 @@ Tái cấu trúc từ skill_ref/.../scripts/common.py (build_units), inspect_doc
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # chỉ dùng cho type hints, tránh import vòng lúc chạy
+    from .models import DocumentBudget, UnitItem, UnitsData
+
 import math
 import re
 from pathlib import Path
@@ -12,7 +17,7 @@ from .docx_io import DocxError, check_filename_convention, detect_layout, filena
 from .textutil import count_words, split_sentences
 
 
-def build_units(paras: list[str]) -> list[dict]:
+def build_units(paras: list[str]) -> list[UnitItem]:
     """Chia các đoạn của một văn bản thành đơn vị đánh số từ 1."""
     units, uid, para_no = [], 0, 0
     for p in paras:
@@ -25,7 +30,7 @@ def build_units(paras: list[str]) -> list[dict]:
     return units
 
 
-def compute_budget(total: int, cfg: dict) -> dict:
+def compute_budget(total: int, cfg: dict) -> DocumentBudget:
     g, e = cfg["grading"], cfg["extract"]
     return {
         "total_words": total,
@@ -58,7 +63,7 @@ def abstract_targets(n_extract: int, cfg: dict) -> dict:
     }
 
 
-def inspect_docx(path: str | Path, cfg: dict) -> dict:
+def inspect_docx(path: str | Path, cfg: dict) -> UnitsData:
     """Đọc file, nhận diện bố cục, chia đơn vị. Trả về dữ liệu 'units' của file."""
     path = Path(path)
     _, _, rows = load_table(path)

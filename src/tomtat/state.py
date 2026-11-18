@@ -1,6 +1,11 @@
 """Quản lý trạng thái, bản nháp và lịch sử phiên bản của từng file trong work\\<stem>\\."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # chỉ dùng cho type hints, tránh import vòng lúc chạy
+    from .models import FileState, UnitsData
+
 import json
 import os
 from datetime import datetime
@@ -63,7 +68,7 @@ class FileWorkspace:
         self.drafts_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-    def default_state(self) -> dict:
+    def default_state(self) -> FileState:
         return {
             "file": self.docx_path.name,
             "stem": self.stem,
@@ -102,7 +107,7 @@ class FileWorkspace:
             "output_path": None,
         }
 
-    def load_state(self) -> dict:
+    def load_state(self) -> FileState:
         st = read_json(self.state_path)
         if st is None:
             return self.default_state()
@@ -111,21 +116,21 @@ class FileWorkspace:
         base["status_vi"] = STATUS_VI.get(base["status"], base["status"])
         return base
 
-    def save_state(self, st: dict) -> dict:
+    def save_state(self, st: FileState) -> FileState:
         self.ensure_dirs()
         st["updated_at"] = now_iso()
         st["status_vi"] = STATUS_VI.get(st["status"], st["status"])
         write_json_atomic(self.state_path, st)
         return st
 
-    def load_units(self) -> dict | None:
+    def load_units(self) -> UnitsData | None:
         return read_json(self.units_path)
 
-    def save_units(self, units_data: dict) -> None:
+    def save_units(self, units_data: UnitsData) -> None:
         self.ensure_dirs()
         write_json_atomic(self.units_path, units_data)
 
-    def save_draft_version(self, st: dict, source: str = "ai", note: str = "") -> int:
+    def save_draft_version(self, st: FileState, source: str = "ai", note: str = "") -> int:
         """Lưu một bản chụp nháp vào drafts\\vNNN.json để có thể khôi phục."""
         self.ensure_dirs()
         existing = sorted(self.drafts_dir.glob("v*.json"))

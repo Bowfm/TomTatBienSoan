@@ -1,14 +1,19 @@
-"""Domain data structures, dataclasses, and TypedDicts for TomTatBienSoan.
+"""Mô hình dữ liệu dùng chung (type hints) cho TomTatBienSoan.
 
-Tập trung các mô hình dữ liệu dùng chung giữa các layer:
-- LLM: LLMResult, LLMError
-- Checks: CheckResult, Issue
-- Text: TextConfig
-- Pipeline & Workspace: FileState, StepStates, Units
+Dữ liệu thực tế được lưu dưới dạng JSON (state.json, units.json) và truyền đi
+dưới dạng dict, nên các mô hình ở đây là ``TypedDict``: chỉ phục vụ kiểm tra kiểu
+tĩnh / gợi ý IDE, KHÔNG thay đổi cách đọc ghi dữ liệu lúc chạy.
+
+Cấu trúc phải khớp với:
+- ``state.FileWorkspace.default_state()``  → FileState
+- ``units.inspect_docx()``                → UnitsData
+- ``units.compute_budget()``              → DocumentBudget
+
+Ngoài ra re-export các kiểu đã có ở module khác để import tập trung:
+CheckResult, Issue, LLMResult, LLMError, TextConfig.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
 from .checks.core import CheckResult, Issue
@@ -16,6 +21,7 @@ from .llm.base import LLMError, LLMResult
 from .textutil import TextConfig
 
 
+# ---------------------------------------------------------------- state.json
 class LabelStep(TypedDict, total=False):
     value: str
     per_doc: list[dict[str, Any]]
@@ -74,50 +80,66 @@ class FileState(TypedDict, total=False):
     model_used: str | None
 
 
-@dataclass
-class UnitItem:
-    """Một đơn vị văn bản (câu hoặc đề mục) được phân đoạn từ .docx."""
+# ---------------------------------------------------------------- units.json
+class UnitItem(TypedDict):
+    """Một đơn vị (câu/đề mục) — xem ``units.build_units``."""
     id: int
+    para: int
     text: str
     words: int
-    is_heading: bool = False
 
 
-@dataclass
-class DocSegment:
-    """Một văn bản con trong tài liệu (hỗ trợ đơn văn bản và đa văn bản)."""
+class DocSegment(TypedDict):
+    """Một văn bản con trong file (file M có nhiều văn bản)."""
     n: int
+    row: int
     words: int
-    units: list[UnitItem] = field(default_factory=list)
+    units: list[UnitItem]
 
 
-@dataclass
-class DocumentBudget:
-    """Ngân sách từ và ngưỡng tỷ lệ nén trích chọn."""
+class DocumentBudget(TypedDict):
+    """Ngân sách số từ — xem ``units.compute_budget``."""
     total_words: int
-    extract_target_ratio: float
-    extract_target_mid: int
     extract_min: int
     extract_max: int
+    extract_target_low: int
+    extract_target_high: int
+    extract_target_mid: int
+    target_low_pct: int
+    target_high_pct: int
+    target_mid_pct: int
+
+
+class UnitsData(TypedDict):
+    """Kết quả bước inspect — xem ``units.inspect_docx``."""
+    file: str
+    kind: str
+    query: str
+    layout: dict[str, Any]
+    docs: list[DocSegment]
+    ai_extract: str
+    ai_abstract: str
+    existing_labels: list[str]
+    budget: DocumentBudget
+    filename_mismatch: str | None
 
 
 __all__ = [
-    # Checks
+    # Re-export
     "CheckResult",
     "Issue",
-    # LLM
     "LLMResult",
     "LLMError",
-    # Text
     "TextConfig",
-    # State TypedDicts
+    # state.json
     "LabelStep",
     "ExtractStep",
     "AbstractStep",
     "JudgeStep",
     "FileState",
-    # Segmentation Dataclasses
+    # units.json
     "UnitItem",
     "DocSegment",
     "DocumentBudget",
+    "UnitsData",
 ]

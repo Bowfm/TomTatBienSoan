@@ -162,13 +162,25 @@ def test_phase2_and_3_architecture_refactor(tmp_path):
     assert isinstance(svc.discover_files(), list)
     assert isinstance(svc.get_status_rows(), list)
 
-    from tomtat.models import CheckResult, Issue, LLMResult, LLMError, UnitItem
+    from tomtat.models import (
+        CheckResult, DocSegment, DocumentBudget, FileState, Issue, LLMError, LLMResult,
+        UnitItem, UnitsData,
+    )
     assert CheckResult is not None
     assert Issue is not None
     assert LLMResult is not None
     assert LLMError is not None
-    u = UnitItem(id=1, text="Câu mẫu.", words=2)
-    assert u.id == 1 and u.words == 2
+
+    # TypedDict phải khớp đúng với dữ liệu thật mà code sinh ra (chống "models" lệch khỏi code)
+    from tomtat.state import FileWorkspace
+    from tomtat.units import inspect_docx
+    units = inspect_docx(cfg.root / "samples" / "M54629.docx", cfg)
+    assert set(units) == set(UnitsData.__annotations__)
+    assert set(units["budget"]) == set(DocumentBudget.__annotations__)
+    assert set(units["docs"][0]) == set(DocSegment.__annotations__)
+    assert set(units["docs"][0]["units"][0]) == set(UnitItem.__annotations__)
+    st_default = FileWorkspace(tmp_path / "w", tmp_path / "x.docx").default_state()
+    assert set(st_default) <= set(FileState.__annotations__)
 
     # 6. Kiểm tra gọi song song generate_json_batch
     client = MockClient(cfg)

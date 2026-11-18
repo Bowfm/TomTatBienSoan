@@ -1,6 +1,11 @@
 """FileService — Tầng nghiệp vụ xử lý, duyệt, lưu trữ và xuất file tài liệu."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # chỉ dùng cho type hints, tránh import vòng lúc chạy
+    from ..models import FileState, UnitsData
+
 from datetime import datetime
 import io
 from pathlib import Path
@@ -51,7 +56,7 @@ class FileService:
 
     def inspect_file(
         self, docx_path: Path, force: bool = False, reset: bool = False
-    ) -> tuple[FileWorkspace, dict, dict | None]:
+    ) -> tuple[FileWorkspace, FileState, UnitsData | None]:
         """Kiểm tra và bóc tách các câu/đơn vị từ file .docx.
 
         - force: luôn chạy lại bước inspect.
