@@ -100,7 +100,7 @@ def collect_rows(cfg: dict, files: list[Path] | None = None, reverse: bool = Tru
         # Kiểm tra file bất thường có thể bị hủy
         susp_reasons = metrics.get("suspicious_reasons")
         if susp_reasons is None and units:
-            from .checks import check_suspicious_document
+            from .suspicious import check_suspicious_document
             susp_reasons = check_suspicious_document(units)
         is_susp = bool(metrics.get("is_suspicious") or susp_reasons)
 

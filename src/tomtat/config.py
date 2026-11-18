@@ -1,16 +1,22 @@
 """Nạp cấu hình (config.yaml) và biến môi trường (.env)."""
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 import yaml
 
 PROJECT_ROOT = Path(os.environ.get("TOMTAT_HOME") or Path(__file__).resolve().parents[2])
+logger = logging.getLogger("tomtat.config")
+
+
+class ConfigValidationError(ValueError):
+    """Lỗi khi file config.yaml thiếu các trường bắt buộc."""
 
 
 class Config(dict):
-    """dict có thêm vài tiện ích về đường dẫn."""
+    """dict có thêm vài tiện ích về đường dẫn và kiểm tra tính hợp lệ (schema validation)."""
 
     root: Path
 
@@ -33,6 +39,35 @@ class Config(dict):
     @property
     def prompts_dir(self) -> Path:
         return self.path("prompts")
+
+    def validate(self, raise_on_error: bool = False) -> list[str]:
+        """Kiểm tra tính toàn vẹn của cấu hình hệ thống."""
+        errors: list[str] = []
+        if "paths" not in self:
+            errors.append("Thiếu mục 'paths' trong cấu hình.")
+        else:
+            for req in ("input", "output", "work", "prompts"):
+                if req not in self["paths"]:
+                    errors.append(f"Thiếu đường dẫn paths.{req} trong cấu hình.")
+
+        if "gemini" not in self:
+            errors.append("Thiếu mục 'gemini' trong cấu hình.")
+        elif not self["gemini"].get("model"):
+            errors.append("Thiếu tên model chính tại gemini.model.")
+
+        if "extract" not in self:
+            errors.append("Thiếu mục 'extract' trong cấu hình.")
+
+        if "abstract" not in self:
+            errors.append("Thiếu mục 'abstract' trong cấu hình.")
+
+        if "grading" not in self:
+            errors.append("Thiếu mục 'grading' trong cấu hình.")
+
+        if errors and raise_on_error:
+            raise ConfigValidationError("Cấu hình không hợp lệ: " + "; ".join(errors))
+
+        return errors
 
 
 def load_config(path: str | os.PathLike | None = None, root: str | os.PathLike | None = None) -> Config:

@@ -30,6 +30,18 @@ from .units import (
 
 STEPS_ORDER = ("inspect", "label", "extract", "abstract", "judge")
 
+__all__ = [
+    "STEPS_ORDER",
+    "Pipeline",
+    "process_file",
+    "step_inspect",
+    "step_label",
+    "step_extract",
+    "step_abstract",
+    "step_judge",
+    "finalize_status",
+]
+
 
 def _add_flag(st: dict, flag: str) -> None:
     flags = st.setdefault("flags", [])
@@ -451,17 +463,52 @@ def finalize_status(units_data: dict, st: dict, cfg: dict,
     return st
 
 
+class Pipeline:
+    """Điều phối toàn bộ quy trình AI xử lý file .docx:
+    inspect -> label -> extract -> abstract -> judge.
+    """
+
+    def __init__(self, cfg: dict, client: BaseClient, renderer: PromptRenderer | None = None):
+        self.cfg = cfg
+        self.client = client
+        self.renderer = renderer or PromptRenderer(cfg.prompts_dir if hasattr(cfg, "prompts_dir") else cfg["paths"]["prompts"])
+
+    def process(
+        self,
+        docx_path: str | Path,
+        *,
+        force: bool = False,
+        only_step: str | None = None,
+        user_note: str = "",
+        ignore_mismatch: bool = False,
+        restart: bool = False,
+    ) -> dict:
+        """Xử lý một file .docx qua pipeline."""
+        return process_file(
+            Path(docx_path),
+            self.cfg,
+            self.client,
+            force=force,
+            only_step=only_step,
+            user_note=user_note,
+            ignore_mismatch=ignore_mismatch,
+            restart=restart,
+            renderer=self.renderer,
+        )
+
+
 def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
                  force: bool = False, only_step: str | None = None,
                  user_note: str = "", ignore_mismatch: bool = False,
-                 restart: bool = False) -> dict:
+                 restart: bool = False, renderer: PromptRenderer | None = None) -> dict:
     """Xử lý một file .docx (toàn bộ pipeline hoặc chỉ một bước)."""
     ws = FileWorkspace(cfg.work_dir, docx_path)
     st = ws.load_state()
     if not force and not only_step and st["status"] in DONE_STATUSES:
         return {"skipped": True, "state": st}
 
-    renderer = PromptRenderer(cfg.prompts_dir)
+    if renderer is None:
+        renderer = PromptRenderer(cfg.prompts_dir)
     # Xóa thông báo lỗi cũ trong flags mỗi khi bắt đầu chạy lại
     old_err = st.get("error_message")
     st["flags"] = [
