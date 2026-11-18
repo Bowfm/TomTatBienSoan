@@ -112,8 +112,11 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
         use_mock = request.form.get("mock", "false").lower() in ("1", "true", "yes", "on") or mock
         overwrite = request.form.get("overwrite", "false").lower() in ("1", "true", "yes", "on")
 
-        # Sắp xếp danh sách file nạp theo thứ tự tự nhiên (M1, M2... M50401, M50581) ngay từ đầu
-        uploaded.sort(key=lambda f: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(getattr(f, "filename", "") or ""))])
+        # Sắp xếp danh sách file nạp: file ở cuối sẽ lên đầu, file đầu sẽ về cuối (reverse=True)
+        uploaded.sort(
+            key=lambda f: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(getattr(f, "filename", "") or ""))],
+            reverse=True,
+        )
 
         cfg.input_dir.mkdir(parents=True, exist_ok=True)
         saved_paths: list[Path] = []

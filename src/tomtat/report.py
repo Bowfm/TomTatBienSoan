@@ -61,7 +61,7 @@ def _infer_model_from_logs(ws: FileWorkspace, st: dict) -> str:
     return st.get("model_used") or ""
 
 
-def collect_rows(cfg: dict, files: list[Path] | None = None) -> list[dict]:
+def collect_rows(cfg: dict, files: list[Path] | None = None, reverse: bool = True) -> list[dict]:
     if files is None:
         files = discover_docx_files(cfg.input_dir)
     # Bổ sung cả những thư mục đã có trong work\ dù file không nằm trong input\
@@ -76,7 +76,7 @@ def collect_rows(cfg: dict, files: list[Path] | None = None) -> list[dict]:
     def _natural_key(s: str) -> list[int | str]:
         return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(s))]
 
-    for stem in sorted(known, key=_natural_key):
+    for stem in sorted(known, key=_natural_key, reverse=reverse):
         docx_path = known[stem]
         ws = FileWorkspace(cfg.work_dir, docx_path)
         st = ws.load_state()

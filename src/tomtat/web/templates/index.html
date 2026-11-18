@@ -65,13 +65,16 @@
               <span>Chờ duyệt</span>
               <span id="badge-pending" class="count-pill pill-pending">0</span>
             </div>
-            <select id="filter-status" title="Lọc chi tiết trong cột Chờ duyệt">
-              <option value="">Tất cả chờ duyệt</option>
-              <option value="da_co_nhap">Đã có nháp</option>
-              <option value="can_xu_ly_tay">Cần xử lý tay</option>
-              <option value="chua_xu_ly">Chưa xử lý</option>
-              <option value="loi">Lỗi</option>
-            </select>
+            <div style="display:flex;align-items:center;gap:4px">
+              <button id="btn-toggle-sort" class="btn btn-xs" title="Đổi thứ tự hiển thị: Cuối lên đầu / Đầu lên trước" style="padding:2px 6px;font-size:11px;font-weight:600;white-space:nowrap;background:#f8fafc;border:1px solid #cbd5e1;border-radius:4px;cursor:pointer">🔻 Cuối lên đầu</button>
+              <select id="filter-status" title="Lọc chi tiết trong cột Chờ duyệt">
+                <option value="">Tất cả chờ duyệt</option>
+                <option value="da_co_nhap">Đã có nháp</option>
+                <option value="can_xu_ly_tay">Cần xử lý tay</option>
+                <option value="chua_xu_ly">Chưa xử lý</option>
+                <option value="loi">Lỗi</option>
+              </select>
+            </div>
           </div>
           <ul id="file-list" class="file-list"></ul>
           <div class="sb-col-foot sb-col-foot-pending">

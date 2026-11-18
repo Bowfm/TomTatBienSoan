@@ -55,17 +55,28 @@ async function loadFileList(keepCurrent = true) {
   }
 }
 
+let SORT_ORDER = "desc"; // Mặc định: file ở cuối sẽ lên đầu, file đầu sẽ về cuối
+
+function sortFiles(list) {
+  return [...list].sort((a, b) => {
+    const cmp = (a.file || "").localeCompare(b.file || "", undefined, { numeric: true, sensitivity: "base" });
+    return SORT_ORDER === "desc" ? -cmp : cmp;
+  });
+}
+
 function isApprovedStatus(st) {
   return st === "da_duyet" || st === "da_xuat";
 }
 
 function pendingFiles() {
   const f = $("filter-status").value;
-  return FILES.filter((r) => !isApprovedStatus(r.status) && (!f || r.status === f));
+  const list = FILES.filter((r) => !isApprovedStatus(r.status) && (!f || r.status === f));
+  return sortFiles(list);
 }
 
 function approvedFiles() {
-  return FILES.filter((r) => isApprovedStatus(r.status));
+  const list = FILES.filter((r) => isApprovedStatus(r.status));
+  return sortFiles(list);
 }
 
 function filteredFiles() {
@@ -845,8 +856,11 @@ async function uploadFiles(fileList, overwrite = false) {
   // Sao chép FileList sang mảng tĩnh ngay lập tức để không bị mất khi xóa input.value
   const filesArr = Array.from(fileList || []);
   if (!filesArr.length) return;
-  // Sắp xếp tự nhiên tên file ngay trước khi nạp để đảm bảo đúng thứ tự M1, M2... từ trên xuống
-  filesArr.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" }));
+  // Sắp xếp danh sách file nạp: file ở cuối sẽ lên đầu, file đầu sẽ về cuối (theo SORT_ORDER, mặc định desc)
+  filesArr.sort((a, b) => {
+    const cmp = (a.name || "").localeCompare(b.name || "", undefined, { numeric: true, sensitivity: "base" });
+    return SORT_ORDER === "desc" ? -cmp : cmp;
+  });
   $("file-upload-input").value = "";
 
   const runNow = $("chk-run-on-upload") ? $("chk-run-on-upload").checked : false;
@@ -892,7 +906,10 @@ async function uploadFiles(fileList, overwrite = false) {
         .filter((s) => addedSet.has(s));
       const stemsToRun = orderedStems.length
         ? orderedStems
-        : [...data.stems].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+        : [...data.stems].sort((a, b) => {
+            const cmp = a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+            return SORT_ORDER === "desc" ? -cmp : cmp;
+          });
       await runQueueOnStems(stemsToRun, useMock);
     } else if (data.errors && data.errors.length > 0) {
       showToast(`Đã thêm (${data.added.length} file), có lưu ý: ${data.errors[0]}`, true);
@@ -1077,6 +1094,17 @@ window.addEventListener("DOMContentLoaded", () => {
     renderDoneList();
   });
   $("filter-status").addEventListener("change", renderFileList);
+  const btnSort = $("btn-toggle-sort");
+  if (btnSort) {
+    btnSort.addEventListener("click", () => {
+      SORT_ORDER = SORT_ORDER === "desc" ? "asc" : "desc";
+      btnSort.textContent = SORT_ORDER === "desc" ? "🔻 Cuối lên đầu" : "🔺 Đầu lên trước";
+      btnSort.title = SORT_ORDER === "desc"
+        ? "Đang hiển thị file cuối lên đầu (nhấn để đổi sang đầu lên trước)"
+        : "Đang hiển thị file đầu lên trước (nhấn để đổi sang cuối lên đầu)";
+      renderFileList();
+    });
+  }
   $("sel-style").addEventListener("change", scheduleCheck);
   $("txt-extract").addEventListener("input", () => {
     CUSTOM_EDITED = true;
