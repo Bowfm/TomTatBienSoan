@@ -17,7 +17,8 @@ powershell -NoProfile -Command ^
   "$tmp = Join-Path $env:TEMP ('TomTatBienSoan_pack_' + [guid]::NewGuid().ToString('N')); " ^
   "$stage = Join-Path $tmp 'TomTatBienSoan'; " ^
   "New-Item -ItemType Directory -Force -Path $stage | Out-Null; " ^
-  "$items = @('HUONG_DAN_CAI_DAT_NHANH.txt','README.md','config.yaml','api_keys.example.txt','.env.example','.gitignore','.github_repo_url','requirements.txt','setup.bat','tomtat.bat','khoi_dong.bat','tat_server.bat','cap_nhat.bat','day_cap_nhat.bat','dong_goi_chia_se.bat','prompts','src','tests','docs','skill_ref','samples'); " ^
+  "try { $head = (git rev-parse HEAD 2>$null).Trim(); if ($head) { @{ commit = $head; updated_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') } | ConvertTo-Json | Set-Content (Join-Path $root 'version.json') -Encoding UTF8 } } catch {}; " ^
+  "$items = @('HUONG_DAN_CAI_DAT_NHANH.txt','README.md','config.yaml','version.json','api_keys.example.txt','.env.example','.gitignore','.github_repo_url','requirements.txt','setup.bat','tomtat.bat','khoi_dong.bat','tat_server.bat','cap_nhat.bat','day_cap_nhat.bat','dong_goi_chia_se.bat','prompts','src','tests','docs','skill_ref','samples'); " ^
   "foreach ($it in $items) { " ^
   "  $src = Join-Path $root $it; " ^
   "  if (Test-Path $src) { Copy-Item -Path $src -Destination (Join-Path $stage $it) -Recurse -Force } " ^

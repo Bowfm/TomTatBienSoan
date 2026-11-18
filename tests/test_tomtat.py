@@ -664,6 +664,45 @@ def test_quota_cycle_pacific_time(tmp_path, monkeypatch):
     assert len(client._exhausted) == 0
 
 
+def test_check_update_endpoints(tmp_path, monkeypatch):
+    import json
+    from tomtat.updater import check_update, _save_version
+    from tomtat.web.app import create_app
+
+    # 1. Giả lập phiên bản trùng khớp -> up_to_date
+    monkeypatch.setattr("tomtat.updater.get_current_commit", lambda root=None: "aabbccddee")
+    monkeypatch.setattr("tomtat.updater.get_remote_commit", lambda root=None: "aabbccddee")
+
+    res = check_update(tmp_path)
+    assert res["has_update"] is False
+    assert res["status"] == "up_to_date"
+    assert "Đã là phiên bản mới nhất" in res["message"]
+
+    # 2. Giả lập phiên bản khác biệt -> update_available
+    monkeypatch.setattr("tomtat.updater.get_remote_commit", lambda root=None: "1122334455")
+    res2 = check_update(tmp_path)
+    assert res2["has_update"] is True
+    assert res2["status"] == "update_available"
+    assert "Có bản cập nhật mới trên GitHub" in res2["message"]
+
+    # 3. Kiểm tra lưu và đọc version.json
+    _save_version(tmp_path, "1122334455")
+    v_data = json.loads((tmp_path / "version.json").read_text(encoding="utf-8"))
+    assert v_data["commit"] == "1122334455"
+
+    # 4. Kiểm tra qua Flask API endpoint
+    cfg = load_config()
+    app = create_app(cfg)
+    client = app.test_client()
+
+    api_res = client.get("/api/check-update")
+    assert api_res.status_code == 200
+    data = api_res.get_json()
+    assert data["has_update"] is True
+    assert data["status"] == "update_available"
+
+
+
 
 
 

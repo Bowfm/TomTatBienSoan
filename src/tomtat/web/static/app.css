@@ -560,3 +560,36 @@ textarea {
   z-index: 80;
   box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
+
+.btn-update-available {
+  background: #f59e0b !important;
+  color: #fff !important;
+  border-color: #d97706 !important;
+  font-weight: 600 !important;
+  animation: pulse-update 2s infinite;
+}
+
+@keyframes pulse-update {
+  0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7); }
+  70% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fffbeb;
+  color: #92400e;
+  border-bottom: 2px solid #fde68a;
+  padding: 10px 20px;
+  font-size: 13.5px;
+  position: sticky;
+  top: 48px;
+  z-index: 19;
+}
+
+.update-banner-actions {
+  display: flex;
+  gap: 8px;
+}

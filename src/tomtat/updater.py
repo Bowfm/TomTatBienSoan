@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,131 @@ PROTECTED_ENTRIES = {
     ".env",
     "api_keys.txt",
 }
+
+
+def get_current_commit(root_dir: Path | str | None = None) -> str:
+    root = Path(root_dir) if root_dir else Path.cwd()
+    if (root / ".git").exists():
+        try:
+            res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(root), timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    v_file = root / "version.json"
+    if v_file.exists():
+        try:
+            data = json.loads(v_file.read_text(encoding="utf-8"))
+            if data.get("commit"):
+                return str(data["commit"]).strip()
+        except Exception:
+            pass
+    return ""
+
+
+def get_remote_commit(root_dir: Path | str | None = None) -> str:
+    root = Path(root_dir) if root_dir else Path.cwd()
+    url_file = root / ".github_repo_url"
+    repo_url = "https://github.com/Bowfm/TomTatBienSoan.git"
+    if url_file.exists():
+        try:
+            c = url_file.read_text(encoding="utf-8").strip()
+            if c:
+                repo_url = c
+        except Exception:
+            pass
+
+    clean = repo_url.rstrip("/").removesuffix(".git")
+    parts = clean.split("/")
+    owner_repo = f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else "Bowfm/TomTatBienSoan"
+    api_url = f"https://api.github.com/repos/{owner_repo}/commits/main"
+
+    import ssl
+    req = urllib.request.Request(
+        api_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TomTatUpdater/2.0",
+            "Accept": "application/vnd.github.sha",
+        },
+    )
+    try:
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            sha = resp.read().decode("utf-8").strip()
+            if sha and len(sha) >= 7:
+                return sha
+    except Exception:
+        pass
+
+    if (root / ".git").exists():
+        try:
+            res = subprocess.run(["git", "ls-remote", "origin", "main"], capture_output=True, text=True, cwd=str(root), timeout=7)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip().split()[0]
+        except Exception:
+            pass
+
+    return ""
+
+
+def _save_version(root: Path, commit: str) -> None:
+    if not commit:
+        return
+    try:
+        from datetime import datetime
+        v_file = root / "version.json"
+        data = {
+            "commit": commit.strip(),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        v_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def check_update(root_dir: Path | str | None = None) -> dict:
+    """Kiểm tra xem bản hiện tại có khác biệt với bản trên GitHub không."""
+    root = Path(root_dir) if root_dir else Path.cwd()
+    current = get_current_commit(root)
+    remote = get_remote_commit(root)
+
+    cur_short = current[:7] if current else ""
+    rem_short = remote[:7] if remote else ""
+
+    if not remote:
+        return {
+            "has_update": False,
+            "status": "offline",
+            "current_commit": cur_short,
+            "latest_commit": "",
+            "message": "Không thể kết nối đến GitHub để kiểm tra phiên bản.",
+        }
+
+    if not current:
+        return {
+            "has_update": True,
+            "status": "update_available",
+            "current_commit": "",
+            "latest_commit": rem_short,
+            "message": f"Có bản cập nhật mới trên GitHub (bản mới: {rem_short})",
+        }
+
+    if cur_short.lower() == rem_short.lower() or current.lower() == remote.lower():
+        return {
+            "has_update": False,
+            "status": "up_to_date",
+            "current_commit": cur_short,
+            "latest_commit": rem_short,
+            "message": f"Đã là phiên bản mới nhất ({cur_short}).",
+        }
+    else:
+        return {
+            "has_update": True,
+            "status": "update_available",
+            "current_commit": cur_short,
+            "latest_commit": rem_short,
+            "message": f"Có bản cập nhật mới trên GitHub! (bản mới: {rem_short}, hiện tại: {cur_short})",
+        }
 
 
 def run_update(root_dir: Path | str | None = None) -> tuple[bool, str]:
@@ -45,6 +171,8 @@ def run_update(root_dir: Path | str | None = None) -> tuple[bool, str]:
                 out = (pull.stdout or "") + ("\n" + pull.stderr if pull.stderr else "")
                 if pull.returncode == 0:
                     _update_pip(root)
+                    new_sha = get_current_commit(root)
+                    _save_version(root, new_sha)
                     return True, f"[Git] Đã cập nhật thành công từ GitHub:\n{out.strip()}"
         except Exception:
             pass
@@ -160,8 +288,19 @@ def run_update(root_dir: Path | str | None = None) -> tuple[bool, str]:
                     shutil.copyfileobj(src_f, dst_f)
                 updated_files += 1
 
+        zip_commit = ""
+        if zf.comment:
+            try:
+                zip_commit = zf.comment.decode("utf-8").strip()
+            except Exception:
+                pass
+        if not zip_commit:
+            zip_commit = get_remote_commit(root)
+
+        _save_version(root, zip_commit)
         _update_pip(root)
-        return True, f"[GitHub Archive] Đã cập nhật thành công {updated_files} files từ kho GitHub!"
+        cur_short = zip_commit[:7] if zip_commit else "mới nhất"
+        return True, f"[GitHub Archive] Đã cập nhật thành công {updated_files} files (phiên bản {cur_short}) từ kho GitHub!"
     except Exception as exc:
         return False, f"Không thể cập nhật từ {zip_url}: {exc}"
 

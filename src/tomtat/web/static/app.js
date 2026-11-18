@@ -1131,18 +1131,85 @@ window.addEventListener("DOMContentLoaded", () => {
   if ($("btn-save")) $("btn-save").addEventListener("click", saveDraft);
   $("btn-approve").addEventListener("click", () => approveAndExport(false));
   if ($("btn-logs")) $("btn-logs").addEventListener("click", openLogsModal);
-  if ($("btn-self-update")) {
-    $("btn-self-update").addEventListener("click", async () => {
-      showToast("Đang kiểm tra và tải bản cập nhật mới nhất...");
+  async function initUpdateChecker() {
+    const btn = $("btn-self-update");
+    const banner = $("update-notification-banner");
+    const bannerMsg = $("update-banner-msg");
+    const btnBannerUpdate = $("btn-banner-update");
+    const btnBannerDismiss = $("btn-banner-dismiss");
+
+    const doUpdate = async () => {
+      showToast("Đang tải bản cập nhật mới nhất từ GitHub...");
+      if (btn) btn.disabled = true;
+      if (btnBannerUpdate) btnBannerUpdate.disabled = true;
       try {
         const res = await api("/api/self-update", { method: "POST", body: "{}" });
         showToast("Đã cập nhật xong! Đang tải lại giao diện...");
         setTimeout(() => window.location.reload(), 900);
       } catch (err) {
         showToast(err.message, true);
+        if (btn) btn.disabled = false;
+        if (btnBannerUpdate) btnBannerUpdate.disabled = false;
       }
-    });
+    };
+
+    if (btn) {
+      btn.addEventListener("click", async () => {
+        if (btn.classList.contains("btn-update-available")) {
+          await doUpdate();
+          return;
+        }
+        showToast("Đang kiểm tra phiên bản trên GitHub...");
+        try {
+          const info = await api("/api/check-update");
+          if (info.has_update) {
+            btn.classList.add("btn-update-available");
+            btn.textContent = "🔔 Có update mới!";
+            if (banner && bannerMsg) {
+              bannerMsg.textContent = `(Bản mới: ${info.latest_commit}${info.current_commit ? `, hiện tại: ${info.current_commit}` : ""})`;
+              banner.classList.remove("hidden");
+            }
+            await doUpdate();
+          } else {
+            showToast(`✓ Bạn đang ở phiên bản mới nhất (${info.current_commit || "mới nhất"})!`);
+          }
+        } catch (e) {
+          await doUpdate();
+        }
+      });
+    }
+
+    if (btnBannerUpdate) btnBannerUpdate.addEventListener("click", doUpdate);
+    if (btnBannerDismiss) {
+      btnBannerDismiss.addEventListener("click", () => {
+        if (banner) banner.classList.add("hidden");
+      });
+    }
+
+    // Tự động kiểm tra ngay khi mở trang
+    try {
+      const info = await api("/api/check-update");
+      if (info.has_update) {
+        if (btn) {
+          btn.classList.add("btn-update-available");
+          btn.textContent = "🔔 Có update mới!";
+          btn.title = info.message || "Có bản cập nhật mới trên GitHub (bấm để tải)";
+        }
+        if (banner && bannerMsg) {
+          bannerMsg.textContent = `(Bản mới: ${info.latest_commit}${info.current_commit ? `, hiện tại: ${info.current_commit}` : ""})`;
+          banner.classList.remove("hidden");
+        }
+      } else if (info.status === "up_to_date") {
+        if (btn) {
+          btn.title = `Đã là phiên bản mới nhất (${info.current_commit})`;
+        }
+      }
+    } catch (err) {
+      // Bỏ qua nếu offline
+    }
   }
+
+  initUpdateChecker();
   $("btn-preview").addEventListener("click", openPreviewModal);
   $("btn-close-preview").addEventListener("click", () => $("preview-modal").classList.add("hidden"));
   $("preview-close-bg").addEventListener("click", () => $("preview-modal").classList.add("hidden"));

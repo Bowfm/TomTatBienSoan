@@ -779,6 +779,14 @@ def create_app(cfg: Config, mock: bool = False) -> Flask:
             "count": len(deleted),
         })
 
+    @app.get("/api/check-update")
+    def api_check_update():
+        """Kiểm tra xem có bản cập nhật mới trên GitHub hay không."""
+        from ..updater import check_update
+
+        info = check_update(cfg.root)
+        return jsonify(info)
+
     @app.post("/api/self-update")
     def api_self_update():
         """Kéo bản cập nhật code/prompt mới nhất từ GitHub."""
