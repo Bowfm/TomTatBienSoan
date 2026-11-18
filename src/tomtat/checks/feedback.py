@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .. import STYLES
-from ..suspicious import check_suspicious_document
+from .suspicious import check_suspicious_document
 from ..textutil import nfc
 from .abstract_checks import check_abstract
 from .core import ERROR, WARNING, CheckResult

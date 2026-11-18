@@ -1,13 +1,9 @@
 """FileService — Tầng nghiệp vụ xử lý, duyệt, lưu trữ và xuất file tài liệu."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # chỉ dùng cho type hints, tránh import vòng lúc chạy
-    from ..models import FileState, UnitsData
-
 from datetime import datetime
 import io
+import json
 from pathlib import Path
 import shutil
 import zipfile
@@ -15,9 +11,10 @@ import zipfile
 from ..checks import run_checks
 from ..config import Config
 from ..docx_io import DocxError, fill_docx
-from ..memory import record_approved_sample
+from ..memory import load_memory, record_approved_sample
+from ..models import FileState, UnitsData
 from ..pipeline import Pipeline, finalize_status, process_file, step_inspect
-from ..report import collect_rows, write_reports
+from ..report import _infer_model_from_logs, collect_rows, infer_step_models_from_logs, write_reports
 from ..state import (
     STATUS_APPROVED,
     STATUS_DRAFT,
@@ -398,6 +395,104 @@ class FileService:
     def get_status_rows(self) -> list[dict]:
         """Thu thập danh sách trạng thái chi tiết của tất cả các file."""
         return collect_rows(self.cfg)
+
+    def get_learned_count(self) -> int:
+        """Lấy tổng số mẫu bài đã duyệt được hệ thống tự học."""
+        mem = load_memory(self.cfg.work_dir)
+        return int(mem.get("total_approved_learned", 0))
+
+    def get_file_detail(self, stem: str) -> dict:
+        """Lấy chi tiết state, units (kèm kiểm tra cơ học mới nhất) và danh sách phiên bản của một file."""
+        files_map = self.resolve_files()
+        if stem not in files_map:
+            raise FileNotFoundError(f"Không tìm thấy file '{stem}'.")
+        docx_path = files_map[stem]
+        ws, st, units_data = self.inspect_file(docx_path)
+        if units_data:
+            chk = run_checks(
+                units_data,
+                st.get("label", {}).get("value", ""),
+                st.get("extract", {}).get("text", ""),
+                st.get("abstract", {}).get("text", ""),
+                self.cfg,
+            )
+            st["checks"] = chk.to_dict()
+        step_models = infer_step_models_from_logs(ws, st)
+        for step_name, m_name in step_models.items():
+            if isinstance(st.get(step_name), dict) and not st[step_name].get("model_used"):
+                st[step_name]["model_used"] = m_name
+        if not st.get("model_used"):
+            inferred = _infer_model_from_logs(ws, st)
+            if inferred:
+                st["model_used"] = inferred
+        return {
+            "state": st,
+            "units": units_data,
+            "versions": ws.list_draft_versions(),
+        }
+
+    def get_file_logs(self, stem: str, limit: int = 40) -> dict:
+        """Đọc danh sách log các lần gọi Gemini của một file."""
+        ws = self.get_workspace(stem)
+        items = []
+        if ws.logs_dir.exists():
+            for lp in sorted(ws.logs_dir.glob("*.json"), reverse=True)[:limit]:
+                try:
+                    d = json.loads(lp.read_text(encoding="utf-8"))
+                    items.append({
+                        "filename": lp.name,
+                        "started_at": d.get("started_at", ""),
+                        "step": d.get("step", ""),
+                        "attempt": d.get("attempt", 1),
+                        "net_try": d.get("net_try", 0),
+                        "model": d.get("model", ""),
+                        "duration_s": d.get("duration_s", 0),
+                        "usage": d.get("usage") or {},
+                        "error": d.get("error", ""),
+                        "response_text": d.get("response_text", ""),
+                        "prompt": d.get("prompt", ""),
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+        return {"logs": items, "log_dir": str(ws.logs_dir)}
+
+    def check_content(self, stem: str, style: str, extract: str, abstract: str) -> dict:
+        """Kiểm tra cơ học tức thì cho nội dung nhãn / trích chọn / biên soạn của một file."""
+        files_map = self.resolve_files()
+        if stem not in files_map:
+            raise FileNotFoundError(f"Không tìm thấy file '{stem}'.")
+        ws = self.get_workspace(files_map[stem])
+        units_data = ws.load_units()
+        if not units_data:
+            raise ValueError("File chưa được inspect.")
+        if "total_words" in (units_data.get("budget") or {}):
+            units_data["budget"] = compute_budget(units_data["budget"]["total_words"], self.cfg)
+        chk = run_checks(units_data, style, extract, abstract, self.cfg)
+        return {"checks": chk.to_dict()}
+
+    def assemble_extract_from_selections(
+        self, stem: str, selections: dict, style: str = "", abstract: str = ""
+    ) -> dict:
+        """Ghép bản trích chọn từ danh sách ID đơn vị được chọn và chạy kiểm tra cơ học."""
+        files_map = self.resolve_files()
+        if stem not in files_map:
+            raise FileNotFoundError(f"Không tìm thấy file '{stem}'.")
+        ws = self.get_workspace(files_map[stem])
+        units_data = ws.load_units()
+        if not units_data:
+            raise ValueError("File chưa được inspect.")
+        if "total_words" in (units_data.get("budget") or {}):
+            units_data["budget"] = compute_budget(units_data["budget"]["total_words"], self.cfg)
+        sel_clean, id_errors = normalize_selections(units_data, selections)
+        text, per_doc_words = assemble_extract(units_data, sel_clean)
+        chk = run_checks(units_data, style, text, abstract, self.cfg)
+        return {
+            "extract": text,
+            "selections": {str(k): v for k, v in sel_clean.items()},
+            "per_doc_words": {str(k): v for k, v in per_doc_words.items()},
+            "id_errors": id_errors,
+            "checks": chk.to_dict(),
+        }
 
     def write_reports(self, out_xlsx: Path | None = None) -> tuple[Path, Path]:
         """Ghi báo cáo Excel và CSV."""

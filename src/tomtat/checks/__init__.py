@@ -40,7 +40,7 @@ from .scoring import (
     estimate_geval_heuristic,
     estimate_rouge2,
 )
-from ..suspicious import (
+from .suspicious import (
     BANK_KEYWORDS,
     VI_STOPWORDS,
     check_suspicious_document,

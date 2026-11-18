@@ -3,11 +3,9 @@ from __future__ import annotations
 
 from flask import Blueprint, current_app, jsonify, request
 
-from ...checks import run_checks
 from ...docx_io import DocxError
 from ...services.file_service import FileService
 from ...textutil import nfc
-from ...units import assemble_extract, compute_budget, normalize_selections
 
 bp = Blueprint("review", __name__)
 
@@ -24,50 +22,38 @@ def _service() -> FileService:
 def api_check(stem: str):
     """Kiểm tra tức thì khi người dùng sửa nhãn / trích chọn / biên soạn."""
     svc = _service()
-    files_map = svc.resolve_files()
-    if stem not in files_map:
-        return jsonify({"error": f"Không tìm thấy file '{stem}'."}), 404
-    ws = svc.get_workspace(files_map[stem])
-    units_data = ws.load_units()
-    if not units_data:
-        return jsonify({"error": "File chưa được inspect."}), 400
-    if "total_words" in (units_data.get("budget") or {}):
-        units_data["budget"] = compute_budget(units_data["budget"]["total_words"], svc.cfg)
     payload = request.get_json(force=True) or {}
-    style = payload.get("style", "")
-    extract = payload.get("extract", "")
-    abstract = payload.get("abstract", "")
-    chk = run_checks(units_data, style, extract, abstract, svc.cfg)
-    return jsonify({"checks": chk.to_dict()})
+    try:
+        res = svc.check_content(
+            stem=stem,
+            style=payload.get("style", ""),
+            extract=payload.get("extract", ""),
+            abstract=payload.get("abstract", ""),
+        )
+        return jsonify(res)
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @bp.post("/api/file/<stem>/assemble")
 def api_assemble(stem: str):
     """Ghép bản trích chọn từ các ID đơn vị được tick trên giao diện."""
     svc = _service()
-    files_map = svc.resolve_files()
-    if stem not in files_map:
-        return jsonify({"error": f"Không tìm thấy file '{stem}'."}), 404
-    ws = svc.get_workspace(files_map[stem])
-    units_data = ws.load_units()
-    if not units_data:
-        return jsonify({"error": "File chưa được inspect."}), 400
-    if "total_words" in (units_data.get("budget") or {}):
-        units_data["budget"] = compute_budget(units_data["budget"]["total_words"], svc.cfg)
     payload = request.get_json(force=True) or {}
-    selections = payload.get("selections") or {}
-    style = payload.get("style") or ""
-    abstract = payload.get("abstract") or ""
-    sel_clean, id_errors = normalize_selections(units_data, selections)
-    text, per_doc_words = assemble_extract(units_data, sel_clean)
-    chk = run_checks(units_data, style, text, abstract, svc.cfg)
-    return jsonify({
-        "extract": text,
-        "selections": {str(k): v for k, v in sel_clean.items()},
-        "per_doc_words": {str(k): v for k, v in per_doc_words.items()},
-        "id_errors": id_errors,
-        "checks": chk.to_dict(),
-    })
+    try:
+        res = svc.assemble_extract_from_selections(
+            stem=stem,
+            selections=payload.get("selections") or {},
+            style=payload.get("style") or "",
+            abstract=payload.get("abstract") or "",
+        )
+        return jsonify(res)
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @bp.post("/api/file/<stem>/save")

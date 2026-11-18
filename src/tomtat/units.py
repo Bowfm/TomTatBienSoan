@@ -4,16 +4,12 @@ Tái cấu trúc từ skill_ref/.../scripts/common.py (build_units), inspect_doc
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # chỉ dùng cho type hints, tránh import vòng lúc chạy
-    from .models import DocumentBudget, UnitItem, UnitsData
-
 import math
-import re
 from pathlib import Path
+import re
 
 from .docx_io import DocxError, check_filename_convention, detect_layout, filename_kind, load_table, row_text
+from .models import DocSegment, DocumentBudget, UnitItem, UnitsData
 from .textutil import count_words, split_sentences
 
 
@@ -71,7 +67,7 @@ def inspect_docx(path: str | Path, cfg: dict) -> UnitsData:
     if "error" in layout:
         raise DocxError(layout["error"])
     query = row_text(rows[0]) if layout["has_query"] else ""
-    docs = []
+    docs: list[DocSegment] = []
     for k, ri in enumerate(layout["doc_idx"], start=1):
         units = build_units(rows[ri])
         docs.append({"n": k, "row": ri, "words": sum(u["words"] for u in units), "units": units})

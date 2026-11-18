@@ -1,15 +1,12 @@
 """Quản lý trạng thái, bản nháp và lịch sử phiên bản của từng file trong work\\<stem>\\."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # chỉ dùng cho type hints, tránh import vòng lúc chạy
-    from .models import FileState, UnitsData
-
+from datetime import datetime
 import json
 import os
-from datetime import datetime
 from pathlib import Path
+
+from .models import AbstractStep, ExtractStep, FileState, JudgeStep, LabelStep, UnitsData
 
 STATUS_PENDING = "chua_xu_ly"
 STATUS_PARTIAL = "chua_xu_ly"  # Alias tương thích ngược

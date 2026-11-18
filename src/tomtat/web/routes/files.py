@@ -6,11 +6,11 @@ from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
 
+from ... import STYLES
 from ...config import get_api_key, get_api_keys, load_config
 from ...docx_io import DocxError
-from ...memory import load_memory
-from ...report import _infer_model_from_logs, infer_step_models_from_logs
 from ...services.file_service import FileService
+from ...state import STATUS_VI
 from ...textutil import nfc
 from ..batch import make_client
 
@@ -31,15 +31,10 @@ def _service() -> FileService:
 
 @bp.get("/api/files")
 def api_files():
-    cfg = _cfg()
     fresh_cfg = load_config()
     svc = _service()
-    files_map = svc.resolve_files()
     rows = svc.get_status_rows()
     g = fresh_cfg.get("gemini", {})
-    mem = load_memory(cfg.work_dir)
-    from ... import STYLES
-    from ...state import STATUS_VI
     return jsonify({
         "files": rows,
         "styles": STYLES,
@@ -49,7 +44,7 @@ def api_files():
         "api_key_count": len(get_api_keys()),
         "primary_model": g.get("model", ""),
         "fallback_models": g.get("fallback_models") or [],
-        "learned_count": mem.get("total_approved_learned", 0),
+        "learned_count": svc.get_learned_count(),
     })
 
 
@@ -137,63 +132,16 @@ def api_get_file(stem: str):
     cfg = _cfg()
     cfg.reload()
     svc = _service()
-    files_map = svc.resolve_files()
-    if stem not in files_map:
-        return jsonify({"error": f"Không tìm thấy file '{stem}'."}), 404
-    docx_path = files_map[stem]
     try:
-        ws, st, units_data = svc.inspect_file(docx_path)
+        return jsonify(svc.get_file_detail(stem))
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
     except DocxError as exc:
         return jsonify({"error": str(exc)}), 400
-    if units_data:
-        from ...checks import run_checks
-        chk = run_checks(
-            units_data,
-            st.get("label", {}).get("value", ""),
-            st.get("extract", {}).get("text", ""),
-            st.get("abstract", {}).get("text", ""),
-            cfg,
-        )
-        st["checks"] = chk.to_dict()
-    step_models = infer_step_models_from_logs(ws, st)
-    for step_name, m_name in step_models.items():
-        if isinstance(st.get(step_name), dict) and not st[step_name].get("model_used"):
-            st[step_name]["model_used"] = m_name
-    if not st.get("model_used"):
-        inferred = _infer_model_from_logs(ws, st)
-        if inferred:
-            st["model_used"] = inferred
-    return jsonify({
-        "state": st,
-        "units": units_data,
-        "versions": ws.list_draft_versions(),
-    })
 
 
 @bp.get("/api/file/<stem>/logs")
 def api_get_logs(stem: str):
     """Trả về danh sách các lần gọi Gemini (logs) của file để xem trực tiếp trên web."""
     svc = _service()
-    ws = svc.get_workspace(stem)
-    items = []
-    if ws.logs_dir.exists():
-        import json
-        for lp in sorted(ws.logs_dir.glob("*.json"), reverse=True)[:40]:
-            try:
-                d = json.loads(lp.read_text(encoding="utf-8"))
-                items.append({
-                    "filename": lp.name,
-                    "started_at": d.get("started_at", ""),
-                    "step": d.get("step", ""),
-                    "attempt": d.get("attempt", 1),
-                    "net_try": d.get("net_try", 0),
-                    "model": d.get("model", ""),
-                    "duration_s": d.get("duration_s", 0),
-                    "usage": d.get("usage") or {},
-                    "error": d.get("error", ""),
-                    "response_text": d.get("response_text", ""),
-                    "prompt": d.get("prompt", ""),
-                })
-            except Exception:  # noqa: BLE001
-                pass
-    return jsonify({"logs": items, "log_dir": str(ws.logs_dir)})
+    return jsonify(svc.get_file_logs(stem))

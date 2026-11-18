@@ -8,6 +8,7 @@ from .checks import estimate_rouge2, needs_retry, quality_key, retry_feedback, r
 from .docx_io import DocxError
 from .llm import BaseClient, LLMError
 from .memory import format_label_memory, format_style_memory
+from .models import AbstractStep, ExtractStep, FileState, JudgeStep, LabelStep, UnitsData
 from .prompts import ABSTRACT_SCHEMA, EXTRACT_SCHEMA, JUDGE_SCHEMA, LABEL_SCHEMA, PromptRenderer
 from .state import (
     DONE_STATUSES,
@@ -75,7 +76,7 @@ def _clear_stale(st: dict, step: str) -> None:
 
 # ------------------------------------------------------------------ Bước 0: inspect
 
-def step_inspect(ws: FileWorkspace, cfg: dict, st: dict) -> dict:
+def step_inspect(ws: FileWorkspace, cfg: dict, st: FileState) -> UnitsData:
     sc = cfg.get("sentence_split", {})
     configure_textutil(sc.get("abbreviations"), sc.get("heading_words"))
     units_data = inspect_docx(ws.docx_path, cfg)
@@ -102,8 +103,8 @@ def step_inspect(ws: FileWorkspace, cfg: dict, st: dict) -> dict:
 
 # ------------------------------------------------------------------ Bước 1: label
 
-def step_label(ws: FileWorkspace, units_data: dict, client: BaseClient,
-               renderer: PromptRenderer, cfg: dict, st: dict,
+def step_label(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
+               renderer: PromptRenderer, cfg: dict, st: FileState,
                user_note: str = "") -> None:
     prompt = renderer.render(
         "label.md",
@@ -168,8 +169,8 @@ def step_label(ws: FileWorkspace, units_data: dict, client: BaseClient,
 
 # ------------------------------------------------------------------ Bước 2: extract
 
-def step_extract(ws: FileWorkspace, units_data: dict, client: BaseClient,
-                 renderer: PromptRenderer, cfg: dict, st: dict,
+def step_extract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
+                 renderer: PromptRenderer, cfg: dict, st: FileState,
                  user_note: str = "") -> None:
     ext_cfg = cfg["extract"]
     g_cfg = cfg["grading"]
@@ -360,8 +361,8 @@ def _generate_abstract_loop(ws: FileWorkspace, units_data: dict, client: BaseCli
     ws.save_state(st)
 
 
-def step_abstract(ws: FileWorkspace, units_data: dict, client: BaseClient,
-                  renderer: PromptRenderer, cfg: dict, st: dict,
+def step_abstract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
+                  renderer: PromptRenderer, cfg: dict, st: FileState,
                   user_note: str = "") -> None:
     st.setdefault("abstract", {})["attempts"] = 0
     _generate_abstract_loop(ws, units_data, client, renderer, cfg, st, user_note=user_note)
@@ -369,8 +370,8 @@ def step_abstract(ws: FileWorkspace, units_data: dict, client: BaseClient,
 
 # ------------------------------------------------------------------ Bước 4: judge (tùy chọn)
 
-def step_judge(ws: FileWorkspace, units_data: dict, client: BaseClient,
-               renderer: PromptRenderer, cfg: dict, st: dict,
+def step_judge(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
+               renderer: PromptRenderer, cfg: dict, st: FileState,
                allow_rewrite: bool = True) -> None:
     j_cfg = cfg.get("judge", {})
     style = st["label"]["value"] or STYLES[0]
@@ -440,8 +441,8 @@ def step_judge(ws: FileWorkspace, units_data: dict, client: BaseClient,
 
 # ------------------------------------------------------------------ Điều phối
 
-def finalize_status(units_data: dict, st: dict, cfg: dict,
-                    ignore_mismatch: bool = False) -> dict:
+def finalize_status(units_data: UnitsData, st: FileState, cfg: dict,
+                    ignore_mismatch: bool = False) -> FileState:
     """Chạy lại bộ kiểm tra và cập nhật trạng thái cuối của file."""
     chk = run_checks(
         units_data,

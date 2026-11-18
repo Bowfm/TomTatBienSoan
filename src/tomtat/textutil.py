@@ -28,6 +28,15 @@ class TextConfig:
     abbreviations: frozenset[str] = DEFAULT_ABBREVIATIONS
     heading_words: frozenset[str] = DEFAULT_HEADING_WORDS
 
+    def split_sentences(self, text: str | None) -> list[str]:
+        return split_sentences(text, config=self)
+
+    def count_words(self, text: str | None, mode: str = "whitespace_alnum") -> int:
+        return count_words(text, mode=mode)
+
+
+TextProcessor = TextConfig
+
 
 _active_config: TextConfig = TextConfig()
 
