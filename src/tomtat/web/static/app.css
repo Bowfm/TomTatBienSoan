@@ -285,7 +285,7 @@ kbd {
 }
 .st-chua_xu_ly { background: #e2e8f0; color: #475569; }
 .st-da_co_nhap { background: #dbeafe; color: #1e40af; }
-.st-can_xu_ly_tay { background: #fef3c7; color: #b45309; }
+.st-dang_lam_do, .st-can_xu_ly_tay { background: #fef3c7; color: #b45309; border: 1px dashed #d97706; }
 .st-da_duyet, .st-da_xuat { background: #d1fae5; color: #065f46; }
 .st-loi { background: #fee2e2; color: #991b1b; }
 

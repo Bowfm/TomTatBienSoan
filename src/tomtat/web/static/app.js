@@ -1025,7 +1025,7 @@ async function runPendingFiles() {
   const useMock = $("chk-mock") ? $("chk-mock").checked : false;
   await loadFileList(true);
   const todo = pendingFiles()
-    .filter((r) => r.status === "chua_xu_ly" || r.status === "loi" || r.status === "can_xu_ly_tay")
+    .filter((r) => r.status === "chua_xu_ly" || r.status === "loi" || r.status === "dang_lam_do" || r.status === "can_xu_ly_tay")
     .map((r) => r.file.replace(/\.docx$/i, ""));
   if (!todo.length) {
     showToast("Tất cả các file trong danh sách đều đã ở trạng thái 'đã có nháp' hoặc 'đã duyệt'!");

@@ -14,6 +14,8 @@ from .state import (
     STATUS_DRAFT,
     STATUS_ERROR,
     STATUS_MANUAL,
+    STATUS_PARTIAL,
+    STATUS_PENDING,
     FileWorkspace,
 )
 from .textutil import configure as configure_textutil, count_words, nfc
@@ -73,7 +75,7 @@ def step_inspect(ws: FileWorkspace, cfg: dict, st: dict) -> dict:
     if units_data.get("filename_mismatch"):
         _add_flag(st, units_data["filename_mismatch"])
         if cfg.get("layout", {}).get("on_mismatch", "stop") == "stop":
-            st["status"] = STATUS_MANUAL
+            st["status"] = STATUS_PARTIAL
     # Kiểm tra 3 hàng nhãn đã có nội dung
     if units_data["layout"].get("label_rows_with_content"):
         _add_flag(
@@ -146,6 +148,8 @@ def step_label(ws: FileWorkspace, units_data: dict, client: BaseClient,
         "model_used": res.model,
     }
     st["model_used"] = res.model
+    if st.get("status") not in (STATUS_DRAFT, "da_duyet", "da_xuat"):
+        st["status"] = STATUS_PARTIAL
     _clear_stale(st, "label")
     ws.save_state(st)
 
@@ -256,6 +260,8 @@ def step_extract(ws: FileWorkspace, units_data: dict, client: BaseClient,
 
     st["extract"] = best or candidate
     st["model_used"] = (st["extract"] or {}).get("model_used") or st.get("model_used", "")
+    if st.get("status") not in (STATUS_DRAFT, "da_duyet", "da_xuat"):
+        st["status"] = STATUS_PARTIAL
     _clear_stale(st, "extract")
     ws.save_state(st)
 
@@ -438,8 +444,8 @@ def finalize_status(units_data: dict, st: dict, cfg: dict,
         and cfg.get("layout", {}).get("on_mismatch", "stop") == "stop"
         and not ignore_mismatch
     )
-    if not chk.ok or mismatch_stop:
-        st["status"] = STATUS_MANUAL
+    if not chk.ok or mismatch_stop or not st.get("abstract", {}).get("text"):
+        st["status"] = STATUS_PARTIAL
     else:
         st["status"] = STATUS_DRAFT
     return st
@@ -514,7 +520,7 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
             and cfg.get("layout", {}).get("on_mismatch", "stop") == "stop"
             and not ignore_mismatch
         ):
-            st["status"] = STATUS_MANUAL
+            st["status"] = STATUS_PARTIAL
             ws.save_state(st)
             return {"skipped": False, "state": st}
 
@@ -567,7 +573,7 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
         ws.save_state(st)
         return {"skipped": False, "state": st}
     except (DocxError, LLMError) as exc:
-        st["status"] = STATUS_MANUAL if isinstance(exc, DocxError) else STATUS_ERROR
+        st["status"] = STATUS_PARTIAL if isinstance(exc, DocxError) else STATUS_ERROR
         st["error_message"] = str(exc)
         _add_flag(st, str(exc))
         ws.save_state(st)
