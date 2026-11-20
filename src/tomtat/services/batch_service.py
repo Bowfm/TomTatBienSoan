@@ -11,7 +11,16 @@ import uuid
 
 from .. import config as _cfg_mod
 from ..config import Config, clamp_workers, get_pool_scaling
-from ..llm import BaseClient, GeminiClient, MockClient, bind_cancel_event, get_rpd_status
+from ..llm import (
+    BaseClient,
+    GeminiClient,
+    MockClient,
+    bind_cancel_event,
+    get_key_rpd_details,
+    get_rpd_status,
+    unlock_quota_on_disk,
+)
+from ..llm.base import _safe_key_id
 from ..pipeline import process_file
 from ..report import write_reports
 from ..state import FileWorkspace, discover_docx_files
@@ -57,6 +66,87 @@ def make_client(cfg: Config, force_mock: bool = False):
                 _CACHED_KEYS = list(keys)
             _CACHED_CLIENT.sync_config(cfg)
         return _CACHED_CLIENT
+
+
+def get_live_client_if_any(cfg: Config | None = None) -> GeminiClient | None:
+    """Trả về GeminiClient đang chạy trong RAM (nếu đã được khởi tạo), đồng bộ nóng keys/config nếu cần."""
+    with _CLIENT_LOCK:
+        if _CACHED_CLIENT is None:
+            return None
+        keys = _cfg_mod.get_api_keys()
+        if keys and _CACHED_KEYS != keys:
+            _CACHED_CLIENT.sync_keys(keys)
+            _CACHED_KEYS[:] = list(keys)
+        if cfg is not None:
+            _CACHED_CLIENT.sync_config(cfg)
+        return _CACHED_CLIENT
+
+
+def _resolve_key_by_id(keys: list[str], key_id: str | None) -> str | None:
+    if not key_id:
+        return None
+    for k in keys:
+        if _safe_key_id(k) == key_id:
+            return k
+    return None
+
+
+def get_rpd_details(cfg: Config, api_keys: list[str] | None = None) -> dict:
+    """Lấy bảng trạng thái chi tiết còn/hết RPD của từng model theo từng key."""
+    if api_keys is None:
+        api_keys = _cfg_mod.get_api_keys()
+    live = get_live_client_if_any(cfg)
+    return get_key_rpd_details(cfg, api_keys=api_keys, live_client=live)
+
+
+def unlock_rpd_quota(
+    cfg: Config,
+    *,
+    key_id: str | None = None,
+    model: str | None = None,
+) -> dict:
+    """Mở khóa trạng thái hết RPD / strikes_429 / cooldown trên cả RAM (_CACHED_CLIENT) và đĩa."""
+    keys = _cfg_mod.get_api_keys()
+    target_key: str | None = None
+    if key_id:
+        target_key = _resolve_key_by_id(keys, key_id)
+        if target_key is None:
+            raise ValueError("Không tìm thấy API key cần mở khóa trong cấu hình hiện hành.")
+
+    live = get_live_client_if_any(cfg)
+    if live is not None:
+        unlocked = live.unlock_quota(key=target_key, model=model)
+    else:
+        unlocked = unlock_quota_on_disk(cfg, api_keys=keys, key=target_key, model=model)
+
+    return {
+        "ok": True,
+        "unlocked": unlocked,
+        "rpd_status": get_rpd_status(cfg, api_keys=keys),
+        "details": get_rpd_details(cfg, api_keys=keys),
+    }
+
+
+def probe_rpd_key_model(
+    cfg: Config,
+    *,
+    key_id: str,
+    model: str,
+    force_mock: bool = False,
+) -> dict:
+    """Gửi 1 request kiểm tra thực tế cho cặp (key_id, model) để đối chiếu với Google AI Studio."""
+    if force_mock:
+        raise RuntimeError("Đang chạy ở chế độ giả lập (--mock), không thể kiểm tra API thật.")
+    keys = _cfg_mod.get_api_keys()
+    target_key = _resolve_key_by_id(keys, key_id)
+    if target_key is None:
+        raise ValueError("Không tìm thấy API key cần kiểm tra trong cấu hình hiện hành.")
+    client = make_client(cfg, force_mock=False)
+    res = client.probe_key_model(target_key, model)
+    res["key_id"] = key_id
+    res["rpd_status"] = get_rpd_status(cfg, api_keys=keys)
+    res["details"] = get_rpd_details(cfg, api_keys=keys)
+    return res
 
 
 class BatchManager:

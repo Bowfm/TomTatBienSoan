@@ -285,7 +285,9 @@ def cmd_versions(args: argparse.Namespace, cfg: Config) -> int:
     if not versions:
         print(f"{stem}.docx: chưa có phiên bản nào được lưu.")
         return 0
-    print(f"Lịch sử phiên bản của {stem}.docx (hiện tại: v{info['current_version']:03d}):")
+    print(
+        f"Lịch sử phiên bản của {stem}.docx (hiện tại: v{info['current_version']:03d}):"
+    )
     for v in versions:
         ver_num = int(v.get("version") or 0)
         mark = "*" if ver_num == info["current_version"] and not info["has_unsaved_changes"] else " "
@@ -299,6 +301,45 @@ def cmd_versions(args: argparse.Namespace, cfg: Config) -> int:
             f" {mark} v{ver_num:03d} | {v.get('saved_at', '')} | {v.get('source', '')} | "
             f"{lb} | trích {ew}w, bsoạn {aw}w | {ok_str}{note_str}"
         )
+    return 0
+
+
+def cmd_rpd(args: argparse.Namespace, cfg: Config) -> int:
+    from .llm import get_key_rpd_details
+    from .services.batch_service import unlock_rpd_quota
+
+    if args.unlock:
+        res = unlock_rpd_quota(cfg, model=args.model or None)
+        print(f"Đã mở khóa {res['unlocked']} mục RPD/cooldown.")
+
+    details = get_key_rpd_details(cfg)
+    print(
+        f"Chu kỳ RPD: {details['cycle_date']} (reset: {details['next_reset_local']}) | "
+        f"Tổng keys: {details['key_count']}"
+    )
+    for m_info in details["models"]:
+        qps_note = f", QPS={m_info.get('qps_429_used', 0)}" if m_info.get("qps_429_used") else ""
+        print(
+            f" - {m_info['model']}: tổng {m_info['used']}/{m_info['limit']} "
+            f"(OK={m_info['ok_used']}, 503/Timeout/Hủy={m_info['transient_used']}{qps_note}) | "
+            f"còn {m_info['available_keys']}/{details['key_count']} key"
+        )
+    models_to_show = [args.model] if args.model else [m["model"] for m in details["models"]]
+    for row in details["keys"]:
+        parts = []
+        for m in models_to_show:
+            cell = row["models"].get(m)
+            if not cell:
+                continue
+            if args.exhausted_only and not cell["exhausted"] and not cell["strikes_429"]:
+                continue
+            qps_cell = f", QPS={cell['qps_429_count']}, gửi={cell['total_sent_with_qps']}" if cell.get("qps_429_count") else ""
+            parts.append(
+                f"{m}=[{cell['status_vi']}; OK={cell['ok_used']}, 503/TO={cell['transient_used']}{qps_cell}, "
+                f"tổng={cell['used']}/{cell['rpd_limit']}]"
+            )
+        if parts:
+            print(f"  {row['key_label']}: " + " | ".join(parts))
     return 0
 
 
@@ -356,6 +397,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rollback về version trước (mặc định) hoặc số version chỉ định",
     )
     p_ver.set_defaults(func=cmd_versions)
+
+    # rpd
+    p_rpd = sub.add_parser("rpd", help="Xem trạng thái còn/hết RPD của từng model theo từng API key")
+    p_rpd.add_argument("--model", default="", help="Lọc theo tên model cụ thể")
+    p_rpd.add_argument("--exhausted-only", action="store_true", help="Chỉ hiện các key đang bị khóa hoặc có cảnh báo 429")
+    p_rpd.add_argument("--unlock", action="store_true", help="Mở khóa trạng thái hết RPD/cooldown hiện tại")
+    p_rpd.set_defaults(func=cmd_rpd)
 
     return p
 

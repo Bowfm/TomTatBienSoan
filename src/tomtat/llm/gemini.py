@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import random
@@ -20,15 +21,21 @@ from .base import (
     _QUOTA_FILE_LOCK,
     _RPM_WINDOW_S,
     _error_consumes_rpd,
+    _format_key_label,
     _heal_qps_exhausted_items,
     _is_connection_error,
     _is_payload_qps_429,
+    _is_server_deadline_exceeded,
     _is_timeout_error,
+    _match_log_key_label,
     _parse_json,
     _parse_timeout_value,
+    _reconcile_recent_rpm_from_logs,
+    _reconcile_rpd_details_from_logs,
     _reconcile_rpd_from_logs,
     _redact,
     _status_of,
+    bind_cancel_event,
     check_not_cancelled,
     get_active_cancel_event,
     get_model_min_interval_s,
@@ -41,6 +48,111 @@ from .base import (
 )
 
 _UNSET = object()
+_RPM_WINDOW_SAFETY_S = 2.5   # Đệm an toàn trên cửa sổ 60s chống lệch đồng hồ & trễ kết nối TLS/HTTP
+_MAX_CONTINUATION_HOPS = 8
+
+
+def _supports_automatic_continuation(create_fn: object) -> bool:
+    """Chỉ truyền automatic_continuation=False cho SDK thật (có tham số tường minh), tránh làm lỗi mock đơn giản."""
+    if not callable(create_fn):
+        return False
+    try:
+        sig = inspect.signature(create_fn)
+    except (TypeError, ValueError):
+        return False
+    return "automatic_continuation" in sig.parameters
+
+
+def _extract_continuation_ids(obj: object) -> list[str]:
+    """Lấy danh sách continuation_ids từ response hoặc ContinuationInterruptedError (nếu có)."""
+    raw = getattr(obj, "continuation_ids", None)
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw if x]
+    return []
+
+
+def _merge_interaction_hops(hops: list[object]) -> object:
+    """Gộp nhiều continuation hop đã gọi theo nhịp RPM thành một đối tượng Interaction hoàn chỉnh."""
+    if len(hops) <= 1:
+        return hops[0] if hops else None
+    if isinstance(getattr(hops[-1], "steps", None), list):
+        try:
+            from google.genai._gaos.google_genai._interactions_continuation import merge_unary_hops
+            return merge_unary_hops(hops)
+        except Exception:
+            pass
+    final = hops[-1]
+    texts = [_extract_interaction_text(h) for h in hops]
+    merged_text = "".join(t for t in texts if t)
+    merged_ids: list[str] = []
+    for h in hops:
+        c_ids = _extract_continuation_ids(h)
+        if c_ids:
+            for cid in c_ids:
+                if cid not in merged_ids:
+                    merged_ids.append(cid)
+        else:
+            hid = getattr(h, "id", None)
+            if isinstance(hid, str) and hid and hid not in merged_ids:
+                merged_ids.append(hid)
+    if hasattr(final, "__dict__"):
+        try:
+            if merged_text:
+                setattr(final, "output_text", merged_text)
+            if merged_ids:
+                setattr(final, "continuation_ids", merged_ids)
+        except Exception:
+            pass
+    return final
+
+
+class _BackgroundUnsupported(Exception):
+    """Báo hiệu model/client không hỗ trợ background=True để fallback sang gọi đồng bộ."""
+
+
+class _BackgroundInteractionError(Exception):
+    """Lỗi trả về từ interaction chạy nền (mang kèm status_code tương ứng để phân loại retry)."""
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _extract_interaction_text(resp: object) -> str:
+    """Lấy text đầu ra từ Interaction (ưu tiên output_text, dự phòng ghép từ steps model_output)."""
+    text = getattr(resp, "output_text", None) or ""
+    if text:
+        return text
+    steps = getattr(resp, "steps", None) or []
+    parts: list[str] = []
+    for st in steps:
+        if getattr(st, "type", None) != "model_output":
+            continue
+        for item in getattr(st, "content", None) or []:
+            if getattr(item, "type", None) == "text":
+                t = getattr(item, "text", None)
+                if isinstance(t, str) and t:
+                    parts.append(t)
+    return "".join(parts)
+
+
+def _map_interaction_error_code(err_code: str, err_msg: str) -> int | None:
+    """Ánh xạ mã lỗi/thông điệp từ Interaction.errors sang HTTP status code tương ứng."""
+    low = f"{err_code} {err_msg}".lower()
+    for code in (429, 504, 503, 502, 500, 408, 404, 403, 402, 401, 400):
+        if str(code) in low:
+            return code
+    if any(t in low for t in ("resource_exhausted", "too_many_requests", "quota", "rate_limit")):
+        return 429
+    if any(t in low for t in ("deadline_exceeded", "deadline exceeded", "deadline expired", "gateway timeout")):
+        return 504
+    if any(t in low for t in ("unavailable", "high demand", "overloaded")):
+        return 503
+    if any(t in low for t in ("unauthenticated", "permission_denied", "not valid")):
+        return 401
+    if any(t in low for t in ("invalid_argument", "bad_request")):
+        return 400
+    return 500
 
 
 def _get_quota_cycle_date() -> str:
@@ -71,8 +183,12 @@ class GeminiClient(BaseClient):
         self._genai = genai
         self._retry_config_cls = RetryConfig
         self._exhausted: set[tuple[str, str]] = set()  # (api_key, model) đã cạn hạn mức trong ngày
+        self._exhausted_meta: dict[tuple[str, str], dict] = {}  # (api_key, model) -> {reason, error, at}
         self._rpd_counts: dict[str, int] = {}          # model -> số request đã sử dụng trong ngày (kể cả 503/Timeout/JSON lỗi)
-        self._key_rpd_counts: dict[tuple[str, str], int] = {}  # (key, model) -> số request đã gọi trong ngày
+        self._key_rpd_counts: dict[tuple[str, str], int] = {}  # (key, model) -> tổng request đã gọi trong ngày
+        self._key_ok_counts: dict[tuple[str, str], int] = {}   # (key, model) -> số lượt gọi thành công/có phản hồi
+        self._key_transient_counts: dict[tuple[str, str], int] = {}  # (key, model) -> số lượt lỗi 503/timeout/hủy
+        self._key_qps_counts: dict[tuple[str, str], int] = {}  # (key, model) -> số lượt bị 429 QPS payload
         self._key_cooldown: dict[str, float] = {}       # key -> timestamp hết cooldown (sau 429)
         self._rpm_tracker: dict[str, list[float]] = {}  # key -> danh sách timestamp request gần đây (chung cho key)
         self._model_rpm_tracker: dict[tuple[str, str], list[float]] = {}  # (key, model) -> timestamps request gần đây
@@ -83,10 +199,16 @@ class GeminiClient(BaseClient):
         self._global_qps_next_ts: float = 0.0  # thời điểm sớm nhất cổng chung hết hạ nhiệt sau lỗi 429 QPS
         self._dispatch_slots: list[float] = []  # mốc thời gian gửi API gần nhất/đã đặt chỗ trên toàn bộ luồng
         self._model_503_streak: dict[str, int] = {}  # số lần lỗi 503/tạm thời liên tiếp trên toàn pool theo từng model
-        self._model_outage_until: dict[str, float] = {}  # model -> timestamp hết thời gian tạm hạ nhiệt sau bão 503
+        self._model_timeout_streak: dict[str, int] = {}  # số lần lỗi timeout/504 liên tiếp trên toàn pool theo từng model
+        self._model_outage_until: dict[str, float] = {}  # model -> timestamp hết thời gian tạm hạ nhiệt sau bão 503 / treo timeout
 
         self._api_key = self._api_keys[0]
         self._tls_timeout = threading.local()
+        self._tls_use_background = threading.local()
+        self._tls_used_background = threading.local()
+        self._tls_call_key = threading.local()
+        self._tls_api_hops = threading.local()
+        self._tls_hop_epochs = threading.local()
         self._cfg_gemini_snapshot: dict | None = None
         self._apply_gemini_config(cfg.get("gemini") or {})
 
@@ -101,6 +223,8 @@ class GeminiClient(BaseClient):
     def _snapshot_gemini_cfg(g: dict) -> dict:
         raw_mbs = g.get("model_by_step")
         raw_fbs = g.get("fallback_models_by_step")
+        raw_tl = g.get("thinking_level")
+        raw_tl_m = g.get("thinking_level_by_model")
         return {
             "model": g.get("model"),
             "fallback_models": list(g.get("fallback_models") or []),
@@ -116,11 +240,21 @@ class GeminiClient(BaseClient):
             "backoff_max_s": g.get("backoff_max_s"),
             "max_rounds_per_model": g.get("max_rounds_per_model"),
             "max_timeouts_per_model": g.get("max_timeouts_per_model"),
+            "background_execution": g.get("background_execution"),
+            "background_min_timeout_s": g.get("background_min_timeout_s"),
+            "background_poll_interval_s": g.get("background_poll_interval_s"),
+            "model_timeout_outage_threshold": g.get("model_timeout_outage_threshold"),
+            "model_timeout_outage_cooldown_s": g.get("model_timeout_outage_cooldown_s"),
             "max_transient_per_model": g.get("max_transient_per_model"),
             "model_outage_threshold": g.get("model_outage_threshold"),
             "model_outage_cooldown_s": g.get("model_outage_cooldown_s"),
             "global_min_dispatch_interval_s": g.get("global_min_dispatch_interval_s"),
             "qps_global_cooldown_s": g.get("qps_global_cooldown_s"),
+            "thinking_level": dict(raw_tl) if isinstance(raw_tl, dict) else raw_tl,
+            "thinking_level_by_model": (
+                {k: dict(v) if isinstance(v, dict) else v for k, v in raw_tl_m.items()}
+                if isinstance(raw_tl_m, dict) else raw_tl_m
+            ),
         }
 
     @staticmethod
@@ -201,6 +335,30 @@ class GeminiClient(BaseClient):
             self.max_timeouts_per_model = max(0, int(g.get("max_timeouts_per_model", 2)))
         except (TypeError, ValueError):
             self.max_timeouts_per_model = 2
+        raw_bg = g.get("background_execution", "auto")
+        if raw_bg is True:
+            self.background_execution = "always"
+        elif raw_bg is False:
+            self.background_execution = "never"
+        else:
+            bg_str = str(raw_bg or "auto").strip().lower()
+            self.background_execution = bg_str if bg_str in ("auto", "always", "never") else "auto"
+        try:
+            self.background_min_timeout_s = max(60.0, float(g.get("background_min_timeout_s", 540.0)))
+        except (TypeError, ValueError):
+            self.background_min_timeout_s = 540.0
+        try:
+            self.background_poll_interval_s = max(0.01, float(g.get("background_poll_interval_s", 3.0)))
+        except (TypeError, ValueError):
+            self.background_poll_interval_s = 3.0
+        try:
+            self.model_timeout_outage_threshold = max(0, int(g.get("model_timeout_outage_threshold", 2)))
+        except (TypeError, ValueError):
+            self.model_timeout_outage_threshold = 2
+        try:
+            self.model_timeout_outage_cooldown_s = max(0.0, float(g.get("model_timeout_outage_cooldown_s", 180.0)))
+        except (TypeError, ValueError):
+            self.model_timeout_outage_cooldown_s = 180.0
         try:
             self.max_transient_per_model = max(0, int(g.get("max_transient_per_model", 8)))
         except (TypeError, ValueError):
@@ -261,6 +419,57 @@ class GeminiClient(BaseClient):
                 now = time.time()
                 today = self._current_cycle_date
                 items = [{"key": k, "model": m} for (k, m) in self._exhausted]
+                exhausted_meta = [
+                    {
+                        "key": k,
+                        "model": m,
+                        "reason": str(meta.get("reason") or ""),
+                        "error": str(meta.get("error") or ""),
+                        "at": str(meta.get("at") or ""),
+                    }
+                    for (k, m), meta in self._exhausted_meta.items()
+                    if (k, m) in self._exhausted
+                ]
+                key_rpd_counts = []
+                all_rpd_pairs = (
+                    set(self._key_rpd_counts)
+                    | set(self._key_ok_counts)
+                    | set(self._key_transient_counts)
+                    | set(self._key_qps_counts)
+                )
+                for (k, m) in all_rpd_pairs:
+                    tot = int(self._key_rpd_counts.get((k, m), 0))
+                    ok_c = int(self._key_ok_counts.get((k, m), 0))
+                    tr_c = int(self._key_transient_counts.get((k, m), 0))
+                    qps_c = int(self._key_qps_counts.get((k, m), 0))
+                    tot = max(tot, ok_c + tr_c)
+                    if tot > 0 or qps_c > 0:
+                        row_cnt = {
+                            "key": k,
+                            "model": m,
+                            "total": tot,
+                            "ok": ok_c,
+                            "transient": tr_c,
+                        }
+                        if qps_c > 0:
+                            row_cnt["qps"] = qps_c
+                        key_rpd_counts.append(row_cnt)
+                rpm_cutoff = now - (_RPM_WINDOW_S + _RPM_WINDOW_SAFETY_S + 2.5)
+                recent_rpm_ts = []
+                for (k, m), ts_list in list(self._model_rpm_tracker.items()):
+                    # Giữ nguyên độ chính xác float trong RAM để _update_call_timestamp / _release_reserved_slot khớp đúng slot
+                    kept = sorted(float(t) for t in ts_list if float(t) > rpm_cutoff)
+                    if kept:
+                        self._model_rpm_tracker[(k, m)] = kept
+                        recent_rpm_ts.append({"key": k, "model": m, "ts": [round(t, 3) for t in kept]})
+                    else:
+                        self._model_rpm_tracker.pop((k, m), None)
+                for k_rpm in list(self._rpm_tracker):
+                    kept_k = sorted(float(t) for t in self._rpm_tracker[k_rpm] if float(t) > rpm_cutoff)
+                    if kept_k:
+                        self._rpm_tracker[k_rpm] = kept_k
+                    else:
+                        self._rpm_tracker.pop(k_rpm, None)
                 next_allowed = [
                     {"key": k, "model": m, "ts": round(ts, 3)}
                     for (k, m), ts in self._next_allowed_ts.items()
@@ -282,6 +491,9 @@ class GeminiClient(BaseClient):
                     "exhausted": items,
                     "rpd_counts": dict(self._rpd_counts),
                     "cursors": dict(self._model_cursor),
+                    **({"exhausted_meta": exhausted_meta} if exhausted_meta else {}),
+                    **({"key_rpd_counts": key_rpd_counts} if key_rpd_counts else {}),
+                    **({"recent_rpm_ts": recent_rpm_ts} if recent_rpm_ts else {}),
                     **({"next_allowed_ts": next_allowed} if next_allowed else {}),
                     **({"key_cooldown": cooldowns} if cooldowns else {}),
                     **({"strikes_429": strikes_429} if strikes_429 else {}),
@@ -308,8 +520,12 @@ class GeminiClient(BaseClient):
         if today != self._current_cycle_date:
             self._current_cycle_date = today
             self._exhausted.clear()
+            self._exhausted_meta.clear()
             self._rpd_counts.clear()
             self._key_rpd_counts.clear()
+            self._key_ok_counts.clear()
+            self._key_transient_counts.clear()
+            self._key_qps_counts.clear()
             self._key_cooldown.clear()
             self._rpm_tracker.clear()
             self._model_rpm_tracker.clear()
@@ -320,6 +536,7 @@ class GeminiClient(BaseClient):
             self._global_qps_next_ts = 0.0
             self._dispatch_slots.clear()
             self._model_503_streak.clear()
+            self._model_timeout_streak.clear()
             self._model_outage_until.clear()
             self._reset_prefix = ""
             with _QUOTA_FILE_LOCK:
@@ -345,9 +562,55 @@ class GeminiClient(BaseClient):
                             m = item.get("model")
                             if k in self._api_keys and m:
                                 self._exhausted.add((k, m))
+                        for item in data.get("exhausted_meta") or []:
+                            k = item.get("key")
+                            m = item.get("model")
+                            if k in self._api_keys and m:
+                                self._exhausted_meta[(k, m)] = {
+                                    "reason": str(item.get("reason") or ""),
+                                    "error": str(item.get("error") or ""),
+                                    "at": str(item.get("at") or ""),
+                                }
                         for m_name, cnt in (data.get("rpd_counts") or {}).items():
                             if m_name and isinstance(cnt, (int, float)):
                                 self._rpd_counts[str(m_name)] = max(0, int(cnt))
+                        for item in data.get("key_rpd_counts") or []:
+                            k = item.get("key")
+                            m = item.get("model")
+                            if k in self._api_keys and m:
+                                tot = max(0, int(item.get("total") or 0))
+                                ok_c = max(0, int(item.get("ok") or 0))
+                                tr_c = max(0, int(item.get("transient") or 0))
+                                qps_c = max(0, int(item.get("qps") or 0))
+                                self._key_rpd_counts[(k, m)] = max(tot, ok_c + tr_c)
+                                if ok_c:
+                                    self._key_ok_counts[(k, m)] = ok_c
+                                if tr_c:
+                                    self._key_transient_counts[(k, m)] = tr_c
+                                if qps_c:
+                                    self._key_qps_counts[(k, m)] = qps_c
+                        rpm_cutoff = now - (_RPM_WINDOW_S + _RPM_WINDOW_SAFETY_S + 2.5)
+                        for item in data.get("recent_rpm_ts") or []:
+                            k = item.get("key")
+                            m = item.get("model")
+                            ts_vals = item.get("ts")
+                            if k in self._api_keys and m and isinstance(ts_vals, list):
+                                kept = sorted(
+                                    float(t)
+                                    for t in ts_vals
+                                    if isinstance(t, (int, float)) and float(t) > rpm_cutoff
+                                )
+                                if kept:
+                                    self._model_rpm_tracker.setdefault((k, m), []).extend(kept)
+                                    self._model_rpm_tracker[(k, m)].sort()
+                                    self._rpm_tracker.setdefault(k, []).extend(kept)
+                                    self._rpm_tracker[k].sort()
+                                    min_iv = get_model_min_interval_s(m, self.cfg)
+                                    if min_iv > 0 and kept[-1] + min_iv > now:
+                                        self._next_allowed_ts[(k, m)] = max(
+                                            self._next_allowed_ts.get((k, m), 0.0),
+                                            kept[-1] + min_iv,
+                                        )
                         for m_name, cur in (data.get("cursors") or {}).items():
                             if m_name and isinstance(cur, int) and cur >= 0:
                                 self._model_cursor[str(m_name)] = cur
@@ -385,25 +648,267 @@ class GeminiClient(BaseClient):
                 pass
         if loaded_schema_v < 2 and self._exhausted_file.exists():
             changed = True
-        # Đối soát với log thực tế trong ngày (bắt trọn cả các lượt lỗi 503, Timeout, JSON)
+        # Đối soát với log thực tế trong ngày (theo cả model lẫn từng cặp key/model)
         try:
-            log_counts = _reconcile_rpd_from_logs(
+            log_details = _reconcile_rpd_details_from_logs(
                 self._exhausted_file.parent, today, min_prefix=self._reset_prefix
             )
-            for m_name, l_cnt in log_counts.items():
+            for m_name, l_cnt in (log_details.get("by_model_total") or {}).items():
                 if l_cnt > self._rpd_counts.get(m_name, 0):
                     self._rpd_counts[m_name] = l_cnt
                     changed = True
+            for (kl, m_name), lstat in (log_details.get("by_label_model") or {}).items():
+                matched_k = _match_log_key_label(kl, self._api_keys)
+                if not matched_k:
+                    continue
+                pair = (matched_k, m_name)
+                l_tot = int(lstat.get("total") or 0)
+                l_ok = int(lstat.get("ok") or 0)
+                l_tr = int(lstat.get("err_503") or 0) + int(lstat.get("err_timeout") or 0) + int(lstat.get("cancelled") or 0)
+                if l_tot > self._key_rpd_counts.get(pair, 0):
+                    self._key_rpd_counts[pair] = l_tot
+                    changed = True
+                if l_ok > self._key_ok_counts.get(pair, 0):
+                    self._key_ok_counts[pair] = l_ok
+                if l_tr > self._key_transient_counts.get(pair, 0):
+                    self._key_transient_counts[pair] = l_tr
+                l_qps = int(lstat.get("qps_429") or 0)
+                if l_qps > self._key_qps_counts.get(pair, 0):
+                    self._key_qps_counts[pair] = l_qps
+            rpm_window_scan = _RPM_WINDOW_S + _RPM_WINDOW_SAFETY_S + 2.5
+            recent_from_logs = _reconcile_recent_rpm_from_logs(
+                self._exhausted_file.parent,
+                self._api_keys,
+                today,
+                window_s=rpm_window_scan,
+                min_prefix=self._reset_prefix,
+            )
+            for (k_log, m_log), ts_list in recent_from_logs.items():
+                pair_rpm = (k_log, m_log)
+                cur_m_hist = self._model_rpm_tracker.setdefault(pair_rpm, [])
+                cur_k_hist = self._rpm_tracker.setdefault(k_log, [])
+                added_ts = False
+                for ts_val in ts_list:
+                    if not any(abs(existing - ts_val) < 0.2 for existing in cur_m_hist):
+                        cur_m_hist.append(ts_val)
+                        cur_k_hist.append(ts_val)
+                        added_ts = True
+                if added_ts:
+                    cur_m_hist.sort()
+                    cur_k_hist.sort()
+                    min_iv = get_model_min_interval_s(m_log, self.cfg)
+                    if min_iv > 0 and cur_m_hist[-1] + min_iv > now:
+                        self._next_allowed_ts[pair_rpm] = max(
+                            self._next_allowed_ts.get(pair_rpm, 0.0),
+                            cur_m_hist[-1] + min_iv,
+                        )
         except Exception:
             pass
         if changed:
             self._save_quota_state_unlocked()
 
-    def _mark_exhausted(self, key: str, model: str) -> None:
+    def _mark_exhausted(
+        self,
+        key: str,
+        model: str,
+        *,
+        reason: str = "manual",
+        error: str = "",
+    ) -> None:
         with self._key_lock:
             self._check_and_reset_cycle()
             self._exhausted.add((key, model))
+            self._exhausted_meta[(key, model)] = {
+                "reason": reason,
+                "error": error[:280] if error else "",
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
             self._save_quota_state_unlocked()
+
+    def unlock_quota(self, key: str | None = None, model: str | None = None) -> int:
+        """Mở khóa trạng thái hết RPD / strikes_429 / cooldown cho (key, model) chỉ định (hoặc toàn bộ nếu None)."""
+        with self._key_lock:
+            self._check_and_reset_cycle()
+            unlocked = 0
+
+            def _matches(k_val: str, m_val: str) -> bool:
+                return (key is None or k_val == key) and (model is None or m_val == model)
+
+            for pair in list(self._exhausted):
+                if _matches(pair[0], pair[1]):
+                    self._exhausted.discard(pair)
+                    self._exhausted_meta.pop(pair, None)
+                    unlocked += 1
+            for pair in list(self._exhausted_meta):
+                if _matches(pair[0], pair[1]):
+                    self._exhausted_meta.pop(pair, None)
+            for pair in list(self._idle_429_strikes):
+                if _matches(pair[0], pair[1]):
+                    self._idle_429_strikes.pop(pair, None)
+                    unlocked = max(unlocked, 1)
+            for pair in list(self._next_allowed_ts):
+                if _matches(pair[0], pair[1]):
+                    self._next_allowed_ts.pop(pair, None)
+            if key is None:
+                if self._key_cooldown:
+                    unlocked = max(unlocked, len(self._key_cooldown))
+                    self._key_cooldown.clear()
+            else:
+                if self._key_cooldown.pop(key, None) is not None:
+                    unlocked = max(unlocked, 1)
+            self._save_quota_state_unlocked()
+            return unlocked
+
+    def probe_key_model(self, key: str, model: str) -> dict:
+        """Gửi 1 request kiểm tra thực tế tới Google API cho cặp (key, model) để đối chiếu còn/hết RPD.
+
+        - Không dùng cơ chế xoay key hay bỏ qua key đã đánh dấu _exhausted.
+        - Nếu API phản hồi thành công -> mở khóa (key, model) và ghi nhận 1 RPD.
+        - Nếu Google trả 429 -> phân biệt rõ QPS / RPM-TPM / Daily RPD và trả nguyên văn lỗi để đối chiếu.
+        """
+        with self._key_lock:
+            self._check_and_reset_cycle()
+            try:
+                idx = self._api_keys.index(key) + 1
+            except ValueError:
+                idx = 1
+            key_lbl = _format_key_label(idx, key)
+            sdk_client = self._get_or_create_client(key)
+
+        wait_s, reserved_ts = self._reserve_specific_key_wait(key, model)
+        if wait_s > 0:
+            time.sleep(wait_s + 0.05)
+        self._update_call_timestamp(key, model, reserved_ts, time.time())
+
+        probe_kwargs: dict = {
+            "model": model,
+            "input": "Reply with OK.",
+            "generation_config": {"max_output_tokens": 256},
+            "store": False,
+            "timeout": 25.0,
+        }
+        if _supports_automatic_continuation(getattr(sdk_client.interactions, "create", None)):
+            probe_kwargs["automatic_continuation"] = False
+
+        try:
+            probe_resp = sdk_client.interactions.create(**probe_kwargs)
+            hops = max(1, len(_extract_continuation_ids(probe_resp)))
+            if hops > 1:
+                self._record_extra_hops(key, model, hops - 1)
+            self._increment_rpd(model, key, category="ok", count=hops)
+            with self._key_lock:
+                self._exhausted.discard((key, model))
+                self._exhausted_meta.pop((key, model), None)
+                self._idle_429_strikes.pop((key, model), None)
+                self._key_cooldown.pop(key, None)
+                self._save_quota_state_unlocked()
+            return {
+                "ok": True,
+                "outcome": "available",
+                "unlocked": True,
+                "key_label": key_lbl,
+                "model": model,
+                "status_vi": "Còn RPD (API OK)",
+                "message": f"{key_lbl} trên {model} vẫn CÒN RPD! Đã mở khóa và sẵn sàng sử dụng.",
+                "error": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            err_str = _redact(f"{type(exc).__name__}: {exc}", self._api_keys)
+            st_code = _status_of(exc)
+            err_lower = err_str.lower()
+            is_429 = (
+                st_code == 429
+                or "resource_exhausted" in err_lower
+                or "resource has been exhausted" in err_lower
+                or "exceeded a quota" in err_lower
+                or "quota exceeded" in err_lower
+                or "too_many_requests" in err_lower
+            )
+            if is_429:
+                if _is_payload_qps_429(err_lower):
+                    with self._key_lock:
+                        self._key_qps_counts[(key, model)] = self._key_qps_counts.get((key, model), 0) + 1
+                        self._save_quota_state_unlocked()
+                    return {
+                        "ok": True,
+                        "outcome": "rate_limited_qps",
+                        "unlocked": False,
+                        "key_label": key_lbl,
+                        "model": model,
+                        "status_vi": "Bị giới hạn QPS tạm thời",
+                        "message": f"{key_lbl} trên {model} gặp 429 QPS payload trùng lặp (chưa kết luận hết RPD).",
+                        "error": err_str,
+                    }
+                is_daily = any(t in err_lower for t in (
+                    "per day", "per_day", "perday", "requests per day", "requestsperday",
+                    "tokensperday", "daily", "rpd", "limit: 0",
+                ))
+                is_rpm = any(t in err_lower for t in (
+                    "per minute", "per_minute", "perminute", "requests per minute", "requestsperminute",
+                    "tokensperminute", "rpm", "tpm",
+                ))
+                if is_rpm and not is_daily:
+                    with self._key_lock:
+                        self._set_cooldown(key, max(_COOLDOWN_S, 65.0) if _COOLDOWN_S > 0 else 0.0)
+                        self._save_quota_state_unlocked()
+                    return {
+                        "ok": True,
+                        "outcome": "rate_limited_rpm",
+                        "unlocked": False,
+                        "key_label": key_lbl,
+                        "model": model,
+                        "status_vi": "Chạm giới hạn RPM/TPM tạm thời",
+                        "message": f"{key_lbl} trên {model} đang chạm giới hạn theo phút (RPM/TPM), có thể vẫn còn RPD ngày.",
+                        "error": err_str,
+                    }
+                if is_daily:
+                    self._mark_exhausted(key, model, reason="429_daily", error=err_str)
+                return {
+                    "ok": True,
+                    "outcome": "exhausted_rpd",
+                    "unlocked": False,
+                    "key_label": key_lbl,
+                    "model": model,
+                    "status_vi": "Hết RPD (Google trả 429)",
+                    "message": f"{key_lbl} trên {model} bị Google trả về 429: chưa dùng lại được lúc này.",
+                    "error": err_str,
+                }
+            if st_code in (401, 403) or "unauthenticated" in err_lower or "not valid" in err_lower:
+                for m in self._all_configured_models():
+                    self._mark_exhausted(key, m, reason="invalid_key", error=err_str)
+                return {
+                    "ok": True,
+                    "outcome": "invalid_key",
+                    "unlocked": False,
+                    "key_label": key_lbl,
+                    "model": model,
+                    "status_vi": "Key lỗi (401/403)",
+                    "message": f"{key_lbl} bị từ chối xác thực/quyền (401/403). Đã khóa trên mọi model.",
+                    "error": err_str,
+                }
+            if st_code == 404:
+                return {
+                    "ok": True,
+                    "outcome": "model_not_found",
+                    "unlocked": False,
+                    "key_label": key_lbl,
+                    "model": model,
+                    "status_vi": "Không tìm thấy model (404)",
+                    "message": f"Model {model} không khả dụng cho {key_lbl} (404).",
+                    "error": err_str,
+                }
+            if _error_consumes_rpd(err_str, st_code):
+                self._increment_rpd(model, key, category="transient")
+            return {
+                "ok": True,
+                "outcome": "transient",
+                "unlocked": False,
+                "key_label": key_lbl,
+                "model": model,
+                "status_vi": "Quá tải 503 / Lỗi mạng",
+                "message": f"{key_lbl} trên {model} gặp lỗi tạm thời (503/Timeout/Mạng), chưa xác nhận được RPD.",
+                "error": err_str,
+            }
 
     @staticmethod
     def _build_http_options() -> dict | None:
@@ -458,28 +963,77 @@ class GeminiClient(BaseClient):
                 if now + min_interval > cur_allowed:
                     self._next_allowed_ts[(key, model)] = now + min_interval
                 if count_rpd:
-                    self._increment_rpd_unlocked(model, key)
+                    self._increment_rpd_unlocked(model, key, category="ok")
 
-    def _increment_rpd_unlocked(self, model: str, key: str | None = None) -> None:
-        """Tăng bộ đếm RPD (gọi bên trong _key_lock). Đánh dấu cạn key nếu key chạm ngưỡng RPD/key."""
-        self._rpd_counts[model] = self._rpd_counts.get(model, 0) + 1
+    def _increment_rpd_unlocked(
+        self, model: str, key: str | None = None, *, category: str = "ok", count: int = 1
+    ) -> None:
+        """Tăng bộ đếm RPD (gọi bên trong _key_lock).
+
+        Không tự ý khóa (key, model) vào _exhausted chỉ theo bộ đếm cục bộ vì các lỗi 503/Timeout
+        có thể không bị Google AI Studio trừ RPD hoặc giới hạn thực tế của key có thể khác cấu hình.
+        Chỉ Google 429 (đủ 3 lần) hoặc 401/403 mới đưa (key, model) vào _exhausted.
+        """
+        inc = max(1, int(count or 1))
+        self._rpd_counts[model] = self._rpd_counts.get(model, 0) + inc
         if key:
             pair = (key, model)
-            used_on_key = self._key_rpd_counts.get(pair, 0) + 1
+            used_on_key = self._key_rpd_counts.get(pair, 0) + inc
             self._key_rpd_counts[pair] = used_on_key
-            if used_on_key >= get_model_rpd_per_key(model, self.cfg):
-                self._exhausted.add(pair)
+            if category == "ok":
+                self._key_ok_counts[pair] = self._key_ok_counts.get(pair, 0) + inc
+            else:
+                self._key_transient_counts[pair] = self._key_transient_counts.get(pair, 0) + inc
         self._save_quota_state_unlocked()
 
-    def _increment_rpd(self, model: str, key: str | None = None) -> None:
-        """Tăng bộ đếm RPD khi request đã tiêu tốn 1 lượt gọi trên Google Gemini (kể cả 200 OK, 503, Timeout, JSON lỗi)."""
+    def _increment_rpd(
+        self, model: str, key: str | None = None, *, category: str = "ok", count: int = 1
+    ) -> None:
+        """Tăng bộ đếm RPD khi request đã tiêu tốn lượt gọi trên Google Gemini (kể cả 200 OK, 503, Timeout, JSON lỗi)."""
         with self._key_lock:
             self._check_and_reset_cycle()
-            self._increment_rpd_unlocked(model, key)
+            self._increment_rpd_unlocked(model, key, category=category, count=count)
+
+    def _record_extra_hops(self, key: str | None, model: str, extra_hops: int) -> None:
+        """Ghi nhận các hop bổ sung vào bộ đếm RPM/pacing nếu SDK chạy nhiều hop trong 1 lần gọi."""
+        extras = max(0, int(extra_hops or 0))
+        if not key or extras <= 0:
+            return
+        with self._key_lock:
+            now = time.time()
+            min_iv = get_model_min_interval_s(model, self.cfg)
+            for _ in range(extras):
+                self._rpm_tracker.setdefault(key, []).append(now)
+                self._model_rpm_tracker.setdefault((key, model), []).append(now)
+            if min_iv > 0:
+                self._next_allowed_ts[(key, model)] = max(
+                    self._next_allowed_ts.get((key, model), 0.0),
+                    now + min_iv,
+                )
+            self._save_quota_state_unlocked()
+
+    def _reserve_specific_key_wait(self, key: str, model: str) -> tuple[float, float]:
+        """Đặt chỗ trước slot RPM cho một cặp (key, model) cụ thể (dùng cho probe hoặc continuation hop)."""
+        with self._key_lock:
+            self._check_and_reset_cycle()
+            now = time.time()
+            ready_ts = self._earliest_ready_ts_unlocked(key, model, now)
+            scheduled_ts = max(now, ready_ts)
+            wait_s = max(0.0, scheduled_ts - now)
+            min_interval = get_model_min_interval_s(model, self.cfg)
+            self._rpm_tracker.setdefault(key, []).append(scheduled_ts)
+            self._model_rpm_tracker.setdefault((key, model), []).append(scheduled_ts)
+            if min_interval > 0:
+                self._next_allowed_ts[(key, model)] = max(
+                    self._next_allowed_ts.get((key, model), 0.0),
+                    scheduled_ts + min_interval,
+                )
+            self._save_quota_state_unlocked()
+            return wait_s, scheduled_ts
 
     def _rpm_count(self, key: str, model: str | None = None) -> int:
         """Đếm request của key (hoặc cặp key, model) trong 60s gần nhất, dọn entry cũ. Gọi bên trong _key_lock."""
-        cutoff = time.time() - _RPM_WINDOW_S
+        cutoff = time.time() - (_RPM_WINDOW_S + _RPM_WINDOW_SAFETY_S)
         if model is not None:
             pair = (key, model)
             if pair in self._model_rpm_tracker:
@@ -500,22 +1054,25 @@ class GeminiClient(BaseClient):
             self._key_cooldown.get(key, 0.0),
             self._next_allowed_ts.get((key, model), 0.0),
         )
-        # Kiểm tra cửa sổ trượt 60s của (key, model)
+        # Kiểm tra cửa sổ trượt 60s (+ đệm an toàn _RPM_WINDOW_SAFETY_S chống lệch đồng hồ & trễ mạng) của (key, model)
+        eff_window = _RPM_WINDOW_S + _RPM_WINDOW_SAFETY_S
         pair = (key, model)
-        cutoff = now - _RPM_WINDOW_S
+        cutoff = now - eff_window
         hist = sorted(t for t in self._model_rpm_tracker.get(pair, []) if t > cutoff)
         self._model_rpm_tracker[pair] = hist
         if len(hist) >= rpm_limit:
-            # Phải chờ cho tới khi request cũ thứ (len - rpm_limit) trôi qua cửa sổ 60s (+0.5s buffer an toàn)
+            # Phải chờ cho tới khi request cũ thứ (len - rpm_limit) trôi qua trọn cửa sổ an toàn
             oldest_blocking = hist[len(hist) - rpm_limit]
-            ready = max(ready, oldest_blocking + _RPM_WINDOW_S + 0.5)
+            ready = max(ready, oldest_blocking + eff_window)
         if hist and min_interval > 0:
             ready = max(ready, hist[-1] + min_interval)
         return ready
 
-    def _set_cooldown(self, key: str) -> None:
-        """Đặt cooldown cho key sau khi bị 429 RPM limit."""
-        self._key_cooldown[key] = time.time() + _COOLDOWN_S
+    def _set_cooldown(self, key: str, duration_s: float | None = None) -> None:
+        """Đặt cooldown cho key sau khi bị 429 RPM/TPM/Quota limit."""
+        cd = _COOLDOWN_S if duration_s is None else duration_s
+        if cd > 0:
+            self._key_cooldown[key] = max(self._key_cooldown.get(key, 0.0), time.time() + cd)
 
     def _next_key_client(self) -> tuple[str, any]:
         with self._key_lock:
@@ -662,8 +1219,20 @@ class GeminiClient(BaseClient):
     def _gen_config(self, step: str, model_name: str = "") -> dict:
         g = self.cfg["gemini"]
         gc: dict = {}
-        lvl = (g.get("thinking_level") or {}).get(step)
-        # thinking_level chỉ áp dụng cho dòng Gemini 3.x và 4.x
+        by_model = g.get("thinking_level_by_model") or {}
+        lvl = None
+        if isinstance(by_model, dict) and model_name in by_model:
+            per_m = by_model[model_name]
+            if isinstance(per_m, dict):
+                lvl = per_m.get(step)
+            elif isinstance(per_m, str):
+                lvl = per_m
+        if not lvl:
+            step_lvl = (g.get("thinking_level") or {}).get(step)
+            # thinking_level mặc định chỉ áp dụng cho dòng 3.x/4.x không phải flash-lite
+            # (giữ flash-lite ở mức minimal mặc định trừ khi khai báo riêng trong thinking_level_by_model).
+            if step_lvl and not model_name.startswith("gemini-2.") and "lite" not in (model_name or "").lower():
+                lvl = step_lvl
         if lvl and not model_name.startswith("gemini-2."):
             gc["thinking_level"] = lvl
         if g.get("max_output_tokens"):
@@ -689,6 +1258,202 @@ class GeminiClient(BaseClient):
                 eff = min(cap, max(eff * 1.35, eff + min(60.0, base)))
         return round(max(1.0, eff), 1)
 
+    def _should_use_background(
+        self, eff_timeout: float | None, sdk_client, *, force_bg: bool | None = None
+    ) -> bool:
+        """Quyết định có dùng background=True (store=True + poll) để tránh trần 600s đồng bộ của Google hay không."""
+        inter = getattr(sdk_client, "interactions", None)
+        if not inter or not callable(getattr(inter, "get", None)):
+            return False
+        if self.background_execution == "never":
+            return False
+        if self.background_execution == "always":
+            return True
+        if force_bg is not None:
+            return bool(force_bg)
+        return eff_timeout is None or float(eff_timeout) >= self.background_min_timeout_s
+
+    @staticmethod
+    def _safe_cleanup_interaction(sdk_client, interaction_id: str | None, *, cancel: bool = False) -> None:
+        """Hủy (nếu đang chạy) và xóa bản ghi background interaction trên server Google (best-effort)."""
+        if not interaction_id:
+            return
+        inter = getattr(sdk_client, "interactions", None)
+        if not inter:
+            return
+        if cancel:
+            cancel_fn = getattr(inter, "cancel", None)
+            if callable(cancel_fn):
+                try:
+                    cancel_fn(id=interaction_id, timeout=5.0)
+                except Exception:
+                    pass
+        delete_fn = getattr(inter, "delete", None)
+        if callable(delete_fn):
+            try:
+                delete_fn(id=interaction_id, timeout=5.0)
+            except Exception:
+                pass
+
+    def _call_background(
+        self,
+        sdk_client,
+        model_name: str,
+        step: str,
+        system: str,
+        prompt: str,
+        schema: dict,
+        eff_timeout: float | None,
+        cancel_ev: threading.Event | None,
+    ) -> tuple[str, dict, object]:
+        """Tạo và theo dõi interaction chạy nền (tránh lỗi 504 deadline_exceeded ở mốc 600s đồng bộ)."""
+        t_start = time.monotonic()
+        deadline_ts = (t_start + float(eff_timeout)) if eff_timeout is not None else None
+        create_timeout = min(60.0, float(eff_timeout)) if eff_timeout is not None else 60.0
+        try:
+            resp = sdk_client.interactions.create(
+                model=model_name,
+                input=prompt,
+                system_instruction=system,
+                response_format={"type": "text", "mime_type": "application/json", "schema": schema},
+                generation_config=self._gen_config(step, model_name),
+                background=True,
+                store=True,
+                timeout=float(create_timeout),
+            )
+        except Exception as exc:  # noqa: BLE001
+            st_c = _status_of(exc)
+            low = str(exc).lower()
+            if (st_c == 400 or isinstance(exc, TypeError)) and ("background" in low or "store" in low):
+                raise _BackgroundUnsupported() from exc
+            raise
+
+        self._tls_used_background.value = True
+        interaction_id = getattr(resp, "id", None)
+        status = str(getattr(resp, "status", "") or "").lower()
+        base_poll = max(0.01, float(self.background_poll_interval_s))
+        get_transient_errs = 0
+
+        try:
+            while status in ("in_progress", "queued") and interaction_id:
+                if cancel_ev is not None and cancel_ev.is_set():
+                    raise LLMCancelledError("Đã dừng chạy AI theo yêu cầu của người dùng.")
+                if deadline_ts is not None and time.monotonic() >= deadline_ts:
+                    raise TimeoutError(
+                        f"Request timed out after {eff_timeout}s waiting for background interaction."
+                    )
+
+                elapsed = time.monotonic() - t_start
+                if elapsed < 15.0:
+                    poll_sleep = min(base_poll, 1.5)
+                elif elapsed < 60.0:
+                    poll_sleep = base_poll
+                else:
+                    poll_sleep = min(6.0, max(base_poll, min(4.5, base_poll * 1.5)))
+
+                if deadline_ts is not None:
+                    rem = deadline_ts - time.monotonic()
+                    if rem <= 0:
+                        raise TimeoutError(
+                            f"Request timed out after {eff_timeout}s waiting for background interaction."
+                        )
+                    wait_dur = min(poll_sleep, rem)
+                else:
+                    wait_dur = poll_sleep
+
+                if cancel_ev is not None:
+                    if cancel_ev.wait(timeout=wait_dur):
+                        raise LLMCancelledError("Đã dừng chạy AI theo yêu cầu của người dùng.")
+                else:
+                    time.sleep(wait_dur)
+
+                if cancel_ev is not None and cancel_ev.is_set():
+                    raise LLMCancelledError("Đã dừng chạy AI theo yêu cầu của người dùng.")
+                if deadline_ts is not None:
+                    rem = deadline_ts - time.monotonic()
+                    if rem <= 0:
+                        raise TimeoutError(
+                            f"Request timed out after {eff_timeout}s waiting for background interaction."
+                        )
+                    poll_http_timeout = min(30.0, max(5.0, rem))
+                else:
+                    poll_http_timeout = 30.0
+
+                try:
+                    resp = sdk_client.interactions.get(id=interaction_id, timeout=float(poll_http_timeout))
+                    get_transient_errs = 0
+                    status = str(getattr(resp, "status", "") or "").lower()
+                except Exception as get_exc:  # noqa: BLE001
+                    get_low = str(get_exc).lower()
+                    get_st = _status_of(get_exc)
+                    is_get_retryable = (
+                        is_transient(get_exc)
+                        or _is_timeout_error(get_exc, get_low, get_st)
+                        or _is_connection_error(get_exc, get_low)
+                    )
+                    get_transient_errs += 1
+                    if not is_get_retryable or get_transient_errs > 5:
+                        raise
+                    err_wait = min(2.0, 0.4 * get_transient_errs, base_poll if base_poll >= 0.4 else 0.1)
+                    if deadline_ts is not None:
+                        rem = deadline_ts - time.monotonic()
+                        if rem <= 0:
+                            raise TimeoutError(
+                                f"Request timed out after {eff_timeout}s waiting for background interaction."
+                            ) from get_exc
+                        err_wait = min(err_wait, rem)
+                    if cancel_ev is not None:
+                        if cancel_ev.wait(timeout=err_wait):
+                            raise LLMCancelledError("Đã dừng chạy AI theo yêu cầu của người dùng.") from get_exc
+                    else:
+                        time.sleep(err_wait)
+
+            if status == "cancelled":
+                if cancel_ev is not None and cancel_ev.is_set():
+                    raise LLMCancelledError("Đã dừng chạy AI theo yêu cầu của người dùng.")
+                raise _BackgroundInteractionError("Background interaction was cancelled on server.", status_code=503)
+
+            if status == "failed":
+                errs = getattr(resp, "errors", None) or []
+                err_msgs: list[str] = []
+                mapped_code: int | None = None
+                for err_obj in errs:
+                    c = str(
+                        (err_obj.get("code") if isinstance(err_obj, dict) else getattr(err_obj, "code", None))
+                        or ""
+                    )
+                    m = str(
+                        (err_obj.get("message") if isinstance(err_obj, dict) else getattr(err_obj, "message", None))
+                        or ""
+                    )
+                    if mapped_code is None:
+                        mapped_code = _map_interaction_error_code(c, m)
+                    part = f"{c}: {m}" if (c and m) else (m or c)
+                    if part:
+                        err_msgs.append(part)
+                detail = "; ".join(err_msgs) or "Background interaction failed on server."
+                if mapped_code is None:
+                    mapped_code = 500
+                raise _BackgroundInteractionError(
+                    f"Error code: {mapped_code} - {{'error': {{'message': {detail!r}, 'code': {str(mapped_code)!r}}}}}",
+                    status_code=mapped_code,
+                )
+
+            text = _extract_interaction_text(resp)
+            usage = {}
+            u = getattr(resp, "usage", None)
+            if u is not None:
+                for k in ("total_input_tokens", "total_output_tokens", "total_thought_tokens",
+                          "total_cached_tokens", "total_tokens"):
+                    usage[k] = getattr(u, k, None)
+            return text, usage, getattr(resp, "status", None)
+        finally:
+            self._safe_cleanup_interaction(
+                sdk_client,
+                interaction_id,
+                cancel=(status in ("in_progress", "queued")),
+            )
+
     def _call_once(self, model_name, step, system, prompt, schema, client=None, *, timeout: float | None = _UNSET):
         if client is None:
             _, client = self._next_key_client()
@@ -697,16 +1462,87 @@ class GeminiClient(BaseClient):
         else:
             tls_val = getattr(self._tls_timeout, "value", _UNSET)
             eff_timeout = tls_val if tls_val is not _UNSET else get_model_timeout_s(model_name, self.cfg)
-        resp = client.interactions.create(
-            model=model_name,
-            input=prompt,
-            system_instruction=system,
-            response_format={"type": "text", "mime_type": "application/json", "schema": schema},
-            generation_config=self._gen_config(step, model_name),
-            store=False,
-            timeout=float(eff_timeout) if eff_timeout is not None else None,
-        )
-        text = getattr(resp, "output_text", None) or ""
+
+        self._tls_used_background.value = False
+        tls_bg = getattr(self._tls_use_background, "value", _UNSET)
+        force_bg = None if tls_bg is _UNSET else bool(tls_bg)
+        if self._should_use_background(eff_timeout, client, force_bg=force_bg):
+            try:
+                return self._call_background(
+                    client, model_name, step, system, prompt, schema, eff_timeout, get_active_cancel_event()
+                )
+            except _BackgroundUnsupported:
+                self._tls_used_background.value = False
+
+        self._tls_api_hops.value = 1
+        hop_epochs: list[float] = []
+        self._tls_hop_epochs.value = hop_epochs
+        call_key = getattr(self._tls_call_key, "value", None)
+        if not isinstance(call_key, str) or not call_key:
+            call_key = None
+        cancel_ev = get_active_cancel_event()
+        create_fn = getattr(client.interactions, "create", None)
+        use_manual_cont = _supports_automatic_continuation(create_fn)
+
+        base_kwargs: dict = {
+            "model": model_name,
+            "input": prompt,
+            "system_instruction": system,
+            "response_format": {"type": "text", "mime_type": "application/json", "schema": schema},
+            "generation_config": self._gen_config(step, model_name),
+            "store": False,
+            "timeout": float(eff_timeout) if eff_timeout is not None else None,
+        }
+        if use_manual_cont:
+            base_kwargs["automatic_continuation"] = False
+
+        collected_hops: list[object] = []
+        sent_token: str | None = None
+        while True:
+            hop_kwargs = dict(base_kwargs)
+            if sent_token is not None:
+                hop_kwargs["continuation_token"] = sent_token
+                if call_key:
+                    wait_s, res_ts = self._reserve_specific_key_wait(call_key, model_name)
+                    if wait_s > 0:
+                        sleep_with_cancel(wait_s + 0.05, cancel_ev)
+                    hop_ts = time.time()
+                    self._update_call_timestamp(call_key, model_name, res_ts, hop_ts)
+                    hop_epochs.append(round(hop_ts, 3))
+                else:
+                    min_iv = get_model_min_interval_s(model_name, self.cfg)
+                    if min_iv > 0 and self.backoff_max > 0.0:
+                        sleep_with_cancel(min_iv, cancel_ev)
+            try:
+                hop_resp = client.interactions.create(**hop_kwargs)
+            except Exception as hop_exc:
+                if collected_hops:
+                    try:
+                        setattr(hop_exc, "_tomtat_completed_hops", len(collected_hops))
+                        setattr(hop_exc, "_tomtat_hop_epochs", list(hop_epochs))
+                    except Exception:
+                        pass
+                raise
+            collected_hops.append(hop_resp)
+            if not use_manual_cont or len(collected_hops) >= _MAX_CONTINUATION_HOPS:
+                break
+            hop_status = str(getattr(hop_resp, "status", "") or "").lower()
+            if hop_status != "requires_continuation":
+                break
+            next_tok = getattr(hop_resp, "continuation_token", None)
+            if not isinstance(next_tok, str) or not next_tok or next_tok == sent_token:
+                break
+            sent_token = next_tok
+
+        resp = _merge_interaction_hops(collected_hops) if len(collected_hops) > 1 else collected_hops[0]
+        c_ids = _extract_continuation_ids(resp)
+        extra_unpaced = max(0, len(c_ids) - len(collected_hops))
+        if extra_unpaced > 0 and call_key:
+            self._record_extra_hops(call_key, model_name, extra_unpaced)
+        self._tls_api_hops.value = max(len(collected_hops), len(c_ids), 1)
+        self._tls_hop_epochs.value = hop_epochs
+
+        text = _extract_interaction_text(resp) or getattr(resp, "output_text", None) or ""
         usage = {}
         u = getattr(resp, "usage", None)
         if u is not None:
@@ -833,7 +1669,7 @@ class GeminiClient(BaseClient):
         scheduled_ts: float,
     ) -> None:
         if in_flight:
-            self._increment_rpd(cur_model, cur_key)
+            self._increment_rpd(cur_model, cur_key, category="transient")
         else:
             self._release_reserved_slot(cur_key, cur_model, scheduled_ts)
         record.update(
@@ -883,20 +1719,44 @@ class GeminiClient(BaseClient):
             self._update_call_timestamp(cur_key, cur_model, scheduled_ts, t_call)
             res_box: list[tuple[str, dict, object]] = []
             exc_box: list[BaseException] = []
+            used_bg_box: list[bool] = []
+            api_hops_box: list[int] = []
+            hop_epochs_box: list[list[float]] = []
             call_done = threading.Event()
             tls_timeout = getattr(self._tls_timeout, "value", _UNSET)
+            tls_bg = getattr(self._tls_use_background, "value", _UNSET)
+            tls_key = getattr(self._tls_call_key, "value", cur_key)
 
             def _run_call_once():
                 prev_t = getattr(self._tls_timeout, "value", _UNSET)
+                prev_bg = getattr(self._tls_use_background, "value", _UNSET)
+                prev_used_bg = getattr(self._tls_used_background, "value", _UNSET)
+                prev_key = getattr(self._tls_call_key, "value", _UNSET)
+                prev_hops = getattr(self._tls_api_hops, "value", _UNSET)
+                prev_ep = getattr(self._tls_hop_epochs, "value", _UNSET)
                 self._tls_timeout.value = tls_timeout
+                self._tls_use_background.value = tls_bg
+                self._tls_used_background.value = False
+                self._tls_call_key.value = tls_key
+                self._tls_api_hops.value = 1
+                self._tls_hop_epochs.value = []
                 try:
-                    res_box.append(
-                        self._call_once(cur_model, step, system, prompt, schema, client=cur_client)
-                    )
+                    with bind_cancel_event(cancel_ev):
+                        res_box.append(
+                            self._call_once(cur_model, step, system, prompt, schema, client=cur_client)
+                        )
                 except BaseException as call_exc:  # noqa: BLE001
                     exc_box.append(call_exc)
                 finally:
+                    used_bg_box.append(bool(getattr(self._tls_used_background, "value", False)))
+                    api_hops_box.append(max(1, int(getattr(self._tls_api_hops, "value", 1) or 1)))
+                    hop_epochs_box.append(list(getattr(self._tls_hop_epochs, "value", []) or []))
                     self._tls_timeout.value = prev_t
+                    self._tls_use_background.value = prev_bg
+                    self._tls_used_background.value = prev_used_bg
+                    self._tls_call_key.value = prev_key
+                    self._tls_api_hops.value = prev_hops
+                    self._tls_hop_epochs.value = prev_ep
                     call_done.set()
 
             threading.Thread(target=_run_call_once, name=f"tomtat_call_{step}", daemon=True).start()
@@ -906,6 +1766,12 @@ class GeminiClient(BaseClient):
                         record, log_dir, log_path, t0,
                         in_flight=True, cur_key=cur_key, cur_model=cur_model, scheduled_ts=scheduled_ts,
                     )
+            if used_bg_box:
+                self._tls_used_background.value = used_bg_box[-1]
+            if api_hops_box:
+                self._tls_api_hops.value = api_hops_box[-1]
+            if hop_epochs_box:
+                self._tls_hop_epochs.value = hop_epochs_box[-1]
             if cancel_ev.is_set():
                 self._raise_cancelled_log(
                     record, log_dir, log_path, t0,
@@ -952,6 +1818,7 @@ class GeminiClient(BaseClient):
             qps_streak = 0
             timeouts_on_model = 0
             transient_on_model = 0
+            force_bg_next: bool | None = None
 
             while not skip_model:
                 check_not_cancelled(cancel_ev)
@@ -979,6 +1846,7 @@ class GeminiClient(BaseClient):
                 call_timeout = self._compute_call_timeout_s(
                     cur_model, system, prompt, timeout_retries=timeouts_on_model
                 )
+                will_use_bg = self._should_use_background(call_timeout, cur_client, force_bg=force_bg_next)
                 call_prompt = (
                     prompt
                     if (global_qps_hits == 0 or self.backoff_max <= 0.5)
@@ -993,6 +1861,7 @@ class GeminiClient(BaseClient):
                     "key_label": key_lbl,
                     "round": round_no,
                     "timeout_s": call_timeout,
+                    **({"background": True} if will_use_bg else {}),
                     "started_at": datetime.now().isoformat(timespec="seconds"),
                     "started_epoch": round(t_init, 3),
                     "in_progress": True,
@@ -1062,9 +1931,20 @@ class GeminiClient(BaseClient):
                 )
                 log_path = write_log(log_dir, record, self._api_keys, log_path=log_path)
 
+                used_bg = False
                 try:
                     prev_tls_timeout = getattr(self._tls_timeout, "value", _UNSET)
+                    prev_tls_bg = getattr(self._tls_use_background, "value", _UNSET)
+                    prev_tls_used_bg = getattr(self._tls_used_background, "value", _UNSET)
+                    prev_tls_key = getattr(self._tls_call_key, "value", _UNSET)
+                    prev_tls_hops = getattr(self._tls_api_hops, "value", _UNSET)
+                    prev_tls_ep = getattr(self._tls_hop_epochs, "value", _UNSET)
                     self._tls_timeout.value = call_timeout
+                    self._tls_use_background.value = force_bg_next if force_bg_next is not None else _UNSET
+                    self._tls_used_background.value = False
+                    self._tls_call_key.value = cur_key
+                    self._tls_api_hops.value = 1
+                    self._tls_hop_epochs.value = []
                     try:
                         if cancel_ev is None:
                             sem = self._semaphore
@@ -1077,14 +1957,30 @@ class GeminiClient(BaseClient):
                                 cancel_ev, cur_model, step, system, call_prompt, schema, cur_client,
                                 cur_key, scheduled_ts, t_init, t0, record, log_dir, log_path,
                             )
+                        call_hops = max(1, int(getattr(self._tls_api_hops, "value", 1) or 1))
+                        extra_hop_epochs = list(getattr(self._tls_hop_epochs, "value", []) or [])
                     finally:
+                        used_bg = bool(getattr(self._tls_used_background, "value", False))
                         self._tls_timeout.value = prev_tls_timeout
+                        self._tls_use_background.value = prev_tls_bg
+                        self._tls_used_background.value = prev_tls_used_bg
+                        self._tls_call_key.value = prev_tls_key
+                        self._tls_api_hops.value = prev_tls_hops
+                        self._tls_hop_epochs.value = prev_tls_ep
+                        if used_bg:
+                            record["background"] = True
+                        else:
+                            record.pop("background", None)
                     qps_streak = 0
                     with self._key_lock:
                         self._idle_429_strikes.pop((cur_key, cur_model), None)
                         self._model_503_streak.pop(cur_model, None)
+                        self._model_timeout_streak.pop(cur_model, None)
                         self._model_outage_until.pop(cur_model, None)
-                    self._increment_rpd(cur_model, cur_key)
+                    if call_hops > 1:
+                        record["api_hops"] = call_hops
+                        record["hop_epochs"] = [round(t0, 3)] + extra_hop_epochs
+                    self._increment_rpd(cur_model, cur_key, category="ok", count=call_hops)
                     dur = time.time() - t0
                     record.update(
                         in_progress=False,
@@ -1137,9 +2033,22 @@ class GeminiClient(BaseClient):
                 except Exception as exc:  # noqa: BLE001
                     err_str = _redact(f"{type(exc).__name__}: {exc}", self._api_keys)
                     st_code = _status_of(exc)
-                    # Lỗi 503 (high demand), 500, 502, 504 hoặc Timeout vẫn bị Google tính 1 RPD
+                    manual_hops_done = max(0, int(getattr(exc, "_tomtat_completed_hops", 0) or 0))
+                    exc_c_ids = _extract_continuation_ids(exc)
+                    extra_unpaced_hops = max(0, (len(exc_c_ids) - 1) - manual_hops_done) if exc_c_ids else 0
+                    if extra_unpaced_hops > 0:
+                        self._record_extra_hops(cur_key, cur_model, extra_unpaced_hops)
+                    completed_hops = max(manual_hops_done, max(0, len(exc_c_ids) - 1) if exc_c_ids else 0)
+                    if completed_hops > 0:
+                        self._increment_rpd(cur_model, cur_key, category="ok", count=completed_hops)
+                        record["completed_hops"] = completed_hops
+                        record["api_hops"] = completed_hops + 1
+                        hop_eps = getattr(exc, "_tomtat_hop_epochs", None)
+                        if isinstance(hop_eps, list) and hop_eps:
+                            record["hop_epochs"] = [round(t0, 3)] + hop_eps
+                    # Lỗi 503 (high demand), 500, 502, 504 hoặc Timeout vẫn được tính vào ước tính RPD
                     if _error_consumes_rpd(err_str, st_code):
-                        self._increment_rpd(cur_model, cur_key)
+                        self._increment_rpd(cur_model, cur_key, category="transient")
                     record.update(
                         in_progress=False,
                         phase="done",
@@ -1160,6 +2069,11 @@ class GeminiClient(BaseClient):
                     if is_quota_429:
                         if _is_payload_qps_429(err_lower):
                             # Giới hạn QPS theo payload giống nhau trên cổng Google: KHÔNG tính strike RPD, KHÔNG khóa key
+                            with self._key_lock:
+                                self._key_qps_counts[(cur_key, cur_model)] = (
+                                    self._key_qps_counts.get((cur_key, cur_model), 0) + 1
+                                )
+                                self._save_quota_state_unlocked()
                             qps_streak += 1
                             global_qps_hits += 1
                             self._schedule_payload_qps_backoff(payload_sig, global_qps_hits)
@@ -1171,22 +2085,41 @@ class GeminiClient(BaseClient):
                             continue
                         qps_streak = 0
                         is_explicit_daily_quota = any(tok in err_lower for tok in (
-                            "per day", "per_day", "requests per day", "requestsperday",
-                            "daily", "rpd", "limit: 0",
+                            "per day", "per_day", "perday", "requests per day", "requestsperday",
+                            "tokensperday", "daily", "rpd", "limit: 0",
                         ))
                         is_explicit_rpm_quota = any(tok in err_lower for tok in (
-                            "per minute", "per_minute", "requests per minute", "requestsperminute",
+                            "per minute", "per_minute", "perminute", "requests per minute", "requestsperminute",
                             "tokensperminute", "rpm", "tpm",
                         ))
-                        # Với mỗi cặp (key, model), phải trả về mã 429 đủ 3 lần mới đánh dấu hết hạn mức (exhausted)
+                        # Với mỗi cặp (key, model), phải trả về mã 429 đủ 3 lần mới đánh dấu hết hạn mức (exhausted).
+                        # Nếu là lỗi RPM/TPM hoặc 429 không ghi daily (giữa môi trường thật _COOLDOWN_S>=1s) -> hạ nhiệt >= 65s để qua trọn cửa sổ 60s.
                         with self._key_lock:
-                            self._set_cooldown(cur_key)
+                            cd_s = (
+                                max(_COOLDOWN_S, 65.0)
+                                if (
+                                    (_COOLDOWN_S > 0 and is_explicit_rpm_quota and not is_explicit_daily_quota)
+                                    or (_COOLDOWN_S >= 1.0 and not is_explicit_daily_quota)
+                                )
+                                else _COOLDOWN_S
+                            )
+                            self._set_cooldown(cur_key, cd_s)
                             strikes = self._idle_429_strikes.get((cur_key, cur_model), 0) + 1
                             self._idle_429_strikes[(cur_key, cur_model)] = strikes
                             exhausted_now = strikes >= 3
                             if exhausted_now:
                                 self._check_and_reset_cycle()
                                 self._exhausted.add((cur_key, cur_model))
+                                reason_code = (
+                                    "429_daily"
+                                    if is_explicit_daily_quota
+                                    else ("429_rpm_3x" if is_explicit_rpm_quota else "429_project_3x")
+                                )
+                                self._exhausted_meta[(cur_key, cur_model)] = {
+                                    "reason": reason_code,
+                                    "error": err_str[:280],
+                                    "at": datetime.now().isoformat(timespec="seconds"),
+                                }
                                 self._idle_429_strikes.pop((cur_key, cur_model), None)
                             self._save_quota_state_unlocked()
                         if exhausted_now:
@@ -1204,7 +2137,7 @@ class GeminiClient(BaseClient):
                     if st_code in (401, 403) or "unauthenticated" in err_lower or "not valid" in err_lower:
                         # Key lỗi xác thực -> loại khỏi mọi model (cả chain chung lẫn model theo bước)
                         for m in self._all_configured_models():
-                            self._mark_exhausted(cur_key, m)
+                            self._mark_exhausted(cur_key, m, reason="invalid_key", error=err_str)
                         record["action"] = "invalid_key"
                         write_log(log_dir, record, self._api_keys, log_path=log_path)
                         continue
@@ -1216,12 +2149,57 @@ class GeminiClient(BaseClient):
                     if _is_timeout_error(exc, err_lower, st_code):
                         self._evict_client(cur_key)
                         timeouts_on_model += 1
+                        dur_s = round(time.time() - t0, 2)
+                        is_server_504 = _is_server_deadline_exceeded(exc, err_lower, st_code)
                         record["timeout_retry"] = timeouts_on_model
-                        if self.max_timeouts_per_model and timeouts_on_model >= self.max_timeouts_per_model:
+
+                        # Nếu lỗi 504 xảy ra trên lời gọi đồng bộ ở trần ~600s hoặc đã chờ >= 480s,
+                        # chuyển ngay sang model dự phòng và hạ nhiệt model đang treo cho cả pool luồng.
+                        hit_long_wall = (dur_s >= 480.0) or (
+                            is_server_504 and (used_bg or dur_s >= 300.0 or (call_timeout is not None and call_timeout >= 540.0))
+                        )
+                        reached_retry_limit = bool(
+                            self.max_timeouts_per_model and timeouts_on_model >= self.max_timeouts_per_model
+                        )
+                        hit_timeout_outage = False
+                        if self.backoff_max > 0.5:
+                            with self._key_lock:
+                                now_to = time.time()
+                                t_streak = self._model_timeout_streak.get(cur_model, 0) + 1
+                                self._model_timeout_streak[cur_model] = t_streak
+                                should_cool = (
+                                    dur_s >= 480.0
+                                    or (
+                                        self.model_timeout_outage_threshold
+                                        and t_streak >= self.model_timeout_outage_threshold
+                                    )
+                                )
+                                if should_cool:
+                                    if self.model_timeout_outage_cooldown_s > 0.0:
+                                        self._model_outage_until[cur_model] = max(
+                                            self._model_outage_until.get(cur_model, 0.0),
+                                            now_to + self.model_timeout_outage_cooldown_s,
+                                        )
+                                    self._model_timeout_streak[cur_model] = 0
+                                    if self._has_non_outage_fallback_unlocked(
+                                        cur_model, now_to, models_chain=step_chain
+                                    ):
+                                        hit_timeout_outage = True
+                                elif (
+                                    self._model_outage_until.get(cur_model, 0.0) > now_to
+                                    and self._has_non_outage_fallback_unlocked(
+                                        cur_model, now_to, models_chain=step_chain
+                                    )
+                                ):
+                                    hit_timeout_outage = True
+
+                        if hit_long_wall or reached_retry_limit or hit_timeout_outage:
                             record["action"] = "fallback_timeout"
                             write_log(log_dir, record, self._api_keys, log_path=log_path)
                             skip_model = True
                             continue
+                        if is_server_504 and not used_bg and self.background_execution != "never":
+                            force_bg_next = True
                         record["action"] = "next_key_timeout"
                         write_log(log_dir, record, self._api_keys, log_path=log_path)
                         continue
@@ -1293,7 +2271,7 @@ class GeminiClient(BaseClient):
                 hint = " (mọi key đều đã hết RPD trên mọi model; chờ tới 15:00 giờ VN (reset hạn mức) hoặc thêm key mới)"
         elif _is_timeout_error(last_exc, msg.lower(), st):
             hint = (
-                " (mọi model đã thử đều vượt quá thời gian chờ phản hồi; "
-                "hãy kiểm tra kết nối mạng hoặc tăng timeout_s / timeout_s_by_model trong config.yaml)"
+                " (mọi model đã thử đều vượt quá thời gian chờ phản hồi hoặc gặp giới hạn 504 từ Google; "
+                "hãy kiểm tra kết nối mạng, giữ background_execution: auto hoặc thử lại sau khi máy chủ bớt nghẽn)"
             )
         raise LLMError(f"Gọi Gemini thất bại ở bước {step}: {msg}{hint}")

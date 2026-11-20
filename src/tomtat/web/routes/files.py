@@ -96,6 +96,56 @@ def api_rpd():
     })
 
 
+@bp.get("/api/rpd/keys")
+def api_rpd_keys():
+    """Trả về chi tiết trạng thái còn/hết RPD của từng model theo từng API key để đối chiếu Google AI Studio."""
+    from ...services.batch_service import get_rpd_details
+
+    cfg = _cfg()
+    cfg.reload()
+    keys = _cfg_mod.get_api_keys()
+    details = get_rpd_details(cfg, api_keys=keys)
+    details["rpd_status"] = get_rpd_status(cfg, api_keys=keys)
+    details["mock"] = _mock()
+    return jsonify(details)
+
+
+@bp.post("/api/rpd/unlock")
+def api_rpd_unlock():
+    """Mở khóa trạng thái hết RPD / strikes_429 / cooldown cho 1 cặp (key, model), 1 model hoặc tất cả."""
+    from ...services.batch_service import unlock_rpd_quota
+
+    cfg = _cfg()
+    cfg.reload()
+    payload = request.get_json(silent=True) or {}
+    key_id = str(payload.get("key_id") or "").strip() or None
+    model = str(payload.get("model") or "").strip() or None
+    try:
+        return jsonify(unlock_rpd_quota(cfg, key_id=key_id, model=model))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@bp.post("/api/rpd/probe")
+def api_rpd_probe():
+    """Gửi 1 request kiểm tra thực tế tới Google Gemini API cho (key_id, model) chỉ định."""
+    from ...services.batch_service import probe_rpd_key_model
+
+    cfg = _cfg()
+    cfg.reload()
+    payload = request.get_json(silent=True) or {}
+    key_id = str(payload.get("key_id") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    if not key_id or not model:
+        return jsonify({"error": "Thiếu key_id hoặc model để kiểm tra."}), 400
+    try:
+        return jsonify(probe_rpd_key_model(cfg, key_id=key_id, model=model, force_mock=_mock()))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @bp.post("/api/upload")
 def api_upload():
     """Tải một hoặc nhiều file .docx từ trình duyệt vào thư mục input\\ (và tùy chọn chạy AI ngay)."""

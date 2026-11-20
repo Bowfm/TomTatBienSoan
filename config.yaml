@@ -50,6 +50,11 @@ gemini:
     gemini-3.5-flash-lite: 180    # Tối đa 3 phút
     gemini-3.1-flash-lite: 180    # Tối đa 3 phút
   max_timeouts_per_model: 2       # tối đa số lần lỗi timeout mạng/server trên cùng 1 model trước khi trượt model kế tiếp (0 = không giới hạn)
+  background_execution: auto      # "auto": tự dùng chạy nền (background=True, store=True) khi timeout >= background_min_timeout_s hoặc null để tránh trần 600s đồng bộ (504 deadline_exceeded) của Google
+  background_min_timeout_s: 540   # ngưỡng timeout (giây) tự chuyển sang thực thi nền thay vì giữ HTTP đồng bộ dễ đứt ở 600s
+  background_poll_interval_s: 3.0 # chu kỳ thăm dò kết quả khi chạy nền (giây)
+  model_timeout_outage_threshold: 2   # số lần timeout/504 liên tiếp trên cùng 1 model để tạm hạ nhiệt model cho cả pool luồng
+  model_timeout_outage_cooldown_s: 180 # thời gian tạm hạ nhiệt model đang treo timeout/504 (giây) trước khi thử thăm dò lại
   max_transient_per_model: 8      # tối đa số lần lỗi 503/tạm thời liên tiếp trên cùng 1 model cho mỗi lượt gọi trước khi tạm trượt model kế tiếp (tiết kiệm RPD khi model chính nghẽn; 0 = không giới hạn)
   model_outage_threshold: 5       # số lỗi 503 liên tiếp trên toàn pool để tạm hạ nhiệt model cho cả 3 luồng (tránh nối đuôi đốt RPD)
   model_outage_cooldown_s: 30     # thời gian tạm hạ nhiệt model đang bão 503 (giây) trước khi thử thăm dò lại
@@ -60,6 +65,16 @@ gemini:
   backoff_max_s: 10
   max_output_tokens: 65536        # Gồm CẢ thinking + output tokens; 65536 là trần synchronous của Gemini 3.x/4.x (16384 dễ bị cắt khi thinking dài)
   temperature: null               # null = để mặc định của model
+  thinking_level:                 # Mức suy nghĩ đồng bộ cho các model chính Gemini 3.x / 4.x (4-hydrogen, 3.8-flash, 3.6-flash); không tự ép lên *-lite
+    label: medium                 # Gán nhãn phong cách ở mức medium đồng đều cho cả chuỗi model chính
+    extract: medium               # Chọn ID câu ở mức medium để không tụt chất lượng chọn ý khi đổi model
+    abstract: medium              # Biên soạn dùng medium: cân bằng chất lượng, tránh tự đẩy sang thinking quá dài gây vượt 600s
+    judge: low
+  thinking_level_by_model:        # Nâng riêng bước biên soạn (abstract) trên nhóm *-lite lên low nếu phải fallback sâu; giữ judge/các bước nhẹ ở minimal
+    gemini-3.5-flash-lite:
+      abstract: low
+    gemini-3.1-flash-lite:
+      abstract: low
   max_concurrent_calls: auto      # "auto" = tự động tăng/giảm theo tổng số API keys trong api_keys.txt
   # Chiến lược gọi key TUẦN TỰ: mỗi model có 1 con trỏ, gọi lần lượt key #1 -> key cuối rồi quay vòng lại #1.
   #  - 429  -> đủ 3 lần trên cùng (key, model) mới đánh dấu hết RPD tới chu kỳ mới (15:00 VN)

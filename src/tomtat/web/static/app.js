@@ -15,6 +15,7 @@ import {
   initUpdateChecker,
   openLogsModal,
   openPreviewModal,
+  openRpdModal,
   openVersionsModal,
 } from "./modules/modals.js";
 import {
@@ -102,6 +103,22 @@ window.addEventListener("DOMContentLoaded", () => {
   }
   $("btn-approve").addEventListener("click", () => approveAndExport(false));
   if ($("btn-logs")) $("btn-logs").addEventListener("click", () => openLogsModal());
+  if ($("btn-rpd-details")) $("btn-rpd-details").addEventListener("click", () => openRpdModal("ALL"));
+  if ($("rpd-models-list")) {
+    $("rpd-models-list").addEventListener("click", (e) => {
+      const pill = e.target.closest(".rpd-pill[data-model]");
+      if (pill) openRpdModal(pill.dataset.model);
+    });
+    $("rpd-models-list").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        const pill = e.target.closest(".rpd-pill[data-model]");
+        if (pill) {
+          e.preventDefault();
+          openRpdModal(pill.dataset.model);
+        }
+      }
+    });
+  }
 
   initUpdateChecker();
   $("btn-preview").addEventListener("click", openPreviewModal);

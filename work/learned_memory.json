@@ -1,7 +1,49 @@
 {
-  "total_approved_learned": 108,
-  "updated_at": "2026-11-20T20:27:31",
+  "total_approved_learned": 138,
+  "updated_at": "2026-11-21T01:19:43",
   "label_corrections": [
+    {
+      "stem": "S89562",
+      "ai_guessed": "khoa học",
+      "human_approved": "khoa học",
+      "snippet": "[VB1] 🔥🔥MẸO CHỮA SÂU RĂNG Khi bị đau răng phải làm sao? 1. Chườm lạnh hoặc chườm đá",
+      "learned_at": "2026-11-20T23:19:10"
+    },
+    {
+      "stem": "S89586",
+      "ai_guessed": "khoa học",
+      "human_approved": "khoa học",
+      "snippet": "[VB1] [BIẾNG ĂN – MỐI LO NGẠI - Ở MỌI THỜI ĐẠI] Biếng ăn không phải là một bệnh, nhưng nó mang lại không ít phiền toái khi đặt con lên Cân để kiểm tra cũng như so sánh với con hàng xóm. CẦN KHẲNG ĐỊNH \"CHẮC NỊCH\" VỚI NHAU RẰNG.",
+      "learned_at": "2026-11-20T23:16:28"
+    },
+    {
+      "stem": "S89592",
+      "ai_guessed": "báo chí - công luận",
+      "human_approved": "báo chí - công luận",
+      "snippet": "[VB1] Viện Di truyền Y học tổ chức tọa đàm “Xét nghiệm di truyền trong thai kỳ: Cập nhật kiến thức và xu hướng mới” (Phụ Nữ Hiện Đại) – Tọa đàm với chủ đề “Xét nghiệm di truyền trong thai kỳ: Cập nhật kiến thức và xu hướng mới” vừa được tổ chức trung tuần tháng 9/2010. Chương trình do Viện Di truyền Y học – Gene Solutions kết hợp cùng Báo điện tử Sức khỏe & Đời sống thực hiện.",
+      "learned_at": "2026-11-20T23:15:00"
+    },
+    {
+      "stem": "S89593",
+      "ai_guessed": "khoa học",
+      "human_approved": "khoa học",
+      "snippet": "[VB1] SẠN MẬT VÀ CÁCH XỔ SẠN MẬT Mật (đởm) là một trong sáu phủ của cơ thể, giữ nhiệm vụ chứa chất mật từ gan và tiết mật vào tiểu trường (ruột non) để giúp tiêu hóa chất dầu mỡ, chất béo trong thức ăn. Theo YHHĐ thì túi mật là một bộ phận không quan trọng và có thể được cắt bỏ nếu sạn mật gây những trở ngại về sức khỏe.",
+      "learned_at": "2026-11-20T23:13:34"
+    },
+    {
+      "stem": "S89611",
+      "ai_guessed": "báo chí - công luận",
+      "human_approved": "báo chí - công luận",
+      "snippet": "[VB1] Ngon ngọt Đường: \"Thần Dược\" Trong Tay Bạn Để Chữa Lành Vết Thương. Có thể thay cho kháng sinh?",
+      "learned_at": "2026-11-20T23:11:33"
+    },
+    {
+      "stem": "S89693",
+      "ai_guessed": "báo chí - công luận",
+      "human_approved": "khoa học",
+      "snippet": "[VB1] 6 thói xấu con người hay làm trong vô thức, tưởng không sao mà cực hại: nhai đá, bẻ khớp 6 thói xấu trong vô thức cực kỳ có hại mà bạn chưa biết. Cắn móng tay, bẻ khớp ngón tay hoặc để đồng hồ báo thức nhưng không bao giờ dậy... được xem là những thói quen xấu nhưng nhiều người vẫn thường thực hiện trong vô thức mỗi ngày.",
+      "learned_at": "2026-11-20T23:04:46"
+    },
     {
       "stem": "S89769",
       "ai_guessed": "khoa học",
@@ -64,73 +106,31 @@
       "human_approved": "báo chí - công luận",
       "snippet": "[VB1] Khử mùi cho căn nhà và những điều không phải ai cũng biết Để nâng cao chất lượng không gian sống, giảm thiểu tác nhân gây hại cho sức khỏe thì việc 'khử mùi' cho nhà cần tiến hành định kỳ tương tự như làm vệ sinh, bảo trì bảo dưỡng, theo các vấn đề cụ thể của mỗi ngôi nhà. Việc kiểm tra, khử mùi định kỳ nhà cửa không chỉ giúp đảm bảo chất lượng sử dụng công trình, mà còn giúp giảm bớt nguy cơ tích tụ các chất thải, chất gây mùi khó chịu.",
       "learned_at": "2026-11-20T00:11:18"
-    },
-    {
-      "stem": "S95701",
-      "ai_guessed": "sinh hoạt hằng ngày",
-      "human_approved": "sinh hoạt hằng ngày",
-      "snippet": "[VB1] Có một tập hợp các kiểu tính cách tương ứng với thời gian chìm vào giấc ngủ trên mạng xã hội như sau: Trước 21h: nhóm nhàn hạ. 21-22h: cao thủ dưỡng sinh.",
-      "learned_at": "2026-11-19T23:27:52"
-    },
-    {
-      "stem": "S95702",
-      "ai_guessed": "khoa học",
-      "human_approved": "khoa học",
-      "snippet": "[VB1] Cách làm mát cơ thể trong ngày hè oi bức 1. Uống nhiều nước 3. Tập thể dục nhẹ nhàng",
-      "learned_at": "2026-11-19T21:00:48"
-    },
-    {
-      "stem": "S95726",
-      "ai_guessed": "sinh hoạt hằng ngày",
-      "human_approved": "khoa học",
-      "snippet": "[VB1] :V Bệnh tâm lý horror hobbies với tên khác Horror the Emotion hay hội chứng Emotional horror Được công nhận và nghiên cứu rõ ràng vào năm 2004 bởi Davis Baker nhà .tâm lý học, sinh lý học, nhân loại học.(Những năm 1940 đã có các nghiên cứu nhỏ lẻ về bệnh nhưng không chính thức, bệnh được cho là phát hiện vào năm 1890) LOẠI : Rối loạn cảm xúc Nó là 1 dạng chấn động tâm lý về suy nghĩ, tính cách, cảm xúc và tư duy",
-      "learned_at": "2026-11-19T20:53:17"
-    },
-    {
-      "stem": "M51088",
-      "ai_guessed": "sinh hoạt hằng ngày",
-      "human_approved": "sinh hoạt hằng ngày",
-      "snippet": "[VB1] ĐIỀU KIỆN TRUNG THỰC KHI KÊ KHAI MẪU MUA BẢO HIỂM NHÂN THỌ 🔛 Mẫu hồ sơ mua bảo hiểm nhân thọ do doanh nghiệp bảo hiểm thiết kế cho bên-mua-bảo-hiểm hay cũng người-được-bảo-hiểm điền bằng cách trả lời tất cả các câu hỏi là CÓ hoặc KHÔNG 🔛 Mẫu hồ sơ mua bảo hiểm nhân thọ đã được Bộ Tài Chính nhà nước phê chuẩn, doanh nghiệp bảo hiểm không được đơn phương chỉnh sửa. [VB2] Toà án nhân dân Tỉnh cà mau bác không xem xét dấu hiệu phạm tội “ Lạm Dụng Tín Nhiệm Chiếm đoạt Tài sản “ có trong hồ sơ vụ án do CQĐT công an đã điều tra có được là ĐÃ VI ",
-      "learned_at": "2026-11-19T10:33:23"
-    },
-    {
-      "stem": "M51254",
-      "ai_guessed": "báo chí - công luận",
-      "human_approved": "sinh hoạt hằng ngày",
-      "snippet": "[VB1] THUẾ CỦA TỔNG THỐNG Đôi lời của người dịch: $750 cho liên bang trong 2016,$750 cho 2017. [VB2] PHÁP LUẬT/HÌNH SỰ - DÂN SỰ TP.HCM: Hai 'hiệp sĩ' hy sinh khi bắt trộm được công nhận liệt sĩ Sở LĐ-TB&XH TP.HCM cho biết, Thủ tướng Chính phủ đã cấp bằng Tổ quốc ghi công và công nhận liệt sĩ cho hai 'hiệp sĩ đường phố' Nguyễn Hoàng Nam (SN 1989, quê Đồng Nai), Nguyễn Văn Thôi (SN 1976, quê Bình Định). Ghi nhận thành tích của hai \"hiệp sĩ\" Nguyễn Hoàng Nam và Nguyễn Văn Thôi trong phong trào toàn dân bảo vệ an ninh Tổ quốc, trước đó, UBND TP.HCM",
-      "learned_at": "2026-11-19T10:27:14"
-    },
-    {
-      "stem": "M51208",
-      "ai_guessed": "báo chí - công luận",
-      "human_approved": "báo chí - công luận",
-      "snippet": "[VB1] Doanh nghiệp phải hủy hoá đơn giấy trước ngày 01/11/2020? Thời điểm phải áp dụng hóa đơn điện tử chưa được hiểu thống nhất vì có sự “khác nhau” giữa Luật Quản lý thuế 2019, Nghị định 119/2018/NĐ-CP và Thông tư 68/2019/TT-BTC dẫn đến vướng mắc là có phải hủy hoá đơn giấy trước ngày 01/11/2020 hay không? Từ ngày 01/11/2020, doanh nghiệp, hộ gia đình, cá nhân kinh doanh phải thực hiện đăng ký áp dụng hóa đơn điện tử theo Nghị định 119/2018/NĐ-CP và Thông tư 68/2019/TT-BTC. [VB2] Thầy Nào Trò Nấy Ba tuần lễ trước khi cuộc bầu cử Tổng Thống củ",
-      "learned_at": "2026-11-19T10:27:10"
     }
   ],
   "style_examples": {
     "sinh hoạt hằng ngày": [
       {
-        "stem": "S89743",
+        "stem": "S89601",
         "style": "sinh hoạt hằng ngày",
         "n_docs": 1,
-        "compress": 0.366,
-        "ratio_bt": 0.651,
-        "extract_sample": "❌ RĂNG SỮA SÂU KHÔNG SAO RỒI SẼ THAY❌ ❌Nếu bạn đang nghĩ như vậy thì bạn cũng đang là những người bố, người mẹ vô tâm như tôi 😢❌ * Chưa bao giờ mình thấy 6 tiến.g gây mê mà nó lại dài như 6 năm vậy huhu. * Cũng vì sự chủ quan, nghĩ hiện tượng sún răng ở trẻ con là bình thường, nên mình đã chậm trễ không đưa con đi kiểm tra răng sớm hơn mà khiến răng của con bị nặng, sâu vào đến tủy 😢 * 4 tuổi, phải điều trị tủy 4 răng và hàn sâu 7 chiếc. Chụp thép 8 răng hàm. Mà sau con còn thay rất nhiều răng, nếu khống chế bắt con làm mà ôm hoặc giữ thì sẽ gây sang chấn tâm lý cho trẻ, khiến trong tiền thức trẻ sẽ luôn sợ nha khoa về sau này. Và khi làm nha khoa cũng có rất nhiều vật dụng nhỏ cần sử dụng đ",
-        "abstract_sample": "Người mẹ chia sẻ vì chủ quan nghĩ sún răng ở trẻ là bình thường và răng sữa sâu rồi sẽ thay, nên đã chậm trễ đưa con đi kiểm tra sớm hơn, khiến răng trẻ sâu nặng vào đến tủy. Khi 4 tuổi, trẻ phải điều trị tủy 4 răng, hàn sâu 7 chiếc và chụp thép 8 răng hàm. Theo bác sĩ, nếu khống chế ôm giữ khi làm sẽ gây sang chấn tâm lý, khiến trong tiềm thức trẻ luôn sợ nha khoa về sau, đồng thời khi làm dùng nhiều vật dụng nhỏ nên trẻ không hợp tác sẽ rất nguy hiểm, dễ gây hóc. Do đó, bác sĩ khuyên nếu thuyết phục không được thì nên gây mê, xử lý hết răng hỏng và chụp lại để bảo vệ răng sữa đến khi thay răng vĩnh viễn, tránh việc không còn răng ăn cơm hoặc mất răng lâu gây lệch hàm, lệch khớp cắn.\nBan đầu người mẹ rất lo, nhưng tìm hiểu thấy phương pháp này bên nước ngoài làm rất nhiều nên vẫn chọn gây mê để con đỡ đau nhiều lần. Trước hôm gây mê, trẻ phải kiểm tra tổng thể xem đủ sức khỏe mới được n",
+        "compress": 0.376,
+        "ratio_bt": 0.668,
+        "extract_sample": "kETO - lối ăn lành mạnh. LIST CÁC MÓN ĂN CHỐNG ĐÓI CHỐNG THÈM trong 2 THÁNG ĐẦU TIÊN\n• Trước khi quyết định ăn kiêng theo phương pháp KETO, hãy xác định sẽ theo KETO cả đời. Không phải là về số cân mong muốn thì ko keto nữa.\n• Vào keto cần mất hai tháng làm quen, chế độ này ăn nghiêm ngặt hơn sau hai tháng.\n• Keto KHÔNG có nghĩa là cả đời không được ăn cơm nữa.\n• Về số cân nặng mong muốn rồi thì có chế độ ăn bình thường, vẫn theo nguyên lý keto nhiều rau ít thịt hoặc ăn chay càng tốt, không ăn đường ngọt. Và phải NHAI KỸ khi ăn.\n• Đã định theo Keto thì cần hiểu và Phải TIN đây là phương pháp ăn kiêng tốt nhất.\nNOTE LIỀU LƯỢNG ĂN\n• Tổng lượng thức ăn vào người mỗi ngày nên giới hạn 1,5-1,8kg ",
+        "abstract_sample": "KETO là lối ăn lành mạnh, tốt về dinh dưỡng cho cơ thể khỏe mạnh, phòng chống bệnh tật dựa trên nghiên cứu khoa học. Trước khi ăn kiêng theo KETO, cần hiểu, tin đây là phương pháp tốt nhất và xác định theo cả đời, không phải về số cân mong muốn thì không keto nữa. Cần hai tháng làm quen, chế độ này ăn nghiêm ngặt hơn sau hai tháng. Khi về số cân nặng mong muốn, chế độ ăn bình thường vẫn theo nguyên lý keto nhiều rau ít thịt hoặc ăn chay, không ăn đường ngọt và phải nhai kỹ; keto không có nghĩa là cả đời không được ăn cơm.\nVề liều lượng, tổng lượng thức ăn mỗi ngày nên giới hạn 1,5-1,8kg (không tính nước lọc), ăn ít hơn càng tốt nhưng ít nhất 0,5kg rau, tốt nhất là mùng tơi, bắp cải và rau gia vị (người bị tuyến giáp không nên ăn bắp cải). Bữa ăn cần đơn giản, không đói, không phạm công thức; trước bữa ăn nên nhai kỹ 2 quả dưa chuột baby hoặc dưa chuột to bỏ hạt. Công thức KETO gồm: nhiều",
         "edits_note": "",
-        "learned_at": "2026-11-20T20:24:12"
+        "learned_at": "2026-11-20T23:11:05"
       },
       {
-        "stem": "S89746",
+        "stem": "S89623",
         "style": "sinh hoạt hằng ngày",
         "n_docs": 1,
-        "compress": 0.39,
-        "ratio_bt": 0.683,
-        "extract_sample": "Y TẾ KỸ THUẬT CAO VÀ SỰ LẠM DỤNG\nNền y học ngày nay quá lệ thuộc vào các phương tiện, máy móc kỹ thuật cao. Vì nhà đầu tư bỏ ra số tiền tỉ để mua sắm, họ muốn thu hồi vốn nhanh và có lãi. Do đó, họ thúc hối và khuyến khích nhân viên sử dụng bằng nhiều cách khác nhau, trong có có chi hoa hồng. Có nhiều kiểu như: 1/ Trong khám sức khỏe tổng quát: nhiều kỹ thuật hình ảnh, xét nghiệm chỉ có giá trị tham chiếu (nếu dương tính (+) cũng không chắc chắn có bệnh, âm tính (-) cũng không loại trừ), do độ nhạy và độ tin cậy không cao nhưng lại được xem là chỉ số thần thánh để tầm soát bệnh, đặc biệt là bệnh ung thư. 2/ Trong chẩn đoán bệnh: nhiều khi bác sĩ cho hàng loạt xét nghiệm, chụp chiếu . đặc biệ",
-        "abstract_sample": "Nền y học ngày nay quá lệ thuộc vào phương tiện, máy móc kỹ thuật cao. Vì nhà đầu tư bỏ tiền tỉ mua sắm, muốn thu hồi vốn nhanh, có lãi nên thúc hối, khuyến khích nhân viên sử dụng bằng nhiều cách, trong đó có chi hoa hồng. Tình trạng lạm dụng xảy ra trong khám sức khỏe tổng quát khi nhiều kỹ thuật hình ảnh, xét nghiệm có độ nhạy, độ tin cậy không cao, chỉ mang giá trị tham chiếu lại được xem là chỉ số thần thánh tầm soát bệnh, đặc biệt là ung thư. Trong chẩn đoán, bác sĩ cho hàng loạt xét nghiệm, chụp chiếu đắt tiền nhưng không liên quan triệu chứng bệnh nhân. Trong điều trị, sự lạm dụng thể hiện qua tập vật lý trị liệu kéo dài dù bệnh không trị được bằng phương pháp này, tiêm thuốc đắt tiền khi uống thuốc cũng hết, hoặc mổ xẻ khi chưa đến mức, không cần mổ hay gây hại thêm cho sức khỏe, tính mạng người bệnh. Đó là những lạm dụng liên quan y đức, chưa kể bác sĩ yếu kém chỉ định sai.\nĐể ",
+        "compress": 0.394,
+        "ratio_bt": 0.656,
+        "extract_sample": "Sau cùng mình vẫn quyết định viết để các mẹ không còn hoang mang gì nữa khi mà sử dụng combo bầu Elevit - DHA bio - Canxi Ostelin vì hiện tại có rất nhiều thông tin gây hoang mang về bộ ba bầu này.\nThứ nhất về Elevit: Nhiều bạn nói Elevit nóng gây táo bón, cái này theo mình nghĩ nguyên nhân ko phải do Elevit mà là do cách uống của các bạn chưa đúng! Tóm lại bạn bị táo bón là do dùng chưa đúng cách thôi, còn một số bạn bị buồn nôn chóng mặt là do kiểu say vitamin, nên dùng elevit sau ăn tầm 30p - 1 tiếng là OK! Và nên nhớ tuyệt đối không bổ sung thêm sắt khi đã dùng Elevit nếu không có chỉ định của bác sĩ.\nThứ 2 về canxi Ostelin: Nói thật mình không phải bác sĩ, nhưng mình là người bán thuốc ",
+        "abstract_sample": "Trước nhiều thông tin gây hoang mang về combo bầu Elevit, DHA bio và Canxi Ostelin, người viết chia sẻ để các mẹ bầu an tâm hơn khi sử dụng.\nVề Elevit, trước ý kiến Elevit nóng gây táo bón, người viết cho rằng nguyên nhân không phải do Elevit mà do cách uống chưa đúng. Tình trạng buồn nôn, chóng mặt là do say vitamin, nên dùng Elevit sau ăn tầm 30 phút đến 1 tiếng. Đặc biệt, tuyệt đối không bổ sung thêm sắt khi đã dùng Elevit nếu không có chỉ định của bác sĩ.\nVề Canxi Ostelin, tuy không phải bác sĩ nhưng là người bán thuốc, tác giả giải thích trước lo ngại thuốc gây kết tủa đá vôi. Canxi Ostelin là dạng canxi vô cơ (Canxi Carbonate), khó hấp thụ hơn canxi hữu cơ nhưng là lựa chọn hàng đầu cho bà bầu vì chứa hàm lượng canxi và D3 cao, nên dùng trong bữa ăn để axit dạ dày hòa tan và hấp thụ. Nếu dùng đúng cách, đúng liều lượng, Canxi Ostelin không gây hại; ngược lại, dù là canxi hữu cơ hay",
         "edits_note": "",
-        "learned_at": "2026-11-20T20:19:46"
+        "learned_at": "2026-11-20T23:06:20"
       }
     ],
     "hành chính - công vụ": [
@@ -159,50 +159,50 @@
     ],
     "khoa học": [
       {
-        "stem": "S89698",
+        "stem": "S89539",
         "style": "khoa học",
         "n_docs": 1,
-        "compress": 0.332,
-        "ratio_bt": 0.665,
-        "extract_sample": "TÁC DỤNG CỦA VỎ TRỨNG ĐỐI VỚI SỨC KHOẺ CON NGƯỜI.\nTheo các chuyên gia dinh dưỡng, vỏ trứng là một nguồn can-xi và các chất khoáng tự nhiên rất tuyệt vời cho cơ thể con người. Theo một nghiên cứu năm 2003 trên Tạp chí Nghiên cứu Dược phẩm Lâm sàng Quốc tế, các thực nghiệm đã cho thấy nhiều đặc tính tốt của bột vỏ trứng, như tác dụng chống còi xương ở người, chống loãng xương. Nghiên cứu cũng thấy bột vỏ trứng kích thích sự sản sinh và tăng trưởng sụn. Thử nghiệm lâm sàng trên phụ nữ sau mãn kinh và phụ nữ bị loãng xương cho thấy rằng bột vỏ trứng làm giảm các cơn đau, tăng tính di động và mật độ xương hoặc làm ngừng quá trình mất xương. Nguồn can-xi từ trong vỏ trứng thuộc loại tốt nhất, tươn",
-        "abstract_sample": "Theo các chuyên gia dinh dưỡng, vỏ trứng là nguồn can-xi và chất khoáng tự nhiên. Nghiên cứu năm 2003 trên Tạp chí Nghiên cứu Dược phẩm Lâm sàng Quốc tế cho thấy bột vỏ trứng chống còi xương, loãng xương, kích thích sản sinh và tăng trưởng sụn. Thử nghiệm lâm sàng trên phụ nữ sau mãn kinh và phụ nữ bị loãng xương cho thấy bột vỏ trứng làm giảm các cơn đau, tăng tính di động và mật độ xương hoặc làm ngừng quá trình mất xương. Nguồn can-xi từ vỏ trứng tương đương can-xi carbonate tinh chế, có thể dùng điều trị bệnh. Nghiên cứu của Argentina trên Tạp chí Khoa học Thực phẩm và Dinh dưỡng Quốc tế thấy vỏ một quả trứng gà chứa khoảng hai gam can-xi, gần gấp đôi nhu cầu trung bình hàng ngày của người lớn; đồng thời cung cấp 27 loại khoáng chất khác như sắt, mangan, phốt-pho, kẽm, flo, đồng, molybdenum, chrome và strontium.\nĐể làm bột vỏ trứng, luộc sôi vỏ trứng khoảng 10 phút để loại bỏ mầm bện",
+        "compress": 0.306,
+        "ratio_bt": 0.695,
+        "extract_sample": "10 CÁCH #TRỊ #NGỨA #VÙNG #KÍN ĐƠN GIẢN TẠI NHÀ\nNha đam có tính sát khuẩn cao, dưỡng ẩm tốt, giúp vùng kín sạch sẽ, giảm ngứa và khô rát.\nHàm lượng lớn men vi sinh cùng axit lactic trong sữa chua có khả năng kiểm soát mức độ cân bằng pH âm đạo, kiềm chế quá trình sinh sôi, phát triển của vi khuẩn gây hại.\nMật ong có công dụng làm sạch, tẩy tế bào chết nên không chỉ được chị em sử dụng làm đẹp da mặt mà cũng rất hiệu quả để trị ngứa vùng kín.\nTỏi có đặc tính oxy hóa cực mạnh nên có khả năng kháng khuẩn, chống viêm, đặc trị viêm nhiễm phụ khoa rất hiệu quả đặc biệt là chứng ngứa vùng kín.\nTrong lá ổi có chứa khoảng 3% nhựa và 7-10% là tanin, một chất chống oxy hóa, có hoạt tính ức chế sự lây la",
+        "abstract_sample": "10 cách trị ngứa vùng kín đơn giản tại nhà:\n- Nha đam: Có tính sát khuẩn cao, dưỡng ẩm tốt, giúp vùng kín sạch sẽ, giảm ngứa và khô rát.\n- Sữa chua: Men vi sinh cùng axit lactic giúp kiểm soát mức độ cân bằng pH âm đạo, kiềm chế vi khuẩn gây hại sinh sôi, phát triển.\n- Mật ong: Có công dụng làm sạch, tẩy tế bào chết, trị ngứa vùng kín hiệu quả.\n- Tỏi: Đặc tính oxy hóa cực mạnh giúp kháng khuẩn, chống viêm, đặc trị viêm nhiễm phụ khoa và ngứa vùng kín.\n- Lá ổi: Chứa khoảng 3% nhựa và 7-10% tanin (chất chống oxy hóa), có hoạt tính ức chế vi khuẩn lây lan, sát khuẩn, phòng ngừa và điều trị ngứa vùng kín.\n- Muối: Đặc tính sát khuẩn, giảm ngứa, ngăn ngừa vi khuẩn sinh sôi, phát triển.\n- Ngải cứu: Nấu nước xông hơi giúp điều trị viêm âm đạo, ngứa ngáy và khí hư ra nhiều.\n- Lá trầu không: Ức chế vi khuẩn và nấm, ngăn chặn sự xâm nhập của vi khuẩn, chữa trị ngứa vùng kín.\n- Dầu dừa: Được ví như ",
         "edits_note": "",
-        "learned_at": "2026-11-20T20:27:31"
+        "learned_at": "2026-11-21T01:19:43"
       },
       {
-        "stem": "S89701",
+        "stem": "S89524",
         "style": "khoa học",
         "n_docs": 1,
-        "compress": 0.404,
-        "ratio_bt": 0.671,
-        "extract_sample": "Theo thống kê điều tra thì hầu như 100% chị em đều từng mắc các bệnh phụ khoa.\nBệnh phụ khoa là bệnh thường gặp và phổ biến nhất ở phụ nữ, tuy nhiên, nhiều chị em đã thiếu hiểu biết đúng về bệnh phụ khoa, không giữ gìn vệ sinh cơ thể, nhiều thói quen sinh hoạt không tốt đã dẫn đến bệnh phụ khoa.\n5 điều phụ nữ sợ nhất, đặc biệt là điều 1, hầu như cô gái nào cũng thường mắc phải:\n1. Mặc quần tất\nRác trong máu không thể chuyển hóa kịp, chất liệu quần tất nói chung kém, độ thoáng khí không tốt nên dễ dàng đưa cơ thể vào môi trường kín và ẩm ướt, sẽ làm tăng khả năng bị nấm mốc gây hại cho cơ thể.\n2. Thích sử dụng dung dịch vệ sinh vùng kín\nNếu bạn luôn sử dụng dung dịch để vệ sinh thường xuyên s",
-        "abstract_sample": "Theo thống kê điều tra, hầu như 100% chị em đều từng mắc các bệnh phụ khoa. Đây là bệnh phổ biến nhất ở phụ nữ do thiếu hiểu biết đúng, không giữ gìn vệ sinh cơ thể và nhiều thói quen sinh hoạt không tốt.\nNăm thói quen thường gặp làm tăng nguy cơ mắc bệnh gồm:\n- Mặc quần tất: Quần bó chèn ép mạch máu gây tắc nghẽn; chất liệu kém thoáng khí tạo môi trường kín, ẩm ướt, tăng nguy cơ nấm mốc gây hại.\n- Thích sử dụng dung dịch vệ sinh vùng kín: Dùng thường xuyên phá hủy cân bằng axit-bazơ trong vùng kín, khiến vi khuẩn phát triển mạnh và tăng tỷ lệ mắc bệnh.\n- Ít vận động: Ngồi lâu gây tắc nghẽn tĩnh mạch chậu, ứ trệ máu và làm vùng kín thoát khí kém, tạo điều kiện cho vi khuẩn gây viêm nhiễm.\n- Nhịn tiểu: Bàng quang chứa khoảng 200cc sẽ sinh ý muốn đi tiểu; nếu giữ đến 500cc trở lên sẽ giãn nở quá mức, lâu ngày các chất trong nước tiểu gây tổn thương bàng quang và bệnh phụ khoa.\n- Phá thai: ",
+        "compress": 0.346,
+        "ratio_bt": 0.623,
+        "extract_sample": "Hiện đang là mùa hè oi bức, lại là ngày Tam phục,. những ngày nóng nhất trong hè, chắc nhiều người sẽ cảm thấy khó ngủ được nếu không sử dụng máy điều hòa. Nhưng mọi người cũng biết sử dụng máy điều hóa nhiều dễ tổn hại sức khỏe, tổn hại dương khí, dễ tích lũy hàn thấp, giảm sức miễn dịch cơ thể.\nMáy điều hòa đã làm rối loạn năng lực tự điều tiết của cơ thể\nTrong khi đó máy điều hóa nhiệt độ khiến năng lực điều tiết hàn nhiệt của cơ thể chúng ta không thể phát huy bình thường, nếu vượt quá phạm vi tự uốn nắn của cơ thể chúng ta thì trở thành bệnh tật.\nLàm thế nào phòng ngừa bệnh điều hòa\nKhi bạn mồ hôi ở bên ngoài, nếu phải vào phòng có điều hòa, tốt nhất là lau khô mồ hôi trên người, đặc bi",
+        "abstract_sample": "Trong mùa hè oi bức và ngày Tam phục nóng nhất, dùng máy điều hòa nhiều dễ tổn hại sức khỏe, dương khí, tích lũy hàn thấp và giảm sức miễn dịch cơ thể. Máy điều hòa nhiệt độ làm rối loạn năng lực điều tiết hàn nhiệt; khi vượt quá phạm vi tự uốn nắn của cơ thể sẽ thành bệnh tật.\nĐể phòng ngừa bệnh điều hòa, khi ra mồ hôi ở ngoài vào phòng điều hòa, cần lau khô mồ hôi, đặc biệt gần huyệt Đại Chùy sau lưng để bảo vệ cơ thể. Trong phòng điều hòa, cần điều chỉnh hướng gió hoặc vị trí tránh bị thổi thẳng vào người. Buổi tối có thể tắm nước nóng làm giãn nở lỗ chân lông, giải tỏa hàn khí, thấp khí tích trữ trong da thịt; ngoài ra, ngâm chân ra chút mồ hôi trước khi ngủ cũng giúp bài tiết hàn thấp, giảm khó chịu.\nNgười ham mê điều hòa hay ghét, sợ điều hòa đều có thể bị bệnh. Biểu hiện không sợ lạnh mà sợ nóng ở người không thể rời máy điều hòa có thể là triệu chứng bệnh dương minh mà y thánh Tr",
         "edits_note": "",
-        "learned_at": "2026-11-20T20:27:05"
+        "learned_at": "2026-11-20T23:40:16"
       }
     ],
     "báo chí - công luận": [
       {
-        "stem": "S89733",
+        "stem": "S89592",
         "style": "báo chí - công luận",
         "n_docs": 1,
-        "compress": 0.354,
-        "ratio_bt": 0.645,
-        "extract_sample": "Thời gian gần đây, một loài kiến lạ xuất hiện, sin‌h sôi nảy nở rất nhiều tại một số xã, phường ven biển của TP Móng Cá‌i như Trà Cổ, Bình Ngọc, Vạn Ninh…, gây ảnh hưởng rất nhiều tới cuộc sống sin‌h hoạt của người dân.\nKhi bị loài kiến này đố‌t, không những tay, chân người bị đố‌t sưn‌g tấy, mưng mủ mà nhiều trường hợp bị kiến đố‌t dẫn tới sốt cao, khó thở phải đi cấp cứ‌u tại bện‌h việ‌n.\nLoài kiến này có màu xám đen, to hơn loài kiến nhà thường thấy trước nay.\nKhông chỉ ảnh hưởng tới sin‌h hoạt của các hộ dân, loài kiến này xuất hiện rất nhiều tại khu vực bãi biển và đang gây rất nhiều phiền toái, khó khăn cho các hộ kinh doanh tại bãi biển Trà Cổ.\nRất nhiều khách du lịch đã bị kiến đố‌t ",
-        "abstract_sample": "Thời gian gần đây, tại một số xã, phường ven biển của TP Móng Cái như Trà Cổ, Bình Ngọc, Vạn Ninh…, một loài kiến lạ màu xám đen, to hơn kiến nhà thường thấy, xuất hiện và sinh sôi rất nhiều, gây ảnh hưởng tới sinh hoạt của người dân. Khi bị đốt, tay, chân người bị đốt sưng tấy, mưng mủ, nhiều trường hợp dẫn tới sốt cao, khó thở phải đi cấp cứu tại bệnh viện.\nLoài kiến này cũng xuất hiện rất nhiều tại bãi biển Trà Cổ, gây phiền toái, khó khăn cho các hộ kinh doanh và khiến nhiều khách du lịch bị đốt sưng tấy chân tay.\nTrước tình trạng trên, cử tri phường Bình Ngọc, Trà Cổ đã kiến nghị tới đại biểu HĐND tỉnh tại buổi tiếp xúc cử tri. Theo đó, TP Móng Cái giao các phường phối hợp với Trung tâm Dịch vụ kỹ thuật nông nghiệp thành phố hướng dẫn, khuyến cáo người dân dùng một số loại thuốc diệt kiến, nhưng không mấy hiệu quả.\nHiện nay, nhiều hộ dân, hộ kinh doanh tại bãi biển Trà Cổ vẫn dùng t",
+        "compress": 0.38,
+        "ratio_bt": 0.657,
+        "extract_sample": "Viện Di truyền Y học tổ chức tọa đàm “Xét nghiệm di truyền trong thai kỳ: Cập nhật kiến thức và xu hướng mới”\n(Phụ Nữ Hiện Đại) – Tọa đàm với chủ đề “Xét nghiệm di truyền trong thai kỳ: Cập nhật kiến thức và xu hướng mới” vừa được tổ chức trung tuần tháng 9/2010. Chương trình do Viện Di truyền Y học – Gene Solutions kết hợp cùng Báo điện tử Sức khỏe & Đời sống thực hiện.\nKhẳng định hiệu quả lâm sàng, NIPT trở thành xét nghiệm tầm soát dị tật thai nhi đầu tiên\nTheo thống kê, tại Việt Nam mỗi năm có 41.000 trẻ bị dị tật bẩm sinh, 1.800 trẻ bị mắc hội chứng DOWN. Trung bình, cứ 13 phút sẽ có 1 đứa trẻ chào đời mang dị tật bẩm sinh.\nVà mới đây, Bộ Y tế đã ra quyết định 1807 tiếp tục đưa xét nghi",
+        "abstract_sample": "Theo Phụ Nữ Hiện Đại, trung tuần tháng 9/2010, Viện Di truyền Y học – Gene Solutions kết hợp cùng Báo điện tử Sức khỏe & Đời sống tổ chức tọa đàm “Xét nghiệm di truyền trong thai kỳ: Cập nhật kiến thức và xu hướng mới”.\nTheo thống kê, tại Việt Nam mỗi năm có 41.000 trẻ bị dị tật bẩm sinh, 1.800 trẻ mắc hội chứng DOWN, trung bình cứ 13 phút có 1 đứa trẻ chào đời mang dị tật bẩm sinh. Mới đây, Bộ Y tế ra quyết định 1807 tiếp tục đưa xét nghiệm NIPT vào Hướng dẫn kỹ thuật chuyên môn về sàng lọc trước sinh để sàng lọc dị tật bẩm sinh liên quan đến số lượng nhiễm sắc thể thai nhi. Các chuyên gia nhận định NIPT có thể thay thế các xét nghiệm sàng lọc sinh hóa trước đây (double test, triple test) và nên được thực hiện đầu tiên cho tất cả thai phụ có nhu cầu ngay tuần thứ 9-10 thai kỳ.\nNIPT là xét nghiệm trước sinh không xâm lấn tiên tiến nhất hiện nay, phát hiện DNA nhau thai trong máu mẹ bằng ",
         "edits_note": "",
-        "learned_at": "2026-11-20T20:24:35"
+        "learned_at": "2026-11-20T23:15:00"
       },
       {
-        "stem": "S89756",
+        "stem": "S89583",
         "style": "báo chí - công luận",
         "n_docs": 1,
-        "compress": 0.357,
-        "ratio_bt": 0.658,
-        "extract_sample": "Ánh mắt của hai bé song sinh dính liền giúp bác sĩ vượt qua nỗi lo, quên mệt mỏi\nTrong ca mổ tách cặp song sinh dính liền bụng chậu Trúc Nhi - Diệu Nhi vừa qua, ông là trưởng ê-kíp chỉnh hình xương cho ca mổ.\nNhóm chỉnh hình xương nhi của bác sĩ Tiếp có sáu người.\nTuy nhiên, ca mổ của Trúc Nhi - Diệu Nhi là trường hợp tách khung chậu cho cặp song sinh dính liền đầu tiên của cả nhóm.\n“Nếu tách xương xong mà không ghép lại được sẽ dẫn đến mất da, phải đắp da nhân tạo cho hai bé. Chưa kể, nếu khung chậu không khép được mà cứ dạng 180 độ thì da không ghép được, các cơ quan không được nâng đỡ sẽ tràn xuống tầng sinh môn.\nNgoài phẫu thuật tách dính, chúng tôi còn phải tính đến việc làm sao sau khi",
-        "abstract_sample": "Trong ca mổ tách cặp song sinh dính liền bụng chậu Trúc Nhi - Diệu Nhi, bác sĩ Phan Văn Tiếp là trưởng ê-kíp chỉnh hình xương gồm sáu người. Đây là ca tách khung chậu cho cặp song sinh dính liền đầu tiên của nhóm. Bác sĩ Tiếp chia sẻ, nếu tách xương xong không ghép lại được sẽ mất da, phải đắp da nhân tạo; nếu khung chậu không khép được mà dạng 180 độ thì các cơ quan sẽ tràn xuống tầng sinh môn; đồng thời phải tính việc sau hồi phục hai bé có thể đứng, đi, chạy, nhảy. Mọi lo lắng vơi đi khi thăm khám cho hai bé.\nChuẩn bị cho ca mổ, bác sĩ Tiếp liên tục họp bàn, hội chẩn 5-6 lần trong nhiều tháng liền, đưa ra phương án dự phòng và tự chế dụng cụ mổ khung xương chuyên biệt.\nNgày 15/7, hai bé Trúc Nhi - Diệu Nhi được mổ tách sau 13 tháng sống trong hình hài song sinh dính liền. Bác sĩ Tiếp cho biết, quá trình chỉnh hình khung chậu kéo dài khoảng 1 tiếng 30 phút, khó khăn vì phần sụn rất cứn",
+        "compress": 0.389,
+        "ratio_bt": 0.669,
+        "extract_sample": "Đây là trường hợp hy hữu bởi mẹ cháu bé đã đặt vòng tránh thai nhưng vẫn mang thai, khi cháu chào đời trong bánh nhau kèm theo chiếc vòng tránh thai.\nCác bác sĩ cũng khuyến cáo, các mẹ khi muốn tránh thai nên tìm tới các cơ sở y tế để được bác sĩ chuyên khoa đặt vòng chính xác, tránh những tác dụng không mong muốn. Mẹ Đồng Nai bị thủng bàng quang sau 31 năm đặt vòng tránh thai Theo thông tin trên Pháp luật TP.HCM, ngày 21/1/2019, bệnh viện đa khoa khu vực Long Khánh (Đồng Nai) đã tiếp nhận trường hợp bệnh nhân T.T.H (sinh năm 1965) nhập viện trong tình trạng bị đau bụng vùng hạ vị kèm tiểu khó. Tiến hành thăm khám, kết hợp với kết quả siêu âm, các bác sĩ phát hiện bệnh nhân có dị vật hình ch",
+        "abstract_sample": "Sáng 30/6, chị T.T.P.L (34 tuổi, trú tại quận Dương Kinh, Hải Phòng) sinh bé trai nặng 3,3 kg dù đã đặt vòng tránh thai 2 năm trước; khi chào đời, trong bánh nhau có chiếc vòng tránh thai. Trước đó, năm 2017, bức ảnh em bé mới sinh tay nắm chiếc vòng tránh thai của mẹ cũng gây sốt mạng xã hội tại Việt Nam và thế giới.\nTheo Pháp luật TP.HCM, ngày 21/1/2019, Bệnh viện đa khoa khu vực Long Khánh (Đồng Nai) tiếp nhận bệnh nhân T.T.H (sinh năm 1965) đau bụng vùng hạ vị, tiểu khó. Kết quả thăm khám, siêu âm phát hiện dị vật hình chữ T là vòng tránh thai đặt 31 năm trước xuyên qua thành bàng quang và có sỏi bàng quang; bệnh nhân được mổ nội soi lấy dị vật và sỏi. Năm 2012, bà Lan (78 tuổi, ở Bắc Giang) đến viện khám vì đau quanh rốn, không đi tiêu tiểu được; bác sĩ phát hiện vòng tránh thai chui vào ổ bụng gây hoại tử một đoạn ruột nên mổ lấy dị vật, cắt đoạn ruột hoại tử. Tương tự, một phụ nữ ",
         "edits_note": "",
-        "learned_at": "2026-11-20T20:18:59"
+        "learned_at": "2026-11-20T23:14:25"
       }
     ],
     "chính luận": []

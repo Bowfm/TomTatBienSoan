@@ -138,16 +138,19 @@ export function renderRpdStatus(rpdList) {
   for (const item of rpdList) {
     const model = item.model || "";
     const used = Number(item.used ?? 0);
+    const okUsed = Number(item.ok_used ?? 0);
+    const trUsed = Number(item.transient_used ?? 0);
     const limit = Number(item.limit ?? 0);
     const perKey = Number(item.rpd_per_key ?? limit);
     const keyCount = Number(item.key_count ?? 1);
     const exhKeys = Number(item.exhausted_keys ?? 0);
-    const text = `${model}: ${used}/${limit}`;
+    const availKeys = item.available_keys != null ? Number(item.available_keys) : Math.max(0, keyCount - exhKeys);
+    const text = exhKeys > 0 ? `${model}: ${used}/${limit} (hết ${exhKeys} key)` : `${model}: ${used}/${limit}`;
 
     let stateCls = "rpd-ok";
     if ((limit > 0 && used >= limit) || (keyCount > 0 && exhKeys >= keyCount)) {
       stateCls = "rpd-exhausted";
-    } else if (limit > 0 && used / limit >= 0.8) {
+    } else if ((limit > 0 && used / limit >= 0.8) || exhKeys > 0) {
       stateCls = "rpd-warn";
     } else if (used > 0) {
       stateCls = "rpd-active";
@@ -156,8 +159,10 @@ export function renderRpdStatus(rpdList) {
     const span = document.createElement("span");
     span.className = `rpd-pill ${stateCls}`;
     span.dataset.model = model;
+    span.setAttribute("role", "button");
+    span.setAttribute("tabindex", "0");
     span.textContent = text;
-    span.title = `${model}: Đã sử dụng ${used}/${limit} requests trong ngày (${perKey} RPD/key × ${keyCount} key${exhKeys ? ` · ${exhKeys} key đã chạm hạn mức` : ""} · Reset lúc 15:00 giờ VN)`;
+    span.title = `${model}: Đã gửi ${used}/${limit} requests (Thành công: ${okUsed} · Lỗi 503/Timeout/Hủy: ${trUsed} · Còn ${availKeys}/${keyCount} key · ${perKey} RPD/key · Bấm để xem chi tiết từng key)`;
     container.appendChild(span);
   }
 }

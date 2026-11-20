@@ -729,6 +729,7 @@ class FileService:
                         "status": d.get("status", ""),
                         "action": d.get("action", ""),
                         "phase": d.get("phase", ""),
+                        "background": bool(d.get("background", False)),
                         "wait_s": d.get("wait_s", 0),
                         "duration_s": dur,
                         "usage": d.get("usage") or {},

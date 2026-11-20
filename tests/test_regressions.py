@@ -4466,6 +4466,871 @@ def test_bug_034_rebuild_extract_button_removed_cleanly(tmp_path, monkeypatch):
     assert d_asm["selections"]["1"] == [1, 2]
 
 
+# ---------------------------------------------------------------------------
+# BUG-035: Theo dõi trạng thái còn/hết RPD từng model theo từng key & fix lệch khóa cục bộ
+# ---------------------------------------------------------------------------
+
+def test_bug_035_local_rpd_counter_never_exhausts_key_before_google_429_and_persists_per_key_counts(tmp_path, monkeypatch):
+    """BUG-035: Bộ đếm cục bộ (kể cả khi gặp nhiều 503) tuyệt đối không tự khóa (key, model) vào _exhausted
+    trước khi Google thực sự trả 429; lỗi ConnectError/400/402 không tính RPD; và số liệu từng key bền vững qua restart."""
+    from tomtat.llm.base import _error_consumes_rpd, get_key_rpd_details
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    monkeypatch.setattr("tomtat.llm.gemini._COOLDOWN_S", 0.0)
+    monkeypatch.setattr("tomtat.llm.base.get_model_rpm_per_key", lambda m, c=None: 10_000)
+    monkeypatch.setattr("tomtat.llm.gemini.get_model_rpm_per_key", lambda m, c=None: 10_000)
+
+    assert _error_consumes_rpd("APIConnectionError: Connection error.") is False
+    assert _error_consumes_rpd("BadRequestError: invalid argument", 400) is False
+    assert _error_consumes_rpd("PaymentRequiredError", 402) is False
+    assert _error_consumes_rpd("InternalServerError: 503 high demand", 503) is True
+
+    keys = ["AIzaTestKey_Alpha_0001"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["rpd_limits"] = {m: 3 for m in [cfg["gemini"]["model"]] + list(cfg["gemini"].get("fallback_models") or [])}
+    cfg["gemini"]["min_interval_s"] = 0.0
+    cfg["gemini"]["rpm_limits"] = {}
+    cfg["gemini"]["backoff_base_s"] = 0.0
+    cfg["gemini"]["backoff_max_s"] = 0.0
+    cfg["gemini"]["max_rounds_per_model"] = 10
+    cfg["gemini"]["max_transient_per_model"] = 0
+
+    client = GeminiClient(cfg, keys)
+    outcomes = ["503", "503", "503", "conn", "ok"]
+
+    class FakeErr(Exception):
+        def __init__(self, code, msg):
+            super().__init__(msg)
+            self.status_code = code
+
+    def fake_call_once(model_name, step, system, prompt, schema, client=None):
+        act = outcomes.pop(0) if outcomes else "ok"
+        if act == "503":
+            raise FakeErr(503, "high demand service_unavailable")
+        if act == "conn":
+            raise ConnectionError("broken pipe")
+        return '{"ok": true}', {}, "completed"
+
+    monkeypatch.setattr(client, "_get_or_create_client", lambda k: object())
+    monkeypatch.setattr(client, "_call_once", fake_call_once)
+
+    log_dir = tmp_path / "work" / "S01" / "logs"
+    res = client.generate_json(step="label", system="sys", prompt="p", schema={}, log_dir=log_dir, attempt=1)
+    assert res.model == "gemini-4-hydrogen"
+    # Đã vượt mốc cấu hình 3 requests (3 lỗi 503 + 1 OK = 4 RPD ước tính), nhưng Google chưa hề trả 429 -> không bị khóa!
+    assert (keys[0], "gemini-4-hydrogen") not in client._exhausted
+    assert client._key_rpd_counts[(keys[0], "gemini-4-hydrogen")] == 4
+    assert client._key_ok_counts[(keys[0], "gemini-4-hydrogen")] == 1
+    assert client._key_transient_counts[(keys[0], "gemini-4-hydrogen")] == 3
+
+    # Khởi tạo client mới (giả lập khởi động lại server): giữ nguyên số liệu từng key và vẫn gọi tiếp được key này
+    client2 = GeminiClient(cfg, keys)
+    assert (keys[0], "gemini-4-hydrogen") not in client2._exhausted
+    assert client2._key_rpd_counts[(keys[0], "gemini-4-hydrogen")] == 4
+    assert client2._key_ok_counts[(keys[0], "gemini-4-hydrogen")] == 1
+
+    details = get_key_rpd_details(cfg, api_keys=keys, live_client=client2)
+    cell = details["keys"][0]["models"]["gemini-4-hydrogen"]
+    assert cell["exhausted"] is False
+    assert cell["ok_used"] == 1
+    assert cell["err_503_used"] == 3
+    assert cell["used"] == 4
+
+
+def test_bug_035_explicit_rpm_429_uses_full_window_cooldown_and_records_exhaust_reason(tmp_path, monkeypatch):
+    """BUG-035: Lỗi 429 RPM/TPM phải hạ nhiệt >= 65s (qua trọn cửa sổ 60s) và ghi rõ lý do khóa trong exhausted_meta."""
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    monkeypatch.setattr("tomtat.llm.gemini._COOLDOWN_S", 30.0)
+    monkeypatch.setattr("tomtat.llm.base.get_model_rpm_per_key", lambda m, c=None: 10_000)
+    monkeypatch.setattr("tomtat.llm.gemini.get_model_rpm_per_key", lambda m, c=None: 10_000)
+
+    keys = ["AIzaTestKey_RPM_0001", "AIzaTestKey_RPM_0002"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["min_interval_s"] = 0.0
+    cfg["gemini"]["rpm_limits"] = {}
+    cfg["gemini"]["backoff_base_s"] = 0.0
+    cfg["gemini"]["backoff_max_s"] = 0.0
+
+    client = GeminiClient(cfg, keys)
+    client_map = {}
+
+    class Err429(Exception):
+        status_code = 429
+
+    def fake_get(k):
+        return client_map.setdefault(k, object())
+
+    mode = {"k1": "rpm"}
+
+    def fake_call_once(model_name, step, system, prompt, schema, client=None):
+        k = next(key for key, obj in client_map.items() if obj is client)
+        if k == keys[0] and mode["k1"] == "rpm":
+            raise Err429("Quota exceeded for quota metric 'GenerateContentInputTokensPerModelPerMinute' (TPM)")
+        if k == keys[0] and mode["k1"] == "daily":
+            raise Err429("Rate limit exceeded for model (limit: 20 requests per day on Free Tier).")
+        return '{"ok": true}', {}, "completed"
+
+    monkeypatch.setattr(client, "_get_or_create_client", fake_get)
+    monkeypatch.setattr(client, "_call_once", fake_call_once)
+
+    import time as _t
+    t_before = _t.time()
+    client.generate_json(step="label", system="sys", prompt="p1", schema={})
+    cd_until = client._key_cooldown.get(keys[0], 0.0)
+    assert cd_until - t_before >= 60.0  # đủ qua cửa sổ 60s của Google RPM/TPM
+
+    # Khi 1 cặp (key, model) gặp 429 daily đủ 3 lần -> ghi rõ lý do trong _exhausted_meta và giữ qua restart
+    monkeypatch.setattr("tomtat.llm.gemini._COOLDOWN_S", 0.0)
+    client._key_cooldown.clear()
+    mode["k1"] = "daily"
+    for _ in range(2):
+        client._model_cursor["gemini-4-hydrogen"] = 0
+        client.generate_json(step="label", system="sys", prompt="p2", schema={})
+    assert (keys[0], "gemini-4-hydrogen") in client._exhausted
+    meta = client._exhausted_meta.get((keys[0], "gemini-4-hydrogen"))
+    assert meta and meta["reason"] == "429_daily"
+    assert "requests per day" in meta["error"].lower()
+
+    client_reloaded = GeminiClient(cfg, keys)
+    assert client_reloaded._exhausted_meta[(keys[0], "gemini-4-hydrogen")]["reason"] == "429_daily"
+
+
+def test_bug_035_per_key_rpd_details_api_unlock_and_probe(tmp_path, monkeypatch):
+    """BUG-035: API /api/rpd/keys, /api/rpd/probe và /api/rpd/unlock hiển thị chi tiết từng key/model (không lộ key thật),
+    đồng bộ cả RAM (_CACHED_CLIENT) lẫn quota_exhausted.json và tự mở khóa khi probe xác nhận Google còn RPD."""
+    from types import SimpleNamespace
+    import tomtat.services.batch_service as bs
+    from tomtat.web import create_app
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys = ["AIzaSySecretKeyOne_AAAA", "AIzaSySecretKeyTwo_BBBB"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+
+    old_cached = bs._CACHED_CLIENT
+    old_keys = list(bs._CACHED_KEYS)
+    try:
+        bs._CACHED_CLIENT = None
+        bs._CACHED_KEYS = []
+
+        live = bs.make_client(cfg, force_mock=False)
+        live._mark_exhausted(keys[0], "gemini-4-hydrogen", reason="429_daily", error="429 per day")
+        live._record_request(keys[1], "gemini-4-hydrogen")
+
+        app = create_app(cfg, mock=False)
+        tc = app.test_client()
+
+        r_keys = tc.get("/api/rpd/keys")
+        assert r_keys.status_code == 200
+        raw_json = r_keys.get_data(as_text=True)
+        # Tuyệt đối không lộ API key thô ra API web
+        for secret in keys:
+            assert secret not in raw_json
+
+        d = r_keys.get_json()
+        assert d["key_count"] == 2
+        row0, row1 = d["keys"]
+        assert row0["key_label"] == "Key #1 (...AAAA)"
+        assert row0["models"]["gemini-4-hydrogen"]["exhausted"] is True
+        assert row0["models"]["gemini-4-hydrogen"]["reason_code"] == "429_daily"
+        assert row1["models"]["gemini-4-hydrogen"]["exhausted"] is False
+        assert row1["models"]["gemini-4-hydrogen"]["ok_used"] == 1
+
+        # 1. Probe gặp 429 thật -> giữ nguyên trạng thái khóa và trả lỗi nguyên văn
+        class Err429(Exception):
+            status_code = 429
+
+        probe_mode = {"mode": "429"}
+
+        class FakeInteractions:
+            def create(self, **kwargs):
+                if probe_mode["mode"] == "429":
+                    raise Err429("Rate limit exceeded (limit: 20 requests per day)")
+                return SimpleNamespace(output_text="OK", status="completed")
+
+        monkeypatch.setattr(live, "_get_or_create_client", lambda k: SimpleNamespace(interactions=FakeInteractions()))
+        r_p1 = tc.post("/api/rpd/probe", json={"key_id": row0["key_id"], "model": "gemini-4-hydrogen"})
+        assert r_p1.status_code == 200
+        p1 = r_p1.get_json()
+        assert p1["outcome"] == "exhausted_rpd"
+        assert p1["unlocked"] is False
+        assert (keys[0], "gemini-4-hydrogen") in live._exhausted
+
+        # 2. Probe trả 200 OK -> xác nhận thực tế vẫn còn RPD, tự mở khóa cả RAM và đĩa
+        probe_mode["mode"] = "ok"
+        r_p2 = tc.post("/api/rpd/probe", json={"key_id": row0["key_id"], "model": "gemini-4-hydrogen"})
+        assert r_p2.status_code == 200
+        p2 = r_p2.get_json()
+        assert p2["outcome"] == "available"
+        assert p2["unlocked"] is True
+        assert (keys[0], "gemini-4-hydrogen") not in live._exhausted
+        assert p2["details"]["keys"][0]["models"]["gemini-4-hydrogen"]["ok_used"] == 1
+
+        # 3. Đánh dấu khóa lại rồi mở khóa qua /api/rpd/unlock
+        live._mark_exhausted(keys[0], "gemini-3.8-flash", reason="429_rpm_3x", error="429 rpm")
+        assert (keys[0], "gemini-3.8-flash") in live._exhausted
+        r_unl = tc.post("/api/rpd/unlock", json={"key_id": row0["key_id"], "model": "gemini-3.8-flash"})
+        assert r_unl.status_code == 200
+        assert (keys[0], "gemini-3.8-flash") not in live._exhausted
+
+        # 4. Trong chế độ --mock: /api/rpd/probe từ chối rõ ràng
+        app_mock = create_app(cfg, mock=True)
+        r_mock_p = app_mock.test_client().post("/api/rpd/probe", json={"key_id": row0["key_id"], "model": "gemini-4-hydrogen"})
+        assert r_mock_p.status_code == 400
+    finally:
+        bs._CACHED_CLIENT = old_cached
+        bs._CACHED_KEYS = old_keys
+
+
+def test_bug_035_frontend_rpd_modal_and_cli_contract(tmp_path, monkeypatch, capsys):
+    """BUG-035: Hợp đồng UI modal chi tiết RPD theo từng key/model và lệnh CLI `tomtat rpd`."""
+    from tomtat import cli
+
+    html = (PROJECT_ROOT / "src" / "tomtat" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    assert 'id="btn-rpd-details"' in html
+    assert 'id="rpd-models-list"' in html
+
+    static_dir = PROJECT_ROOT / "src" / "tomtat" / "web" / "static"
+    modals_js = (static_dir / "modules" / "modals.js").read_text(encoding="utf-8")
+    assert "export async function openRpdModal" in modals_js
+    assert "/api/rpd/keys" in modals_js
+    assert "/api/rpd/unlock" in modals_js
+    assert "/api/rpd/probe" in modals_js
+
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    assert "openRpdModal" in app_js
+    assert "btn-rpd-details" in app_js
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys = ["AIzaCliTestKey_1111"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    monkeypatch.setattr("tomtat.config.load_config", lambda *a, **kw: cfg)
+
+    rc = cli.main(["rpd"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Key #1 (...1111)" in out
+    assert "gemini-4-hydrogen" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUG-036: Lỗi 504 deadline_exceeded ở mốc 600s, thiếu background execution,
+#          thiếu thinking_level và circuit breaker timeout dùng chung giữa các luồng
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_bug_036_config_thinking_level_and_deadline_helpers(monkeypatch, tmp_path):
+    import yaml
+    from pathlib import Path
+    from tomtat.llm.base import _is_server_deadline_exceeded, _is_timeout_error
+    from tomtat.llm.gemini import GeminiClient
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    cfg_path = Path(__file__).resolve().parents[1] / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    g = cfg["gemini"]
+
+    assert g["background_execution"] == "auto"
+    assert int(g["background_min_timeout_s"]) == 540
+    assert float(g["background_poll_interval_s"]) > 0
+    assert int(g["model_timeout_outage_threshold"]) == 2
+    assert float(g["model_timeout_outage_cooldown_s"]) >= 60
+    assert g["thinking_level"] == {
+        "label": "medium",
+        "extract": "medium",
+        "abstract": "medium",
+        "judge": "low",
+    }
+    assert g["thinking_level_by_model"] == {
+        "gemini-3.5-flash-lite": {"abstract": "low"},
+        "gemini-3.1-flash-lite": {"abstract": "low"},
+    }
+
+    exc_504 = RuntimeError(
+        "InternalServerError: Error code: 504 - {'error': {'message': "
+        "'Deadline expired before operation could complete.', 'code': 'deadline_exceeded'}}"
+    )
+    assert _is_timeout_error(exc_504) is True
+    assert _is_server_deadline_exceeded(exc_504) is True
+    assert _is_server_deadline_exceeded(RuntimeError("x"), status_code=504) is True
+    exc_read = TimeoutError("read timed out")
+    assert _is_timeout_error(exc_read) is True
+    assert _is_server_deadline_exceeded(exc_read) is False
+
+    client = GeminiClient(cfg, ["AIzaFakeKeyForTest036"])
+    # Chất lượng đồng đều: cả 4-hydrogen, 3.8-flash và 3.6-flash đều dùng medium ở label/extract/abstract
+    for model_name in ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash"):
+        assert client._gen_config("label", model_name)["thinking_level"] == "medium"
+        assert client._gen_config("extract", model_name)["thinking_level"] == "medium"
+        assert client._gen_config("abstract", model_name)["thinking_level"] == "medium"
+        assert client._gen_config("judge", model_name)["thinking_level"] == "low"
+    # Flash-Lite nâng riêng abstract lên low khi fallback sâu, còn judge/label/extract vẫn giữ minimal gốc nếu không override
+    assert client._gen_config("abstract", "gemini-3.5-flash-lite")["thinking_level"] == "low"
+    assert client._gen_config("abstract", "gemini-3.1-flash-lite")["thinking_level"] == "low"
+    assert "thinking_level" not in client._gen_config("judge", "gemini-3.5-flash-lite")
+    assert "thinking_level" not in client._gen_config("extract", "gemini-3.1-flash-lite")
+    cfg["gemini"]["thinking_level_by_model"]["gemini-3.5-flash-lite"]["judge"] = "low"
+    assert client._gen_config("judge", "gemini-3.5-flash-lite")["thinking_level"] == "low"
+
+
+def test_bug_036_background_execution_polling_cancel_and_sync_fallback(monkeypatch, tmp_path):
+    import threading
+    import yaml
+    from pathlib import Path
+    from types import SimpleNamespace
+    from tomtat.config import load_config
+    from tomtat.llm.base import LLMCancelledError, bind_cancel_event
+    from tomtat.llm.gemini import GeminiClient
+    from tomtat.services.file_service import FileService
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    cfg_app = load_config()
+    cfg_app["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg_app.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8"))
+    cfg["paths"] = dict(cfg_app["paths"])
+    cfg["gemini"]["models_chain"] = ["gemini-4-hydrogen"]
+    cfg["gemini"]["min_interval_s"] = 0.0
+    cfg["gemini"]["rpm_limits"] = {}
+    cfg["gemini"]["backoff_min_s"] = 0.0
+    cfg["gemini"]["backoff_max_s"] = 0.0
+    cfg["gemini"]["retry_delay_base_s"] = 0.0
+    cfg["gemini"]["background_poll_interval_s"] = 0.01
+
+    client = GeminiClient(cfg, ["AIzaFakeKeyForTest036B"])
+
+    # Mock tối giản chỉ có create() -> không bật background để giữ tương thích test cũ
+    mock_sync_only = SimpleNamespace(interactions=SimpleNamespace(create=lambda **kw: None))
+    assert client._should_use_background(600.0, mock_sync_only) is False
+    assert client._should_use_background(None, mock_sync_only) is False
+
+    # Scenario 1: background=True + store=True + poll + transient GET retry + delete cleanup + FileService/UI log
+    calls = []
+    deleted = []
+    get_attempt = {"n": 0}
+
+    class FakeInteractionsPolling:
+        def create(self, **kw):
+            calls.append(dict(kw))
+            return SimpleNamespace(id="inter-036-1", status="in_progress", output_text="")
+
+        def get(self, *, id, timeout=None):
+            get_attempt["n"] += 1
+            if get_attempt["n"] == 1:
+                return SimpleNamespace(id=id, status="in_progress", output_text="")
+            if get_attempt["n"] == 2:
+                raise ConnectionResetError("Connection reset by peer")
+            return SimpleNamespace(
+                id=id,
+                status="completed",
+                output_text='{"ok": true, "mode": "bg"}',
+                usage=SimpleNamespace(total_input_tokens=10, total_output_tokens=5, total_thought_tokens=2),
+            )
+
+        def delete(self, *, id, timeout=None):
+            deleted.append(id)
+
+        def cancel(self, *, id, timeout=None):
+            pass
+
+    fake_sdk = SimpleNamespace(interactions=FakeInteractionsPolling())
+    monkeypatch.setattr(client, "_get_or_create_client", lambda key: fake_sdk)
+    fs = FileService(cfg_app)
+    ws = fs.get_workspace("doc1")
+    res = client.generate_json(
+        step="abstract",
+        system="sys",
+        prompt="prompt",
+        schema={"type": "object", "properties": {"ok": {"type": "boolean"}, "mode": {"type": "string"}}},
+        log_dir=ws.logs_dir,
+    )
+    assert res.data == {"ok": True, "mode": "bg"}
+    assert calls[0].get("background") is True
+    assert calls[0].get("store") is True
+    assert "inter-036-1" in deleted
+
+    ui_logs = fs.get_file_logs("doc1")["logs"]
+    assert ui_logs and any(lg.get("background") is True and lg.get("status") == "completed" for lg in ui_logs)
+    modals_js = (Path(__file__).resolve().parents[1] / "src/tomtat/web/static/modules/modals.js").read_text(encoding="utf-8")
+    assert "lg.background" in modals_js
+
+    # Scenario 2: 400 unsupported background -> tự động fallback về sync store=False
+    sync_fallback_calls = []
+
+    class BadReq400(Exception):
+        status_code = 400
+
+    class FakeInteractionsUnsupported:
+        def create(self, **kw):
+            sync_fallback_calls.append(dict(kw))
+            if kw.get("background"):
+                raise BadReq400("400 INVALID_ARGUMENT: background parameter is not supported for this request")
+            return SimpleNamespace(
+                output_text='{"ok": true, "mode": "sync_fallback"}',
+                usage=SimpleNamespace(total_input_tokens=5, total_output_tokens=3),
+            )
+
+        def get(self, *, id, timeout=None):
+            raise AssertionError("should not poll")
+
+        def delete(self, *, id, timeout=None):
+            pass
+
+        def cancel(self, *, id, timeout=None):
+            pass
+
+    monkeypatch.setattr(client, "_get_or_create_client", lambda key: SimpleNamespace(interactions=FakeInteractionsUnsupported()))
+    res2 = client.generate_json(step="abstract", system="sys", prompt="prompt", schema={"type": "object"})
+    assert res2.data == {"ok": True, "mode": "sync_fallback"}
+    assert sync_fallback_calls[0].get("background") is True
+    assert sync_fallback_calls[1].get("background") in (None, False)
+    assert sync_fallback_calls[1].get("store") is False
+
+    # Scenario 3: Hủy giữa lúc đang poll -> gọi interactions.cancel và ném LLMCancelledError
+    cancelled_ids = []
+    cancel_done = threading.Event()
+    ev = threading.Event()
+
+    class FakeInteractionsCancel:
+        def create(self, **kw):
+            return SimpleNamespace(id="inter-036-cancel", status="in_progress", output_text="")
+
+        def get(self, *, id, timeout=None):
+            ev.set()
+            return SimpleNamespace(id=id, status="in_progress", output_text="")
+
+        def cancel(self, *, id, timeout=None):
+            cancelled_ids.append(id)
+            cancel_done.set()
+
+        def delete(self, *, id, timeout=None):
+            pass
+
+    monkeypatch.setattr(client, "_get_or_create_client", lambda key: SimpleNamespace(interactions=FakeInteractionsCancel()))
+    try:
+        with bind_cancel_event(ev):
+            client.generate_json(
+                step="abstract",
+                system="sys",
+                prompt="prompt",
+                schema={"type": "object"},
+            )
+        assert False, "Expected LLMCancelledError"
+    except LLMCancelledError:
+        pass
+    assert cancel_done.wait(timeout=2.0)
+    assert "inter-036-cancel" in cancelled_ids
+
+
+def test_bug_036_504_deadline_exceeded_fast_fallback_and_shared_outage_cooldown(monkeypatch, tmp_path):
+    import yaml
+    from pathlib import Path
+    from types import SimpleNamespace
+    from tomtat.llm.gemini import GeminiClient
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8"))
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["models_chain"] = ["gemini-4-hydrogen", "gemini-3.8-flash"]
+    cfg["gemini"]["timeout_s_by_model"] = {"gemini-4-hydrogen": 600, "gemini-3.8-flash": 420}
+    cfg["gemini"]["min_interval_s"] = 0.0
+    cfg["gemini"]["rpm_limits"] = {}
+    cfg["gemini"]["backoff_min_s"] = 0.01
+    cfg["gemini"]["backoff_max_s"] = 1.0  # > 0.5 để bật outage tracking dùng chung
+    cfg["gemini"]["retry_delay_base_s"] = 0.0
+    cfg["gemini"]["background_poll_interval_s"] = 0.01
+    cfg["gemini"]["model_timeout_outage_threshold"] = 2
+    cfg["gemini"]["model_timeout_outage_cooldown_s"] = 180
+
+    client = GeminiClient(cfg, ["AIzaFakeKeyA", "AIzaFakeKeyB"])
+
+    model_calls = []
+
+    class FakeInteractions504ThenOk:
+        def create(self, **kw):
+            model = kw["model"]
+            model_calls.append(model)
+            if model == "gemini-4-hydrogen":
+                return SimpleNamespace(id="inter-504", status="in_progress", output_text="")
+            return SimpleNamespace(
+                id="inter-ok",
+                status="completed",
+                output_text='{"summary": "ok"}',
+                usage=SimpleNamespace(total_input_tokens=10, total_output_tokens=5),
+            )
+
+        def get(self, *, id, timeout=None):
+            return SimpleNamespace(
+                id=id,
+                status="failed",
+                errors=[{"code": "deadline_exceeded", "message": "Deadline expired before operation could complete."}],
+            )
+
+        def delete(self, *, id, timeout=None):
+            pass
+
+        def cancel(self, *, id, timeout=None):
+            pass
+
+    monkeypatch.setattr(client, "_get_or_create_client", lambda key: SimpleNamespace(interactions=FakeInteractions504ThenOk()))
+
+    # Lần gọi #1: background 504 trên gemini-4-hydrogen -> fallback NGAY sang gemini-3.8-flash (không retry 600-810s nữa)
+    out1 = client.generate_json(step="abstract", system="sys", prompt="p1", schema={"type": "object"})
+    assert out1.data == {"summary": "ok"}
+    assert out1.model == "gemini-3.8-flash"
+    assert model_calls.count("gemini-4-hydrogen") == 1
+    assert "gemini-3.8-flash" in model_calls
+
+    # Lần gọi #2: tiếp tục 504 trên gemini-4-hydrogen -> đủ threshold=2 -> kích hoạt outage cooldown dùng chung
+    model_calls.clear()
+    out2 = client.generate_json(step="abstract", system="sys", prompt="p2", schema={"type": "object"})
+    assert out2.data == {"summary": "ok"}
+    assert model_calls.count("gemini-4-hydrogen") == 1
+    assert client._model_outage_until.get("gemini-4-hydrogen", 0.0) > 0.0
+
+    # Lần gọi #3 (ví dụ lần tạo nháp 2 hoặc luồng khác): bỏ qua luôn gemini-4-hydrogen trong thời gian cooldown
+    model_calls.clear()
+    out3 = client.generate_json(step="abstract", system="sys", prompt="p3", schema={"type": "object"})
+    assert out3.data == {"summary": "ok"}
+    assert "gemini-4-hydrogen" not in model_calls
+    assert model_calls == ["gemini-3.8-flash"]
+
+    # Scenario phụ: chế độ sync-only (không bật background) gặp 504 trực tiếp ở model 600s cũng fallback ngay
+    client._model_outage_until.clear()
+    client._model_timeout_streak.clear()
+    model_calls.clear()
+
+    class Err504(Exception):
+        status_code = 504
+
+    class FakeSync504ThenOk:
+        def create(self, **kw):
+            model = kw["model"]
+            model_calls.append(model)
+            if model == "gemini-4-hydrogen":
+                raise Err504(
+                    "InternalServerError: Error code: 504 - {'error': {'message': "
+                    "'Deadline expired before operation could complete.', 'code': 'deadline_exceeded'}}"
+                )
+            return SimpleNamespace(
+                output_text='{"summary": "sync_ok"}',
+                usage=SimpleNamespace(total_input_tokens=8, total_output_tokens=4),
+            )
+
+    monkeypatch.setattr(client, "_get_or_create_client", lambda key: SimpleNamespace(interactions=FakeSync504ThenOk()))
+    out4 = client.generate_json(step="abstract", system="sys", prompt="p4", schema={"type": "object"})
+    assert out4.data == {"summary": "sync_ok"}
+    assert out4.model == "gemini-3.8-flash"
+    assert model_calls.count("gemini-4-hydrogen") == 1
+    assert "gemini-3.8-flash" in model_calls
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUG-037: Vượt RPM trên gemini-4-hydrogen (lệch cửa sổ 60s khi restart, continuation hop, probe)
+#          và chênh lệch đối soát QPS / 24h / Project giữa Web UI với Google AI Studio
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_bug_037_rpm_sliding_window_persists_across_restart_and_log_reconciliation(tmp_path, monkeypatch):
+    """BUG-037: Cửa sổ trượt RPM (~62.5s) phải bền vững qua khởi động lại (recent_rpm_ts) và
+    tự khôi phục từ log khi server sập giữa chừng; log skipped không chiếm RPM."""
+    import json
+    import time as _t
+    from tomtat.llm.gemini import GeminiClient
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys = ["AIzaTestKey_RpmWin_0001"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["min_interval_s"] = 0.0  # cô lập để kiểm tra riêng cửa sổ trượt 60s+ RPM
+    cfg["gemini"]["rpm_limits"] = {"gemini-4-hydrogen": 5}
+
+    # 1. Đặt đủ 5 lượt trong 60s ở client1 -> lưu recent_rpm_ts -> client2 (sau restart) phải chặn >= 60s
+    client1 = GeminiClient(cfg, keys)
+    for idx in range(5):
+        k, _, w, _ = client1._acquire_paced_key_client_with_ts("gemini-4-hydrogen")
+        assert k == keys[0]
+        assert w == 0.0, f"Lượt {idx + 1}/5 đáng lẽ chạy ngay"
+
+    saved = json.loads(client1._exhausted_file.read_text(encoding="utf-8"))
+    assert saved.get("recent_rpm_ts"), "quota_exhausted.json phải lưu recent_rpm_ts"
+
+    client2 = GeminiClient(cfg, keys)
+    _, _, w6, _ = client2._acquire_paced_key_client_with_ts("gemini-4-hydrogen")
+    assert w6 >= 60.0, f"Sau restart client2 phải giữ trọn cửa sổ RPM > 60s, nhưng wait={w6:.2f}s"
+
+    # 2. Mô phỏng sập server trước khi lưu quota_exhausted.json -> khôi phục từ started_epoch trong log
+    client2._exhausted_file.unlink(missing_ok=True)
+    log_dir = tmp_path / "work" / "D01" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    now = _t.time()
+    for i in range(5):
+        lp = log_dir / f"20260101-16000{i}_000{i}_label.json"
+        lp.write_text(
+            json.dumps({
+                "model": "gemini-4-hydrogen",
+                "key_label": "Key #1 (...0001)",
+                "started_at": "2026-01-01T16:00:00",
+                "started_epoch": now - 6.0 + i * 0.4,
+                "in_progress": False,
+                "status": "completed",
+            }),
+            encoding="utf-8",
+        )
+    # Bản ghi bị skipped khi chờ không được tính chiếm slot RPM
+    (log_dir / "20260101-160009_0009_label.json").write_text(
+        json.dumps({
+            "model": "gemini-4-hydrogen",
+            "key_label": "Key #1 (...0001)",
+            "started_at": "2026-01-01T16:00:09",
+            "started_epoch": now - 1.0,
+            "in_progress": False,
+            "status": "skipped",
+            "action": "requeue_after_wait",
+        }),
+        encoding="utf-8",
+    )
+
+    client3 = GeminiClient(cfg, keys)
+    assert len(client3._model_rpm_tracker.get((keys[0], "gemini-4-hydrogen"), [])) == 5
+    _, _, w_crash, _ = client3._acquire_paced_key_client_with_ts("gemini-4-hydrogen")
+    assert w_crash >= 53.0, f"Khôi phục từ log phải đợi hết cửa sổ RPM còn lại (~56s), nhận {w_crash:.2f}s"
+
+
+def test_bug_037_paced_continuation_hops_and_probe_rpm_protection(tmp_path, monkeypatch):
+    """BUG-037: Khi SDK hỗ trợ automatic_continuation, client phải tắt tự động bắn hop liên thanh,
+    tự chờ min_interval_s giữa các continuation hop, đếm đủ số hop vào RPM/RPD (kể cả khi hop 2 lỗi),
+    và probe_key_model phải tuân thủ RPM pacing + không ghi trùng timestamp."""
+    import json
+    import time as _t
+    from types import SimpleNamespace
+    from tomtat.llm.base import get_key_rpd_details
+    from tomtat.llm.gemini import GeminiClient
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys = ["AIzaTestKey_Cont_1111"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["model"] = "gemini-4-hydrogen"
+    cfg["gemini"]["fallback_models"] = []
+    cfg["gemini"]["models_chain"] = ["gemini-4-hydrogen"]
+    cfg["gemini"]["max_rounds_per_model"] = 1
+    cfg["gemini"]["min_interval_s"] = {"gemini-4-hydrogen": 0.18}
+    cfg["gemini"]["rpm_limits"] = {"gemini-4-hydrogen": 5}
+    cfg["gemini"]["backoff_base_s"] = 0.0
+    cfg["gemini"]["backoff_max_s"] = 0.0
+    cfg["gemini"]["background_execution"] = "never"
+
+    client = GeminiClient(cfg, keys)
+    hop_calls: list[dict] = []
+
+    class FakeSdkContInteractions:
+        def __init__(self):
+            self.fail_second_hop = False
+
+        def create(self, *, automatic_continuation=None, **body):
+            hop_calls.append({"t": _t.monotonic(), "auto": automatic_continuation, "body": dict(body)})
+            if body.get("continuation_token") == "tok-hop-2":
+                if self.fail_second_hop:
+                    class Err503(Exception):
+                        status_code = 503
+                    raise Err503("503 high demand on hop 2")
+                return SimpleNamespace(
+                    id="inter-hop-2",
+                    status="completed",
+                    output_text="true}",
+                    usage=SimpleNamespace(total_input_tokens=5, total_output_tokens=3),
+                    continuation_ids=["inter-hop-1", "inter-hop-2"],
+                )
+            return SimpleNamespace(
+                id="inter-hop-1",
+                status="requires_continuation",
+                continuation_token="tok-hop-2",
+                output_text='{"ok": ',
+                usage=SimpleNamespace(total_input_tokens=5, total_output_tokens=2),
+                continuation_ids=["inter-hop-1"],
+            )
+
+    fake_inter = FakeSdkContInteractions()
+    monkeypatch.setattr(client, "_get_or_create_client", lambda k: SimpleNamespace(interactions=fake_inter))
+
+    # 1. Thành công qua 2 continuation hop -> giãn nhịp >= 0.16s giữa 2 hop và cộng đủ 2 OK RPD
+    log_dir = tmp_path / "work" / "C01" / "logs"
+    res = client.generate_json(step="label", system="sys", prompt="p1", schema={}, log_dir=log_dir, attempt=1)
+    assert res.data == {"ok": True}
+    assert len(hop_calls) == 2
+    assert hop_calls[0]["auto"] is False and hop_calls[1]["auto"] is False
+    assert hop_calls[1]["body"].get("continuation_token") == "tok-hop-2"
+    assert hop_calls[1]["t"] - hop_calls[0]["t"] >= 0.15
+    assert client._key_ok_counts[(keys[0], "gemini-4-hydrogen")] == 2
+    assert client._key_rpd_counts[(keys[0], "gemini-4-hydrogen")] == 2
+    assert len(client._model_rpm_tracker[(keys[0], "gemini-4-hydrogen")]) == 2
+
+    # 2. Hop 2 gặp 503 -> hop 1 hoàn tất vẫn được tính OK (1) + hop 2 lỗi tính transient (1), tổng thêm 2
+    hop_calls.clear()
+    fake_inter.fail_second_hop = True
+    try:
+        client.generate_json(step="label", system="sys", prompt="p2", schema={}, log_dir=log_dir, attempt=2)
+    except Exception:
+        pass
+    assert client._key_ok_counts[(keys[0], "gemini-4-hydrogen")] == 3
+    assert client._key_transient_counts[(keys[0], "gemini-4-hydrogen")] == 1
+    assert client._key_rpd_counts[(keys[0], "gemini-4-hydrogen")] == 4
+
+    details = get_key_rpd_details(cfg, api_keys=keys)
+    cell = details["keys"][0]["models"]["gemini-4-hydrogen"]
+    assert cell["ok_used"] == 3
+    assert cell["transient_used"] == 1
+    assert cell["used"] == 4
+
+    # 3. probe_key_model tuân thủ RPM pacing (min_interval_s) và không đếm trùng timestamp vào tracker
+    probe_times: list[float] = []
+
+    class FakeProbeInteractions:
+        def __init__(self):
+            self.n = 0
+
+        def create(self, *, automatic_continuation=None, **body):
+            self.n += 1
+            probe_times.append(_t.monotonic())
+            if self.n == 2:
+                class Err429Qps(Exception):
+                    status_code = 429
+                raise Err429Qps("429 query-per-second limit on near-identical request payloads")
+            return SimpleNamespace(output_text="OK", status="completed")
+
+    fake_probe = FakeProbeInteractions()
+    cfg_probe = dict(cfg)
+    cfg_probe["paths"] = {"work": str(tmp_path / "work_probe")}
+    client_probe = GeminiClient(cfg_probe, keys)
+    client_probe._key_qps_counts.clear()
+    monkeypatch.setattr(client_probe, "_get_or_create_client", lambda k: SimpleNamespace(interactions=fake_probe))
+
+    r1 = client_probe.probe_key_model(keys[0], "gemini-4-hydrogen")
+    r2 = client_probe.probe_key_model(keys[0], "gemini-4-hydrogen")
+    assert r1["outcome"] == "available"
+    assert r2["outcome"] == "rate_limited_qps"
+    assert len(probe_times) == 2
+    assert probe_times[1] - probe_times[0] >= 0.15
+    assert len(client_probe._model_rpm_tracker[(keys[0], "gemini-4-hydrogen")]) == 2
+    assert client_probe._key_qps_counts[(keys[0], "gemini-4-hydrogen")] == 1
+
+
+def test_bug_037_qps_429_surfaced_in_rpd_details_ui_and_cli(tmp_path, monkeypatch):
+    """BUG-037: Web/API/CLI giữ nguyên `used` tương thích cũ nhưng phải công khai `qps_429_count` và
+    `total_sent_with_qps` ở cả ma trận lẫn banner giải thích chênh lệch 24h / QPS / Project."""
+    import json
+    from tomtat.llm.base import get_key_rpd_details
+    from tomtat.web import create_app
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys = ["AIzaTestKey_Qps_AAAA", "AIzaTestKey_Qps_BBBB"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+
+    log_dir = tmp_path / "work" / "Q01" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # Key #1 trên 3.6-flash gặp 1 lần 429 QPS; trên 3.8-flash gặp 1 lần 503 + 1 lần QPS
+    (log_dir / "20260101-160001_0001_extract.json").write_text(
+        json.dumps({
+            "model": "gemini-3.6-flash",
+            "key_label": "Key #1 (...AAAA)",
+            "started_at": "2026-01-01T16:00:01",
+            "in_progress": False,
+            "status": "error",
+            "action": "backoff_payload_qps",
+            "error": "429 query-per-second limit",
+        }),
+        encoding="utf-8",
+    )
+    (log_dir / "20260101-160002_0002_extract.json").write_text(
+        json.dumps({
+            "model": "gemini-3.8-flash",
+            "key_label": "Key #1 (...AAAA)",
+            "started_at": "2026-01-01T16:00:02",
+            "in_progress": False,
+            "status": "error",
+            "action": "next_key",
+            "error": "503 high demand",
+        }),
+        encoding="utf-8",
+    )
+    (log_dir / "20260101-160003_0003_extract.json").write_text(
+        json.dumps({
+            "model": "gemini-3.8-flash",
+            "key_label": "Key #1 (...AAAA)",
+            "started_at": "2026-01-01T16:00:03",
+            "in_progress": False,
+            "status": "error",
+            "action": "backoff_payload_qps",
+            "error": "429 near-identical request payloads",
+        }),
+        encoding="utf-8",
+    )
+
+    details = get_key_rpd_details(cfg, api_keys=keys)
+    c36 = details["keys"][0]["models"]["gemini-3.6-flash"]
+    assert c36["used"] == 0
+    assert c36["qps_429_count"] == 1
+    assert c36["total_sent_with_qps"] == 1
+
+    c38 = details["keys"][0]["models"]["gemini-3.8-flash"]
+    assert c38["used"] == 1
+    assert c38["qps_429_count"] == 1
+    assert c38["total_sent_with_qps"] == 2
+    assert details["keys"][0]["total_qps_429"] == 2
+    assert details["keys"][0]["total_sent_with_qps"] == 3
+
+    models_by_name = {m["model"]: m for m in details["models"]}
+    assert models_by_name["gemini-3.6-flash"]["qps_429_used"] == 1
+    assert models_by_name["gemini-3.6-flash"]["total_sent_with_qps"] == 1
+
+    app = create_app(cfg, mock=True)
+    d_api = app.test_client().get("/api/rpd/keys").get_json()
+    assert d_api["keys"][0]["models"]["gemini-3.6-flash"]["total_sent_with_qps"] == 1
+
+    modals_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "modals.js").read_text(encoding="utf-8")
+    assert "total_sent_with_qps" in modals_js
+    assert "qps_429_count" in modals_js
+    assert "24 giờ trượt" in modals_js
+    assert "Project" in modals_js
+
+
+
+
+
 
 
 

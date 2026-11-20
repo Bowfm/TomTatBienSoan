@@ -28,9 +28,10 @@
     <div id="rpd-models-list" class="rpd-models-list">
       {% for item in rpd_status or [] %}
       {% set state_cls = 'rpd-exhausted' if ((item.limit > 0 and item.used >= item.limit) or (item.key_count > 0 and item.exhausted_keys >= item.key_count)) else ('rpd-warn' if (item.limit > 0 and (item.used / item.limit) >= 0.8) else ('rpd-active' if item.used > 0 else 'rpd-ok')) %}
-      <span class="rpd-pill {{ state_cls }}" data-model="{{ item.model }}" title="{{ item.model }}: Đã sử dụng {{ item.used }}/{{ item.limit }} requests trong ngày ({{ item.rpd_per_key }} RPD/key × {{ item.key_count }} key · Reset lúc 15:00 giờ VN)">{{ item.model }}: {{ item.used }}/{{ item.limit }}</span>
+      <span class="rpd-pill {{ state_cls }}" data-model="{{ item.model }}" role="button" tabindex="0" title="{{ item.model }}: Đã gửi {{ item.used }}/{{ item.limit }} requests (Thành công: {{ item.ok_used or 0 }} · Lỗi 503/Timeout: {{ item.transient_used or 0 }} · Còn {{ item.available_keys if item.available_keys is defined else item.key_count }}/{{ item.key_count }} key · Bấm để xem chi tiết từng key)">{{ item.model }}: {{ item.used }}/{{ item.limit }}{% if item.exhausted_keys %} (hết {{ item.exhausted_keys }} key){% endif %}</span>
       {% endfor %}
     </div>
+    <button id="btn-rpd-details" type="button" class="btn btn-sm rpd-detail-btn" title="Xem bảng trạng thái còn/hết RPD của từng model theo từng API key để đối chiếu với Google AI Studio">🔑 Chi tiết theo Key</button>
   </div>
 
   <div id="update-notification-banner" class="update-banner hidden">

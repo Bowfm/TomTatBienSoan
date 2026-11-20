@@ -29,8 +29,14 @@ export function stopLogsPolling() {
   LOGS_IN_FLIGHT = false;
 }
 
+function setPreviewModalWide(wide) {
+  const box = document.querySelector("#preview-modal .modal-box");
+  if (box) box.classList.toggle("modal-box-wide", Boolean(wide));
+}
+
 export function closePreviewModal() {
   stopLogsPolling();
+  setPreviewModalWide(false);
   const modal = $("preview-modal");
   if (modal) modal.classList.add("hidden");
 }
@@ -53,6 +59,7 @@ function formatDocUnitsText(units) {
 
 export function openPreviewModal() {
   stopLogsPolling();
+  setPreviewModalWide(false);
   if (!store.CURRENT_UNITS) return;
   if ($("preview-modal-title")) $("preview-modal-title").textContent = "Xem trước bảng .docx cuối cùng";
   const body = $("preview-modal-body");
@@ -93,6 +100,8 @@ function buildLogSummaryHtml(lg) {
     durHtml = `<strong class="live-elapsed" data-started="${lg.started_epoch || 0}">${lg.duration_s}s</strong>`;
     if (lg.phase === "waiting_rpm") {
       stBadge = `<span class="log-badge-waiting">⏳ Đang chờ giãn cách RPM (${lg.wait_s}s) trước khi gọi API...</span>`;
+    } else if (lg.background) {
+      stBadge = `<span class="log-badge-running">⚡ Đang gọi Gemini API (chạy nền)...</span>`;
     } else {
       stBadge = `<span class="log-badge-running">⚡ Đang gọi Gemini API trực tiếp...</span>`;
     }
@@ -434,6 +443,7 @@ export async function switchLogsViewStem(stem) {
 
 export async function openLogsModal(targetStem = null) {
   stopLogsPolling();
+  setPreviewModalWide(false);
   const fallbackStem = store.FILES && store.FILES.length ? store.FILES[0].file.replace(/\.docx$/i, "") : null;
   LOG_VIEW_STEM = (typeof targetStem === "string" && targetStem) || store.CURRENT_STEM || fallbackStem;
   if (!LOG_VIEW_STEM) {
@@ -597,6 +607,7 @@ export async function initUpdateChecker() {
 
 export async function openVersionsModal(focusVersion = null) {
   stopLogsPolling();
+  setPreviewModalWide(false);
   if (!store.CURRENT_STEM) {
     showToast("Hãy chọn một file để xem lịch sử phiên bản.", true);
     return;
@@ -772,3 +783,439 @@ export async function openVersionsModal(focusVersion = null) {
 }
 
 registerPreviewVersionHandler((ver) => openVersionsModal(ver));
+
+function rpdStatusIcon(st) {
+  if (st === "available") return "🟢";
+  if (st === "cooldown") return "⏳";
+  if (st === "warning_429") return "🟡";
+  if (st === "invalid_key") return "⛔";
+  return "🔴";
+}
+
+function buildRpdProbeBannerHtml(banner) {
+  if (!banner) return "";
+  const cls = banner.tone === "ok" ? "is-ok" : banner.tone === "err" ? "is-err" : "is-warn";
+  const errDetail = banner.error
+    ? `<div style="margin-top:4px;font-family:Consolas,monospace;font-size:11.5px;white-space:pre-wrap">${escapeHtml(banner.error)}</div>`
+    : "";
+  return `<div class="rpd-probe-banner ${cls}">
+    <strong>${escapeHtml(banner.title || "Kết quả kiểm tra")}</strong>: ${escapeHtml(banner.message || "")}${errDetail}
+  </div>`;
+}
+
+export async function openRpdModal(initialModel = "ALL") {
+  stopLogsPolling();
+  setPreviewModalWide(true);
+  if ($("preview-modal-title")) {
+    $("preview-modal-title").textContent = "Trạng thái RPD từng Model & từng API Key (Đối chiếu Google AI Studio)";
+  }
+  const body = $("preview-modal-body");
+  if (!body) return;
+  body.innerHTML = `<div class="muted" style="padding:18px">Đang tải dữ liệu trạng thái RPD từng key...</div>`;
+  $("preview-modal").classList.remove("hidden");
+
+  let selectedModel = initialModel || "ALL";
+  let filterMode = "all";
+  let searchQuery = "";
+  let rpdData = null;
+  let probeBanner = null;
+  let busyOp = false;
+
+  const matchesFilter = (cell) => {
+    if (!cell) return false;
+    if (filterMode === "exhausted") return Boolean(cell.exhausted);
+    if (filterMode === "warn") return cell.status === "warning_429" || cell.status === "cooldown";
+    if (filterMode === "available") return !cell.exhausted;
+    if (filterMode === "used") return Number(cell.used || 0) > 0;
+    return true;
+  };
+
+  const renderContent = () => {
+    if (!rpdData) return;
+    const models = rpdData.models || [];
+    const keys = rpdData.keys || [];
+    if (selectedModel !== "ALL" && !models.some((m) => m.model === selectedModel)) {
+      selectedModel = "ALL";
+    }
+
+    const qLow = searchQuery.trim().toLowerCase();
+    const filteredKeys = keys.filter((kRow) => {
+      if (qLow) {
+        const hay = `${kRow.index} ${kRow.key_tail} ${kRow.key_label}`.toLowerCase();
+        if (!hay.includes(qLow)) return false;
+      }
+      if (selectedModel === "ALL") {
+        if (filterMode === "all") return true;
+        return models.some((m) => matchesFilter(kRow.models[m.model]));
+      }
+      return matchesFilter(kRow.models[selectedModel]);
+    });
+
+    const totalExhAll = keys.reduce(
+      (acc, kRow) => acc + models.filter((m) => (kRow.models[m.model] || {}).exhausted).length,
+      0
+    );
+    const selModelInfo = models.find((m) => m.model === selectedModel) || null;
+    const selExhCount = selModelInfo ? Number(selModelInfo.exhausted_keys || 0) : totalExhAll;
+
+    const tabsHtml = [
+      `<button type="button" class="rpd-tab-btn${selectedModel === "ALL" ? " active" : ""}" data-rpd-tab="ALL">
+        <strong>📋 Tất cả model (Ma trận)</strong>
+        <small>${keys.length} key · ${totalExhAll} cặp đang khóa</small>
+      </button>`,
+      ...models.map((m) => {
+        const activeCls = selectedModel === m.model ? " active" : "";
+        const qpsTabTxt = m.qps_429_used > 0 ? ` (+${m.qps_429_used} QPS)` : "";
+        return `<button type="button" class="rpd-tab-btn${activeCls}" data-rpd-tab="${escapeHtml(m.model)}">
+          <strong>${escapeHtml(m.model)}</strong>
+          <small>Còn ${m.available_keys}/${keys.length} key · OK:${m.ok_used} · RPD:${m.used}/${m.limit}${escapeHtml(qpsTabTxt)}</small>
+        </button>`;
+      }),
+    ].join("");
+
+    let tableHtml = "";
+    if (!keys.length) {
+      tableHtml = `<div class="muted" style="padding:14px">Chưa cấu hình API key nào trong <code>api_keys.txt</code> hoặc biến môi trường.</div>`;
+    } else if (!filteredKeys.length) {
+      tableHtml = `<div class="muted" style="padding:14px">Không có key nào khớp bộ lọc hiện tại.</div>`;
+    } else if (selectedModel === "ALL") {
+      const headCols = models
+        .map(
+          (m) =>
+            `<th>${escapeHtml(m.model)}<br><small style="font-weight:500;color:#64748b">${m.rpd_per_key}/key · còn ${m.available_keys}/${keys.length}</small></th>`
+        )
+        .join("");
+      const rowsHtml = filteredKeys
+        .map((kRow) => {
+          const cells = models
+            .map((m) => {
+              const c = kRow.models[m.model] || {};
+              const icon = rpdStatusIcon(c.status);
+              const trTxt = c.transient_used > 0 ? ` (+${c.transient_used} lỗi)` : "";
+              const qpsTxt = c.qps_429_count > 0 ? ` · +${c.qps_429_count} QPS` : "";
+              const strikeTxt = c.strikes_429 > 0 && !c.exhausted ? ` · 429:${c.strikes_429}/3` : "";
+              const reasonLine = c.exhausted && c.reason_vi ? `<div style="font-size:10.5px;color:#991b1b">${escapeHtml(c.reason_vi)}</div>` : "";
+              const totalGoogleLine =
+                c.qps_429_count > 0
+                  ? `<div style="font-size:10.5px;color:#64748b">Gửi Google (gồm QPS): <strong>${c.total_sent_with_qps || c.used || 0}</strong></div>`
+                  : "";
+              return `<td>
+                <div class="rpd-matrix-cell" data-drill-model="${escapeHtml(m.model)}" title="Bấm để xem chi tiết ${escapeHtml(m.model)}">
+                  <div><span class="rpd-st-pill rpd-st-${escapeHtml(c.status || "available")}">${icon} ${escapeHtml(c.status_vi || "Còn RPD")}</span></div>
+                  <div style="margin-top:3px;font-family:Consolas,monospace;font-size:11.5px">
+                    OK:<strong>${c.ok_used || 0}</strong> · RPD:<strong>${c.used || 0}/${c.rpd_limit || m.rpd_per_key}</strong>${escapeHtml(trTxt)}${escapeHtml(qpsTxt)}${escapeHtml(strikeTxt)}
+                  </div>
+                  ${totalGoogleLine}
+                  ${reasonLine}
+                </div>
+              </td>`;
+            })
+            .join("");
+          const keyQpsNote =
+            kRow.total_qps_429 > 0
+              ? ` (+${kRow.total_qps_429} QPS = ${kRow.total_sent_with_qps} gửi)`
+              : "";
+          return `<tr>
+            <td class="rpd-key-code">${escapeHtml(kRow.key_label)}<div style="font-weight:400;font-size:11px;color:#64748b">Chu kỳ PT: ${kRow.total_ok_used} OK / ${kRow.total_used} RPD${escapeHtml(keyQpsNote)}</div></td>
+            ${cells}
+          </tr>`;
+        })
+        .join("");
+      tableHtml = `<div class="rpd-table-wrap"><table class="rpd-table">
+        <thead><tr><th>API Key</th>${headCols}</tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table></div>`;
+    } else {
+      const rowsHtml = filteredKeys
+        .map((kRow) => {
+          const c = kRow.models[selectedModel] || {};
+          const icon = rpdStatusIcon(c.status);
+          const lim = Number(c.rpd_limit || 20);
+          const pct = lim > 0 ? Math.min(100, Math.round((Number(c.used || 0) / lim) * 100)) : 0;
+          const barCls = pct >= 100 ? " is-full" : pct >= 80 ? " is-warn" : "";
+          const trParts = [];
+          if (c.err_503_used) trParts.push(`503:${c.err_503_used}`);
+          if (c.err_timeout_used) trParts.push(`TO:${c.err_timeout_used}`);
+          if (c.cancelled_used) trParts.push(`Hủy:${c.cancelled_used}`);
+          const trDetail = trParts.length ? ` (${trParts.join(", ")})` : "";
+          const errInfo = c.reason_vi
+            ? `<div><strong style="color:#991b1b">${escapeHtml(c.reason_vi)}</strong></div>`
+            : "";
+          const rawErr = c.last_error
+            ? `<div class="rpd-err-snippet">${escapeHtml(c.last_error)}</div>`
+            : `<span class="muted">—</span>`;
+          const timeLine = c.last_call_at
+            ? `<div class="muted" style="font-size:11px">Gần nhất: ${escapeHtml(c.last_call_at)}</div>`
+            : "";
+          const unlockBtn =
+            c.exhausted || c.strikes_429 > 0 || c.cooldown_remaining_s > 0
+              ? `<button type="button" class="btn btn-sm" data-unlock-key="${escapeHtml(kRow.key_id)}" data-unlock-model="${escapeHtml(selectedModel)}" title="Mở khóa trạng thái hết RPD/cooldown cho key này (không tốn request)" ${busyOp ? "disabled" : ""}>🔓 Mở</button>`
+              : "";
+          const probeBtn = `<button type="button" class="btn btn-sm" data-probe-key="${escapeHtml(kRow.key_id)}" data-probe-model="${escapeHtml(selectedModel)}" title="Gửi 1 request nhỏ kiểm tra thực tế với Google API (tốn 1 RPD nếu key còn hạn mức)" ${busyOp || rpdData.mock ? "disabled" : ""}>🧪 Test</button>`;
+
+          return `<tr>
+            <td class="rpd-key-code">${escapeHtml(kRow.key_label)}</td>
+            <td><span class="rpd-st-pill rpd-st-${escapeHtml(c.status || "available")}">${icon} ${escapeHtml(c.status_vi || "Còn RPD")}</span></td>
+            <td><strong style="color:#047857">${c.ok_used || 0}</strong> <span class="muted">(ước còn ${c.remaining_ok_est ?? lim})</span></td>
+            <td>${c.transient_used || 0}${escapeHtml(trDetail)}</td>
+            <td>
+              <strong>${c.used || 0}</strong> / ${lim}
+              <div class="rpd-mini-bar${barCls}"><span style="width:${pct}%"></span></div>
+              ${c.qps_429_count > 0 ? `<div class="muted" style="font-size:11px">Gửi Google (gồm QPS): <strong>${c.total_sent_with_qps || 0}</strong></div>` : ""}
+            </td>
+            <td>Strike: <strong>${c.strikes_429 || 0}/3</strong><br><span class="muted">QPS: ${c.qps_429_count || 0}</span></td>
+            <td>${errInfo}${rawErr}${timeLine}</td>
+            <td><div class="rpd-row-actions">${probeBtn}${unlockBtn}</div></td>
+          </tr>`;
+        })
+        .join("");
+
+      tableHtml = `<div class="rpd-table-wrap"><table class="rpd-table">
+        <thead>
+          <tr>
+            <th>API Key</th>
+            <th>Trạng thái trong code</th>
+            <th title="Số lượt phản hồi thành công (200 OK) — sát nhất với RPD trên Google AI Studio">Thành công (200)</th>
+            <th title="Các lỗi 503 high demand / Timeout / Hủy giữa chừng mà Google AI Studio có thể không trừ RPD">503 / Timeout / Hủy</th>
+            <th>Tổng gửi / Cấu hình</th>
+            <th>429 (Strike / QPS)</th>
+            <th>Lý do khóa / Lỗi gần nhất</th>
+            <th>Thao tác</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table></div>`;
+    }
+
+    const probeExhaustedBtn =
+      selectedModel !== "ALL" && selExhCount > 0 && !rpdData.mock
+        ? `<button type="button" id="btn-rpd-probe-exh" class="btn btn-sm" ${busyOp ? "disabled" : ""}>🧪 Test ${selExhCount} key đang khóa</button>`
+        : "";
+    const unlockBulkBtn =
+      selExhCount > 0
+        ? `<button type="button" id="btn-rpd-unlock-bulk" class="btn btn-sm" ${busyOp ? "disabled" : ""}>🔓 Mở khóa ${selectedModel === "ALL" ? `tất cả (${selExhCount})` : `${selExhCount} key`}</button>`
+        : "";
+
+    body.innerHTML = `
+      <div class="rpd-modal-banner">
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center">
+          <div>
+            <strong>Chu kỳ ngày (Pacific Time):</strong> <code>${escapeHtml(rpdData.cycle_date || "")}</code>
+            · <strong>Reset tiếp theo:</strong> ${escapeHtml(rpdData.next_reset_local || "15:00 giờ VN")}
+            · <strong>Tổng key:</strong> ${keys.length}
+            ${rpdData.mock ? ' · <span class="badge">Đang chạy --mock</span>' : ""}
+          </div>
+          <div class="muted">Hiển thị ${filteredKeys.length}/${keys.length} key</div>
+        </div>
+        <details class="rpd-modal-guide">
+          <summary style="cursor:pointer;font-weight:600;color:#1e40af">ℹ️ Vì sao số RPD/RPM trong code có thể khác Google AI Studio Rate Limit?</summary>
+          <ul>
+            <li><strong>Cửa sổ thời gian khác nhau:</strong> Google AI Studio hiển thị <em>"Peak usage ... over the last 1 day"</em> (<strong>24 giờ trượt gần nhất</strong>, gồm cả lượt trước mốc <code>15:00 VN</code> hoặc log cũ đã xóa), còn Web đếm theo <strong>chu kỳ ngày <code>00:00 Pacific Time</code></strong>.</li>
+            <li><strong>Lỗi <code>429 QPS</code> &amp; <code>503</code>:</strong> Google AI Studio vẫn có thể cộng cả <code>429 QPS</code> (nếu gửi trùng payload) và một phần <code>503</code> vào biểu đồ RPM/RPD. Web tách riêng <strong>Thành công (200)</strong>, <strong>503/Timeout/Hủy</strong> và <strong>+QPS / Gửi Google (gồm QPS)</strong> để dễ đối chiếu.</li>
+            <li><strong>Kiểm tra trùng Google Cloud Project:</strong> Nếu nhiều API key trong <code>api_keys.txt</code> vô tình tạo chung <strong>1 Project</strong> trên AI Studio (xem cột <em>Project</em> ở trang API Keys), Google sẽ <strong>cộng gộp RPM và RPD của mọi key thuộc Project đó</strong> — dễ làm RPM vượt 5 và RPD tăng gấp bội dù mỗi key chỉ gửi 1–2 lượt.</li>
+            <li><strong>Kiểm tra / Mở khóa:</strong> Bấm <strong>🔓 Mở</strong> để bỏ đánh dấu khóa (miễn phí RPD), hoặc bấm <strong>🧪 Test</strong> để gọi thử 1 request nhỏ tới Google (tuân thủ pacing RPM) xác nhận trạng thái thật.</li>
+          </ul>
+        </details>
+      </div>
+      <div class="rpd-model-tabs">${tabsHtml}</div>
+      ${buildRpdProbeBannerHtml(probeBanner)}
+      <div class="rpd-modal-toolbar">
+        <div class="rpd-modal-filters">
+          <input id="rpd-search-input" type="text" value="${escapeHtml(searchQuery)}" placeholder="Tìm Key # hoặc 4 ký tự cuối...">
+          <select id="rpd-filter-select">
+            <option value="all"${filterMode === "all" ? " selected" : ""}>Tất cả trạng thái</option>
+            <option value="exhausted"${filterMode === "exhausted" ? " selected" : ""}>🔴 Đang bị khóa / Hết RPD</option>
+            <option value="warn"${filterMode === "warn" ? " selected" : ""}>🟡 Cảnh báo 429 / Cooldown</option>
+            <option value="available"${filterMode === "available" ? " selected" : ""}>🟢 Còn RPD</option>
+            <option value="used"${filterMode === "used" ? " selected" : ""}>Đã gọi &ge; 1 lượt</option>
+          </select>
+        </div>
+        <div class="rpd-modal-actions">
+          <button type="button" id="btn-rpd-refresh" class="btn btn-sm" ${busyOp ? "disabled" : ""}>🔄 Làm mới</button>
+          ${probeExhaustedBtn}
+          ${unlockBulkBtn}
+        </div>
+      </div>
+      ${tableHtml}
+    `;
+
+    body.querySelectorAll("button[data-rpd-tab]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedModel = btn.dataset.rpdTab;
+        renderContent();
+      });
+    });
+    body.querySelectorAll("[data-drill-model]").forEach((el) => {
+      el.addEventListener("click", () => {
+        selectedModel = el.dataset.drillModel;
+        renderContent();
+      });
+    });
+    const searchEl = $("rpd-search-input");
+    if (searchEl) {
+      searchEl.addEventListener("input", () => {
+        searchQuery = searchEl.value;
+        const pos = searchEl.selectionStart || searchQuery.length;
+        renderContent();
+        const nextInput = $("rpd-search-input");
+        if (nextInput) {
+          nextInput.focus();
+          nextInput.setSelectionRange(pos, pos);
+        }
+      });
+    }
+    const filterEl = $("rpd-filter-select");
+    if (filterEl) {
+      filterEl.addEventListener("change", () => {
+        filterMode = filterEl.value;
+        renderContent();
+      });
+    }
+    const refreshBtn = $("btn-rpd-refresh");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", () => refreshData());
+    }
+    const unlockBulk = $("btn-rpd-unlock-bulk");
+    if (unlockBulk) {
+      unlockBulk.addEventListener("click", async () => {
+        const targetScope = selectedModel === "ALL" ? "tất cả model" : `model ${selectedModel}`;
+        if (!window.confirm(`Mở khóa trạng thái hết RPD/cooldown cho ${targetScope}?`)) return;
+        await doUnlock(null, selectedModel === "ALL" ? null : selectedModel);
+      });
+    }
+    const probeExhBtn = $("btn-rpd-probe-exh");
+    if (probeExhBtn && selModelInfo) {
+      probeExhBtn.addEventListener("click", async () => {
+        const targets = keys.filter((kRow) => (kRow.models[selectedModel] || {}).exhausted);
+        if (!targets.length) return;
+        if (
+          !window.confirm(
+            `Sẽ gửi lần lượt ${targets.length} request nhỏ để kiểm tra các key đang bị khóa của ${selectedModel}.\n` +
+              `- Key nào thật sự hết RPD -> Google trả 429 (không tốn thêm RPD).\n` +
+              `- Key nào thực chất vẫn còn -> tốn 1 RPD để xác nhận và tự động mở khóa.\nTiếp tục?`
+          )
+        ) {
+          return;
+        }
+        busyOp = true;
+        let okCount = 0;
+        let failCount = 0;
+        for (let i = 0; i < targets.length; i += 1) {
+          const kRow = targets[i];
+          probeBanner = {
+            tone: "warn",
+            title: `Đang kiểm tra (${i + 1}/${targets.length})`,
+            message: `Đang test ${kRow.key_label} trên ${selectedModel}...`,
+          };
+          renderContent();
+          try {
+            const res = await api("/api/rpd/probe", {
+              method: "POST",
+              body: JSON.stringify({ key_id: kRow.key_id, model: selectedModel }),
+            });
+            if (res.details) rpdData = { ...rpdData, ...res.details };
+            if (res.rpd_status) renderRpdStatus(res.rpd_status);
+            if (res.unlocked) okCount += 1;
+            else failCount += 1;
+          } catch (err) {
+            failCount += 1;
+          }
+        }
+        busyOp = false;
+        probeBanner = {
+          tone: okCount > 0 ? "ok" : "warn",
+          title: `Hoàn tất kiểm tra ${targets.length} key trên ${selectedModel}`,
+          message: `${okCount} key vẫn còn RPD và đã được mở khóa; ${failCount} key vẫn bị từ chối/429.`,
+        };
+        renderContent();
+      });
+    }
+
+    body.querySelectorAll("button[data-unlock-key]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await doUnlock(btn.dataset.unlockKey, btn.dataset.unlockModel);
+      });
+    });
+    body.querySelectorAll("button[data-probe-key]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await doProbeOne(btn.dataset.probeKey, btn.dataset.probeModel);
+      });
+    });
+  };
+
+  const refreshData = async () => {
+    busyOp = true;
+    try {
+      const data = await api("/api/rpd/keys");
+      rpdData = data;
+      if (data && data.rpd_status) {
+        renderRpdStatus(data.rpd_status);
+      }
+    } catch (err) {
+      showToast(err.message, true);
+    } finally {
+      busyOp = false;
+      renderContent();
+    }
+  };
+
+  const doUnlock = async (keyId, modelName) => {
+    busyOp = true;
+    renderContent();
+    try {
+      const res = await api("/api/rpd/unlock", {
+        method: "POST",
+        body: JSON.stringify({ key_id: keyId || "", model: modelName || "" }),
+      });
+      if (res.details) rpdData = { ...rpdData, ...res.details };
+      if (res.rpd_status) renderRpdStatus(res.rpd_status);
+      probeBanner = {
+        tone: "ok",
+        title: "Đã mở khóa",
+        message: `Đã xóa đánh dấu khóa/cooldown (${res.unlocked || 0} mục).`,
+      };
+      showToast("Đã mở khóa trạng thái RPD.");
+    } catch (err) {
+      showToast(err.message, true);
+    } finally {
+      busyOp = false;
+      renderContent();
+    }
+  };
+
+  const doProbeOne = async (keyId, modelName) => {
+    busyOp = true;
+    probeBanner = {
+      tone: "warn",
+      title: "Đang kiểm tra API thật...",
+      message: `Đang gửi request thử tới Google cho ${modelName}...`,
+    };
+    renderContent();
+    try {
+      const res = await api("/api/rpd/probe", {
+        method: "POST",
+        body: JSON.stringify({ key_id: keyId, model: modelName }),
+      });
+      if (res.details) rpdData = { ...rpdData, ...res.details };
+      if (res.rpd_status) renderRpdStatus(res.rpd_status);
+      const tone = res.outcome === "available" ? "ok" : res.outcome === "exhausted_rpd" || res.outcome === "invalid_key" ? "err" : "warn";
+      probeBanner = {
+        tone,
+        title: res.status_vi || "Kết quả kiểm tra",
+        message: res.message || "",
+        error: res.error || "",
+      };
+    } catch (err) {
+      probeBanner = {
+        tone: "err",
+        title: "Không thể kiểm tra",
+        message: err.message,
+      };
+    } finally {
+      busyOp = false;
+      renderContent();
+    }
+  };
+
+  await refreshData();
+}

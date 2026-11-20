@@ -22,9 +22,11 @@ from .base import (
     get_model_rpd_per_key,
     get_model_rpm_per_key,
     get_model_timeout_s,
+    get_key_rpd_details,
     get_rpd_status,
     is_transient,
     sleep_with_cancel,
+    unlock_quota_on_disk,
     write_log,
 )
 from .gemini import GeminiClient
@@ -48,8 +50,10 @@ __all__ = [
     "get_model_rpd_per_key",
     "get_model_rpm_per_key",
     "get_model_timeout_s",
+    "get_key_rpd_details",
     "get_rpd_status",
     "sleep_with_cancel",
+    "unlock_quota_on_disk",
     "write_log",
     "is_transient",
     "_get_quota_cycle_date",
