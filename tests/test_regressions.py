@@ -3125,6 +3125,817 @@ def test_bug_027_memory_and_semaphore_thread_safety(tmp_path):
     assert len(mem["label_corrections"]) == 3
 
 
+# ---------------------------------------------------------------------------
+# BUG-028: Bản biên soạn xuất hiện ký tự `\n` viết thô (như bài S89777)
+# ---------------------------------------------------------------------------
+
+def test_bug_028_unescape_and_detect_literal_escapes():
+    """BUG-028: unescape_escaped_newlines, find_literal_escapes và clean_abstract_text phải
+    chuyển sạch `\\n` / `\\r\\n` / `\\t` viết thô thành xuống dòng thực sự ở cả đơn văn bản lẫn đa văn bản,
+    nhưng không làm hỏng đường dẫn Windows hay ký hiệu vốn có trong văn bản gốc."""
+    from tomtat.checks import clean_abstract_text, clean_multi_doc_abstract
+    from tomtat.textutil import find_literal_escapes, unescape_escaped_newlines
+
+    # 1. Trường hợp thực tế S89777: LLM double-escape `\\n` giữa các đoạn trong JSON
+    raw_s89777 = (
+        "Chẩn đoán và điều trị sớm giúp cải thiện tỷ lệ tử vong do bệnh tim mạch."
+        r"\nTheo khuyến cáo của Hội Tim mạch học châu Âu, bác sĩ chẩn đoán tăng huyết áp."
+        r"\nTăng huyết áp gồm 2 nhóm chính."
+        r"\nĐa số trường hợp không có triệu chứng."
+    )
+    assert find_literal_escapes(raw_s89777) == [r"\n"]
+    cleaned_s = clean_abstract_text(raw_s89777, n_docs=1)
+    assert r"\n" not in cleaned_s
+    assert cleaned_s.splitlines() == [
+        "Chẩn đoán và điều trị sớm giúp cải thiện tỷ lệ tử vong do bệnh tim mạch.",
+        "Theo khuyến cáo của Hội Tim mạch học châu Âu, bác sĩ chẩn đoán tăng huyết áp.",
+        "Tăng huyết áp gồm 2 nhóm chính.",
+        "Đa số trường hợp không có triệu chứng.",
+    ]
+    assert find_literal_escapes(cleaned_s) == []
+
+    # 2. Hỗ trợ \\r\\n, \\n\\n, \\t, khoảng trắng quanh \\n và tiền tố tiếng Việt kết thúc bằng 'A:'
+    mixed = "Mục A:" + r"\n" + "Đoạn 1. " + r"\r\n\t" + "Đoạn 2." + r"\n\n" + "Đoạn 3."
+    assert set(find_literal_escapes(mixed)) >= {r"\n", r"\r\n", r"\t"}
+    cleaned_mixed = unescape_escaped_newlines(mixed)
+    assert "\\" not in cleaned_mixed
+    assert cleaned_mixed == "Mục A:\nĐoạn 1.\nĐoạn 2.\n\nĐoạn 3."
+
+    # 3. Đa văn bản vừa có `\\n` viết thô vừa có cụm dẫn dắt cấm dùng
+    raw_multi = (
+        "Bài một nêu kết quả tăng trưởng 18,5%."
+        r"\nTrong chia sẻ khác, bài hai cảnh báo nguy cơ dịch bệnh."
+    )
+    cleaned_multi = clean_multi_doc_abstract(raw_multi, n_docs=2)
+    assert r"\n" not in cleaned_multi
+    assert "\n\n" in cleaned_multi
+    assert "Trong chia sẻ khác" not in cleaned_multi
+    assert cleaned_multi == "Bài một nêu kết quả tăng trưởng 18,5%.\n\nBài hai cảnh báo nguy cơ dịch bệnh."
+
+    # 4. Bảo toàn đường dẫn Windows thực và token vốn có trong văn bản gốc
+    win_src = r"Xem đường dẫn C:\new\test.txt và ký hiệu \nabla trong công thức."
+    win_abs = r"Đọc file C:\new\test.txt và ký hiệu \nabla.\nTiếp theo kiểm tra kết quả."
+    assert find_literal_escapes(win_abs, preserve_source=win_src) == [r"\n"]
+    fixed_win = unescape_escaped_newlines(win_abs, preserve_source=win_src)
+    assert r"C:\new\test.txt" in fixed_win
+    assert r"\nabla" in fixed_win
+    assert r"\nTiếp" not in fixed_win
+    assert fixed_win == "Đọc file C:\\new\\test.txt và ký hiệu \\nabla.\nTiếp theo kiểm tra kết quả."
+
+
+def test_bug_028_checks_pipeline_and_prompt_prevent_literal_newline_export(tmp_path, make_docx):
+    """BUG-028:
+    1) run_checks phải báo ERROR `literal_escape` và chặn approve/export nếu bản biên soạn còn `\\n`.
+    2) Pipeline (step_abstract) phải tự làm sạch `\\n` của LLM ở cả đơn văn bản lẫn đa văn bản và xuất .docx thành nhiều đoạn sạch.
+    3) process_file(..., restart=False) phải phát hiện state cũ còn `\\n` là không hợp lệ và tự sửa lại.
+    4) Prompt & JSON schema không được hướng dẫn gây nhầm thành chuỗi `\\n` theo nghĩa đen.
+    """
+    from tomtat.checks import run_checks
+    from tomtat.docx_io import load_table, row_text
+    from tomtat.llm import MockClient
+    from tomtat.pipeline import process_file
+    from tomtat.prompts import ABSTRACT_SCHEMA
+    from tomtat.services.file_service import FileService
+    from tomtat.state import FileWorkspace
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+
+    # Tạo file đơn văn bản S89777 mẫu đủ dài
+    (tmp_path / "input").mkdir(parents=True, exist_ok=True)
+    sents = [
+        f"Bệnh tăng huyết áp là vấn đề sức khỏe phổ biến lần thứ {i} cần đo huyết áp định kỳ tại cơ sở y tế."
+        for i in range(1, 13)
+    ]
+    inp = make_docx(
+        tmp_path / "input" / "S89777.docx",
+        ["", " ".join(sents), "AI extract", "AI abstract"],
+    )
+
+    class EscapedNewlineMockClient(MockClient):
+        def _mock_label(self, ctx, attempt):
+            return {
+                "label": "khoa học",
+                "per_doc": [{"doc": 1, "label": "khoa học", "reason": "Y khoa"}],
+                "confidence": "cao",
+                "reason": "Khoa học y khoa",
+            }
+
+        def _mock_abstract(self, ctx, attempt):
+            return {
+                "abstract": (
+                    "Bệnh tăng huyết áp là vấn đề sức khỏe phổ biến lần thứ 1 cần đo huyết áp định kỳ."
+                    r"\nBệnh tăng huyết áp là vấn đề sức khỏe phổ biến lần thứ 2 cần đo huyết áp định kỳ."
+                ),
+                "note": "Trả về có chủ đích ký tự \\n để kiểm thử cơ chế tự làm sạch.",
+            }
+
+    # 1. Kiểm tra trực tiếp run_checks + approve_and_export chặn `\\n` chưa sửa
+    svc = FileService(cfg)
+    _, _, units = svc.inspect_file(inp)
+    bad_abs = (
+        "Bệnh tăng huyết áp là vấn đề sức khỏe phổ biến lần thứ 1 cần đo huyết áp định kỳ."
+        r"\nBệnh tăng huyết áp là vấn đề sức khỏe phổ biến lần thứ 2 cần đo huyết áp định kỳ."
+    )
+    chk_bad = run_checks(units, "khoa học", units["docs"][0]["units"][0]["text"] + " " + units["docs"][0]["units"][1]["text"] + " " + units["docs"][0]["units"][2]["text"] + " " + units["docs"][0]["units"][3]["text"], bad_abs, cfg)
+    assert any(i.code == "literal_escape" and i.level == "error" for i in chk_bad.errors)
+
+    # 2. Pipeline chạy với LLM trả về `\\n` -> tự làm sạch thành xuống dòng thật, không lỗi, xuất .docx sạch
+    out = process_file(inp, cfg, EscapedNewlineMockClient(cfg), force=True, restart=True)
+    st = out["state"]
+    assert st["checks"]["ok"] is True
+    assert r"\n" not in st["abstract"]["text"]
+    assert "\n" in st["abstract"]["text"]
+
+    app_res = svc.approve_and_export(
+        "S89777",
+        style=st["label"]["value"],
+        extract=st["extract"]["text"],
+        abstract=st["abstract"]["text"],
+        confirmed_warnings=True,
+    )
+    assert app_res["ok"] is True
+    out_docx = tmp_path / "output" / "S89777.docx"
+    _, _, rows = load_table(out_docx)
+    assert r"\n" not in row_text(rows[-1])
+    assert len([ln for ln in rows[-1] if ln.strip()]) == 2
+
+    # Nếu cố ý save_draft có `\\n` -> approve_and_export bắt buộc từ chối
+    svc.save_draft("S89777", st["label"]["value"], st["extract"]["text"], bad_abs)
+    blocked = svc.approve_and_export(
+        "S89777",
+        style=st["label"]["value"],
+        extract=st["extract"]["text"],
+        abstract=bad_abs,
+        confirmed_warnings=True,
+    )
+    assert blocked["ok"] is False
+    assert any(i["code"] == "literal_escape" for i in blocked["checks"]["issues"])
+
+    # 3. Nếu state cũ trên đĩa còn dính `\\n`, process_file(..., restart=False) phải tự nhận ra lỗi và sửa lại
+    ws = FileWorkspace(cfg.work_dir, inp)
+    st_dirty = ws.load_state()
+    st_dirty["abstract"]["text"] = bad_abs
+    st_dirty["status"] = "da_co_nhap"
+    ws.save_state(st_dirty)
+    resumed = process_file(inp, cfg, EscapedNewlineMockClient(cfg), force=True, restart=False)
+    assert r"\n" not in resumed["state"]["abstract"]["text"]
+    assert resumed["state"]["checks"]["ok"] is True
+
+    # 4. Kiểm tra hợp đồng prompt & schema
+    abs_prompt = (PROJECT_ROOT / "prompts" / "abstract.md").read_text(encoding="utf-8")
+    assert "KHÔNG viết hai ký tự `\\n` theo nghĩa đen" in abs_prompt
+    assert "KHÔNG viết chuỗi ký tự `\\n\\n` theo nghĩa đen" in abs_prompt
+    desc = ABSTRACT_SCHEMA["properties"]["abstract"]["description"]
+    assert "các đoạn cách nhau bằng \\n" not in desc
+    assert "xuống dòng thực sự" in desc
+
+
+# ---------------------------------------------------------------------------
+# BUG-029: Bấm 1 trong 5 nút AI khi đang chạy đủ số luồng cho phép phải chờ lượt, không tạo luồng thứ N+1
+# ---------------------------------------------------------------------------
+
+def test_bug_029_single_file_rerun_waits_when_batch_full_and_never_creates_extra_thread(tmp_path, monkeypatch):
+    """BUG-029: Khi batch đang chạy đủ 3/3 luồng, bấm 1 trong 5 nút AI (async hoặc sync) ở file đang xem
+    không được tạo luồng thứ 4 mà phải xếp hàng chờ; ngay khi 1 trong 3 luồng kia xong thì đến lượt ngay
+    (trước các file chưa chạy của batch)."""
+    import threading
+    import time as _time
+    from pathlib import Path
+    import tomtat.services.batch_service as bs
+    from tomtat.state import FileWorkspace
+    from tomtat.web import create_app
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    cfg["workers"] = 3
+    cfg["max_workers"] = 3
+    monkeypatch.setattr(cfg, "reload", lambda: None)
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: [f"k{i}" for i in range(10)])
+
+    sample_bytes = (cfg.root / "samples" / "M54629.docx").read_bytes()
+    (tmp_path / "input").mkdir(parents=True, exist_ok=True)
+    all_stems = ["F1", "F2", "F3", "F4", "R1", "R2"]
+    for s in all_stems:
+        (tmp_path / "input" / f"{s}.docx").write_bytes(sample_bytes)
+
+    state_lock = threading.Lock()
+    active_stems: set[str] = set()
+    start_order: list[str] = []
+    peak_active = {"n": 0}
+    gates: dict[str, threading.Event] = {s: threading.Event() for s in all_stems}
+    entered: dict[str, threading.Event] = {s: threading.Event() for s in all_stems}
+    # Cho R1, R2, F4 chạy nhanh sau khi được cấp slot; giữ F1, F2, F3 bằng gate
+    for fast_s in ("F4", "R1", "R2"):
+        gates[fast_s].set()
+
+    def fake_process_file(docx_path, cfg_, client, **kw):
+        stem = Path(docx_path).stem
+        with state_lock:
+            active_stems.add(stem)
+            start_order.append(stem)
+            peak_active["n"] = max(peak_active["n"], len(active_stems))
+        entered[stem].set()
+        gates[stem].wait(timeout=5.0)
+        ws = FileWorkspace(cfg_.work_dir, Path(docx_path))
+        st = ws.load_state()
+        st["status"] = "da_co_nhap"
+        st["label"] = {"value": "khoa học", "confidence": "cao"}
+        st["extract"] = {"text": "Câu 1.", "words": 2, "selections": {"1": [1]}}
+        st["abstract"] = {"text": "Tóm tắt.", "words": 2}
+        ws.save_state(st)
+        with state_lock:
+            active_stems.discard(stem)
+        return {"skipped": False, "state": st}
+
+    monkeypatch.setattr(bs, "process_file", fake_process_file)
+    monkeypatch.setattr(bs, "write_reports", lambda c: None)
+    monkeypatch.setattr("tomtat.web.routes.process.make_client", lambda _c, force_mock=False: object())
+
+    # FileService.process gọi thẳng pipeline.process_file -> patch cả tomtat.pipeline.process_file
+    import tomtat.pipeline as pl_mod
+    monkeypatch.setattr(pl_mod, "process_file", fake_process_file)
+
+    app = create_app(cfg, mock=True)
+    mgr = app.config["TOMTAT_BATCH_MGR"]
+    mgr._client_factory = lambda _c, force_mock=False: object()
+    tc = app.test_client()
+
+    # 1. Khởi động batch 4 file (3 luồng chạy song song: F1, F2, F3; F4 chờ trong batch)
+    r_start = tc.post("/api/batch/start", json={"stems": ["F1", "F2", "F3", "F4"], "concurrency": "auto", "mock": True})
+    assert r_start.status_code == 200 and r_start.get_json()["ok"] is True
+    for s in ("F1", "F2", "F3"):
+        assert entered[s].wait(timeout=3.0), f"{s} không chạy"
+
+    with state_lock:
+        assert len(active_stems) == 3
+
+    # 2. Đang chạy đủ 3/3 luồng -> bấm nút AI ở R1 (async=True) và R2 (sync trong thread)
+    r_q1 = tc.post("/api/file/R1/rerun", json={"step": "abstract", "async": True, "mock": True})
+    assert r_q1.status_code == 202
+    d_q1 = r_q1.get_json()
+    assert d_q1["ok"] is True
+    assert d_q1["accepted"] is True
+    assert d_q1["queued"] is True
+    assert d_q1["queue_position"] == 1
+    assert d_q1["active_workers"] == 3
+    assert d_q1["allowed_workers"] == 3
+
+    sync_res: dict = {}
+
+    def _run_sync_r2():
+        resp = tc.post("/api/file/R2/rerun", json={"step": "label", "mock": True})
+        sync_res["status_code"] = resp.status_code
+        sync_res["body"] = resp.get_json()
+
+    th_r2 = threading.Thread(target=_run_sync_r2, daemon=True)
+    th_r2.start()
+
+    # Đợi R2 vào hàng chờ
+    deadline = _time.time() + 3.0
+    bst = {}
+    while _time.time() < deadline:
+        bst = tc.get("/api/batch/status").get_json()
+        if bst.get("queued_rerun_stems") == ["R1", "R2"]:
+            break
+        _time.sleep(0.02)
+
+    assert bst["queued_rerun_stems"] == ["R1", "R2"]
+    assert bst["queued_rerun_positions"] == {"R1": 1, "R2": 2}
+    assert bst["active_worker_count"] == 3
+    assert bst["allowed_workers"] == 3
+
+    # Tuyệt đối không tạo luồng thứ 4 -> R1, R2, F4 chưa được phép chạy
+    _time.sleep(0.15)
+    assert not entered["R1"].is_set()
+    assert not entered["R2"].is_set()
+    assert not entered["F4"].is_set()
+    assert peak_active["n"] == 3
+
+    # /api/files, /api/file/R1/logs và khóa sửa/lưu/rollback/duyệt (409) đều phản ánh trạng thái chờ lượt
+    files_info = tc.get("/api/files").get_json()
+    assert files_info["queued_rerun_stems"] == ["R1", "R2"]
+    assert files_info["queued_rerun_positions"] == {"R1": 1, "R2": 2}
+    logs_r1 = tc.get("/api/file/R1/logs").get_json()
+    assert "R1" in logs_r1["queued_rerun_stems"]
+    assert tc.post("/api/file/R1/save", json={"style": "khoa học", "extract": "x", "abstract": "y"}).status_code == 409
+    assert tc.post("/api/file/R1/restore", json={"version": 1}).status_code == 409
+    assert tc.post("/api/file/R1/approve", json={"style": "khoa học", "extract": "x", "abstract": "y"}).status_code == 409
+    # Bấm trùng lại nút AI trên chính file R1 đang chờ cũng phải bị chặn 409
+    assert tc.post("/api/file/R1/rerun", json={"step": "abstract", "async": True, "mock": True}).status_code == 409
+
+    # 3. Khi F1 xong -> R1 phải lập tức lấy slot vừa trống (trước F4 của batch), tổng luồng vẫn <= 3
+    gates["F1"].set()
+    assert entered["R1"].wait(timeout=3.0), "R1 không chạy ngay khi F1 hoàn thành"
+    assert not entered["F4"].is_set(), "F4 không được chen trước R1 đang đợi"
+    assert peak_active["n"] == 3
+
+    # 4. Khi F2 xong -> R2 lấy slot tiếp theo, hoàn tất thread sync
+    gates["F2"].set()
+    assert entered["R2"].wait(timeout=3.0), "R2 không chạy ngay khi F2 hoàn thành"
+    th_r2.join(timeout=3.0)
+    assert not th_r2.is_alive()
+    assert sync_res["status_code"] == 200
+    assert sync_res["body"]["ok"] is True
+    assert peak_active["n"] == 3
+
+    # 5. Mở F3 -> F4 chạy và toàn bộ batch + rerun hoàn tất sạch sẽ, đỉnh luồng luôn == 3
+    gates["F3"].set()
+    assert entered["F4"].wait(timeout=3.0)
+    deadline = _time.time() + 5.0
+    while _time.time() < deadline:
+        bst = tc.get("/api/batch/status").get_json()
+        if not bst["active"] and not bst["all_running"] and not bst["queued_rerun_stems"]:
+            break
+        _time.sleep(0.02)
+
+    assert not bst["active"]
+    assert bst["done_count"] == 4
+    assert bst["err_count"] == 0
+    assert peak_active["n"] == 3
+    assert bst["recent_rerun_results"]["R1"]["ok"] is True
+    assert bst["recent_rerun_results"]["R2"]["ok"] is True
+    assert start_order.index("R1") < start_order.index("F4")
+    assert start_order.index("R2") < start_order.index("F4")
+
+
+def test_bug_029_multiple_single_reruns_and_explicit_batch_concurrency_respected(tmp_path, monkeypatch):
+    """BUG-029:
+    1) Không có batch: bấm AI trên 5 file cùng lúc vẫn chỉ chạy tối đa 3 luồng (workers=3), file 4-5 phải chờ.
+    2) Batch chạy với concurrency=2 (dù config cho phép 3): rerun file đơn lẻ cũng chỉ tối đa 2 luồng và chờ lượt.
+    3) Bấm nút AI trên file vốn đang nằm trong hàng đợi batch (_batch_pending) không gây lỗi đụng độ batch.
+    4) 2 rerun đang chạy sẵn rồi mới bấm Chạy batch -> tổng luồng batch + rerun vẫn <= 3.
+    """
+    import threading
+    import time as _time
+    from pathlib import Path
+    import tomtat.pipeline as pl_mod
+    import tomtat.services.batch_service as bs
+    from tomtat.state import FileWorkspace
+    from tomtat.web import create_app
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    cfg["workers"] = 3
+    cfg["max_workers"] = 3
+    monkeypatch.setattr(cfg, "reload", lambda: None)
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: [f"k{i}" for i in range(10)])
+
+    sample_bytes = (cfg.root / "samples" / "M54629.docx").read_bytes()
+    (tmp_path / "input").mkdir(parents=True, exist_ok=True)
+    for s in ("S1", "S2", "S3", "S4", "S5", "B1", "B2", "B3", "B4"):
+        (tmp_path / "input" / f"{s}.docx").write_bytes(sample_bytes)
+
+    lock = threading.Lock()
+    tracker = {"cur": 0, "peak": 0}
+    b_gates: dict[str, threading.Event] = {}
+    b_entered: dict[str, threading.Event] = {}
+
+    def slow_process(docx_path, cfg_, client, **kw):
+        stem = Path(docx_path).stem
+        with lock:
+            tracker["cur"] += 1
+            tracker["peak"] = max(tracker["peak"], tracker["cur"])
+        if stem in b_entered:
+            b_entered[stem].set()
+        if stem in b_gates:
+            b_gates[stem].wait(timeout=5.0)
+        else:
+            _time.sleep(0.12)
+        ws = FileWorkspace(cfg_.work_dir, Path(docx_path))
+        st = ws.load_state()
+        st["status"] = "da_co_nhap"
+        st["label"] = {"value": "khoa học", "confidence": "cao"}
+        st["extract"] = {"text": "Câu 1.", "words": 2, "selections": {"1": [1]}}
+        st["abstract"] = {"text": "Tóm tắt.", "words": 2}
+        ws.save_state(st)
+        with lock:
+            tracker["cur"] -= 1
+        return {"skipped": False, "state": st}
+
+    monkeypatch.setattr(bs, "process_file", slow_process)
+    monkeypatch.setattr(pl_mod, "process_file", slow_process)
+    monkeypatch.setattr(bs, "write_reports", lambda c: None)
+    monkeypatch.setattr("tomtat.web.routes.process.make_client", lambda _c, force_mock=False: object())
+
+    app = create_app(cfg, mock=True)
+    mgr = app.config["TOMTAT_BATCH_MGR"]
+    mgr._client_factory = lambda _c, force_mock=False: object()
+    tc = app.test_client()
+
+    # 1. Không chạy batch, gửi 5 rerun đồng thời -> peak <= 3 (đạt đúng 3, không bao giờ 4-5)
+    for s in ("S1", "S2", "S3", "S4", "S5"):
+        r = tc.post(f"/api/file/{s}/rerun", json={"step": "abstract", "async": True, "mock": True})
+        assert r.status_code == 202
+        if s in ("S4", "S5"):
+            assert r.get_json()["queued"] is True
+
+    deadline = _time.time() + 6.0
+    while _time.time() < deadline:
+        st = tc.get("/api/batch/status").get_json()
+        if not st["all_running"] and not st["queued_rerun_stems"]:
+            break
+        _time.sleep(0.03)
+    assert tracker["peak"] == 3
+    for s in ("S1", "S2", "S3", "S4", "S5"):
+        assert st["recent_rerun_results"][s]["ok"] is True
+
+    # 2. Batch chạy với concurrency=2 (khi max_workers=3) + rerun file B4 vốn đang nằm trong hàng đợi batch
+    tracker["cur"] = 0
+    tracker["peak"] = 0
+    b_gates.clear()
+    b_entered.clear()
+    for s in ("B1", "B2", "B3", "B4", "S1"):
+        b_gates[s] = threading.Event()
+        b_entered[s] = threading.Event()
+    b_gates["B3"].set()
+    b_gates["B4"].set()
+    b_gates["S1"].set()
+
+    r_b = tc.post("/api/batch/start", json={"stems": ["B1", "B2", "B3", "B4"], "concurrency": 2, "mock": True})
+    assert r_b.get_json()["ok"] is True
+    assert b_entered["B1"].wait(timeout=3.0)
+    assert b_entered["B2"].wait(timeout=3.0)
+
+    # S1 và B4 (đang chờ trong batch) bấm rerun -> cả 2 phải vào hàng chờ với allowed_workers=2
+    r_s1 = tc.post("/api/file/S1/rerun", json={"step": "label", "async": True, "mock": True}).get_json()
+    r_b4 = tc.post("/api/file/B4/rerun", json={"step": "all", "async": True, "mock": True}).get_json()
+    assert r_s1["queued"] is True and r_s1["allowed_workers"] == 2
+    assert r_b4["queued"] is True and r_b4["allowed_workers"] == 2
+    _time.sleep(0.1)
+    assert tracker["peak"] == 2, f"Batch concurrency=2 nhưng lại chạy {tracker['peak']} luồng!"
+
+    b_gates["B1"].set()
+    b_gates["B2"].set()
+    deadline = _time.time() + 6.0
+    while _time.time() < deadline:
+        st2 = tc.get("/api/batch/status").get_json()
+        if not st2["active"] and not st2["all_running"] and not st2["queued_rerun_stems"]:
+            break
+        _time.sleep(0.03)
+    assert tracker["peak"] == 2
+    assert st2["done_count"] == 4
+    assert st2["err_count"] == 0
+
+    # 3. 2 rerun đang chạy sẵn -> bấm batch 3 file -> tổng luồng đồng thời <= 3
+    tracker["cur"] = 0
+    tracker["peak"] = 0
+    b_gates.clear()
+    b_entered.clear()
+    for s in ("S1", "S2", "B1"):
+        b_gates[s] = threading.Event()
+        b_entered[s] = threading.Event()
+    for s in ("B2", "B3"):
+        b_gates[s] = threading.Event()
+        b_entered[s] = threading.Event()
+        b_gates[s].set()
+
+    assert tc.post("/api/file/S1/rerun", json={"step": "abstract", "async": True, "mock": True}).get_json()["queued"] is False
+    assert tc.post("/api/file/S2/rerun", json={"step": "abstract", "async": True, "mock": True}).get_json()["queued"] is False
+    assert b_entered["S1"].wait(timeout=3.0)
+    assert b_entered["S2"].wait(timeout=3.0)
+
+    tc.post("/api/batch/start", json={"stems": ["B1", "B2", "B3"], "concurrency": 3, "mock": True})
+    assert b_entered["B1"].wait(timeout=3.0)
+    _time.sleep(0.12)
+    assert not b_entered["B2"].is_set(), "B2 không được chạy khi S1, S2, B1 đã đủ 3 luồng"
+    assert tracker["peak"] == 3
+
+    b_gates["B1"].set()
+    b_gates["S1"].set()
+    b_gates["S2"].set()
+    deadline = _time.time() + 6.0
+    while _time.time() < deadline:
+        st3 = tc.get("/api/batch/status").get_json()
+        if not st3["active"] and not st3["all_running"] and not st3["queued_rerun_stems"]:
+            break
+        _time.sleep(0.03)
+    assert tracker["peak"] == 3
+    assert st3["done_count"] == 3 and st3["err_count"] == 0
+
+
+def test_bug_029_cancel_queued_rerun_and_frontend_queue_contract(tmp_path, monkeypatch):
+    """BUG-029: Bấm Dừng AI khi file đang chờ lượt trong hàng chờ phải hủy ngay không gọi AI,
+    và frontend HTML/CSS/JS có đầy đủ trạng thái hàng chờ & xử lý bất đồng bộ."""
+    import threading
+    import time as _time
+    from pathlib import Path
+    import tomtat.pipeline as pl_mod
+    import tomtat.services.batch_service as bs
+    from tomtat.web import create_app
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    cfg["workers"] = 1
+    cfg["max_workers"] = 1
+    monkeypatch.setattr(cfg, "reload", lambda: None)
+
+    sample_bytes = (cfg.root / "samples" / "M54629.docx").read_bytes()
+    (tmp_path / "input").mkdir(parents=True, exist_ok=True)
+    for s in ("F1", "Q1", "Q2"):
+        (tmp_path / "input" / f"{s}.docx").write_bytes(sample_bytes)
+
+    f1_entered = threading.Event()
+    f1_release = threading.Event()
+    called_stems: list[str] = []
+
+    def fake_proc(docx_path, cfg_, client, **kw):
+        stem = Path(docx_path).stem
+        called_stems.append(stem)
+        if stem == "F1":
+            f1_entered.set()
+            f1_release.wait(timeout=5.0)
+        return {"skipped": False, "state": {"status": "da_co_nhap"}}
+
+    monkeypatch.setattr(bs, "process_file", fake_proc)
+    monkeypatch.setattr(pl_mod, "process_file", fake_proc)
+    monkeypatch.setattr(bs, "write_reports", lambda c: None)
+    monkeypatch.setattr("tomtat.web.routes.process.make_client", lambda _c, force_mock=False: object())
+
+    app = create_app(cfg, mock=True)
+    mgr = app.config["TOMTAT_BATCH_MGR"]
+    mgr._client_factory = lambda _c, force_mock=False: object()
+    tc = app.test_client()
+
+    # 1. F1 chiếm trọn 1/1 slot -> Q1 (#1), Q2 (#2) vào hàng chờ
+    tc.post("/api/batch/start", json={"stems": ["F1"], "concurrency": 1, "mock": True})
+    assert f1_entered.wait(timeout=3.0)
+    r_q1 = tc.post("/api/file/Q1/rerun", json={"step": "abstract", "async": True, "mock": True}).get_json()
+    r_q2 = tc.post("/api/file/Q2/rerun", json={"step": "label", "async": True, "mock": True}).get_json()
+    assert r_q1["queued"] is True and r_q1["queue_position"] == 1
+    assert r_q2["queued"] is True and r_q2["queue_position"] == 2
+
+    # 2. Hủy Q1 khi đang chờ -> Q1 thoát hàng chờ ngay, Q2 lên #1, không gọi AI cho Q1
+    r_stop_q1 = tc.post("/api/file/Q1/stop").get_json()
+    assert r_stop_q1["stopped"] is True
+    assert r_stop_q1["was_queued"] is True
+
+    bst = tc.get("/api/batch/status").get_json()
+    assert bst["queued_rerun_stems"] == ["Q2"]
+    assert bst["queued_rerun_positions"] == {"Q2": 1}
+
+    # 3. Hủy toàn bộ bằng /api/batch/stop -> Q2 cũng được hủy khỏi hàng chờ, giải phóng F1
+    r_stop_all = tc.post("/api/batch/stop").get_json()
+    assert "Q2" in r_stop_all["stopped_stems"]
+    f1_release.set()
+
+    deadline = _time.time() + 4.0
+    while _time.time() < deadline:
+        bst = tc.get("/api/batch/status").get_json()
+        if not bst["active"] and not bst["all_running"] and not bst["queued_rerun_stems"]:
+            break
+        _time.sleep(0.02)
+    assert called_stems == ["F1"], f"Không được gọi AI cho file đã hủy trong hàng chờ: {called_stems}"
+
+    # 4. Hợp đồng frontend
+    state_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "state.js").read_text(encoding="utf-8")
+    assert "QUEUED_STEMS" in state_js and "isStemBusy" in state_js
+    sidebar_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "sidebar.js").read_text(encoding="utf-8")
+    assert "st-queued" in sidebar_js and "Chờ lượt" in sidebar_js
+    editor_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "editor.js").read_text(encoding="utf-8")
+    assert "async: true" in editor_js and "Hủy chờ AI" in editor_js and "st-queued" in editor_js
+    batch_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "batch.js").read_text(encoding="utf-8")
+    assert "recent_rerun_results" in batch_js and "queued_rerun_stems" in batch_js
+    modals_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "modals.js").read_text(encoding="utf-8")
+    assert "logs-queue-banner" in modals_js
+    css = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "app.css").read_text(encoding="utf-8")
+    assert ".st-queued" in css
+
+
+# ---------------------------------------------------------------------------
+# BUG-030: Ấn vào file ở thanh bên trái làm danh sách tự cuộn xuống dưới ngay lập tức
+# ---------------------------------------------------------------------------
+
+def test_bug_030_sidebar_click_preserves_scroll_contract_and_behavior():
+    """BUG-030: Ấn chọn file ở cột bên trái (đặc biệt khi zoom trình duyệt < 100%) không được
+    phá hủy DOM danh sách hay làm nhảy vị trí cuộn; renderFileList/renderDoneList/renderDocsUnits
+    phải giữ nguyên vị trí cuộn và app.css tắt overflow-anchor ở các vùng cuộn động."""
+    import shutil
+    import subprocess
+
+    css = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "app.css").read_text(encoding="utf-8")
+    for cls_name in (".file-list", ".docs-container", ".versions-list"):
+        block = re.search(rf"{re.escape(cls_name)}\s*\{{[^}}]*\}}", css, re.S)
+        assert block is not None, f"Thiếu block CSS {cls_name}"
+        assert "overflow-anchor: none" in block.group(0), (
+            f"{cls_name} phải có 'overflow-anchor: none' để tránh Chromium scroll jump khi zoom != 100%"
+        )
+
+    utils_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "utils.js").read_text(encoding="utf-8")
+    assert "export function withPreservedScroll" in utils_js
+
+    sidebar_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "sidebar.js").read_text(encoding="utf-8")
+    assert "export function syncActiveFileItem" in sidebar_js
+    assert "withPreservedScroll(ul" in sidebar_js
+    assert "withPreservedScroll(doneUl" in sidebar_js
+
+    editor_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "editor.js").read_text(encoding="utf-8")
+    assert "syncActiveFileItem" in editor_js
+    assert "withPreservedScroll" in editor_js
+    assert "if (!syncActiveFileItem())" in editor_js
+
+    node_exe = shutil.which("node")
+    if not node_exe:
+        return
+
+    modules_dir = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+
+function makeClassList(el) {{
+  const set = new Set();
+  return {{
+    add: (...cs) => cs.forEach((c) => set.add(c)),
+    remove: (...cs) => cs.forEach((c) => set.delete(c)),
+    toggle: (c, force) => {{
+      if (force === undefined) {{
+        if (set.has(c)) {{ set.delete(c); return false; }}
+        set.add(c); return true;
+      }}
+      if (force) set.add(c); else set.delete(c);
+      return Boolean(force);
+    }},
+    contains: (c) => set.has(c),
+    _syncFromStr: (s) => {{
+      set.clear();
+      String(s || "").split(/\\s+/).filter(Boolean).forEach((c) => set.add(c));
+    }},
+  }};
+}}
+
+function makeEl(id = "") {{
+  let _innerHTML = "";
+  let _className = "";
+  const el = {{
+    id,
+    dataset: {{}},
+    style: {{}},
+    children: [],
+    value: "",
+    textContent: "",
+    disabled: false,
+    scrollTop: 0,
+    scrollLeft: 0,
+    innerHTMLClears: 0,
+    classList: null,
+    get className() {{ return _className; }},
+    set className(v) {{ _className = String(v || ""); el.classList._syncFromStr(_className); }},
+    get innerHTML() {{ return _innerHTML; }},
+    set innerHTML(v) {{
+      _innerHTML = String(v || "");
+      if (_innerHTML === "") {{
+        el.innerHTMLClears += 1;
+        el.children = [];
+        // Mô phỏng trình duyệt reset scrollTop về 0 khi container bị xóa rỗng
+        el.scrollTop = 0;
+        el.scrollLeft = 0;
+      }}
+    }},
+    appendChild(child) {{ el.children.push(child); return child; }},
+    addEventListener() {{}},
+    querySelector(sel) {{
+      if (sel === ".btn-stop-item") return null;
+      if (sel === ".btn-del-item") return makeEl();
+      if (sel === "input") return makeEl();
+      return null;
+    }},
+    querySelectorAll(sel) {{
+      if (sel === ".file-item[data-stem]") {{
+        return el.children.filter((c) => c.dataset && c.dataset.stem);
+      }}
+      return [];
+    }},
+  }};
+  el.classList = makeClassList(el);
+  return el;
+}}
+
+const els = new Map();
+for (const id of [
+  "file-list", "done-list", "filter-status", "cnt-total", "cnt-draft", "cnt-unprocessed",
+  "cnt-approved", "badge-pending", "done-count", "cnt-unprocessed-wrap", "btn-clear-pending",
+  "btn-clear-approved", "empty-state", "editor-pane", "cur-filename", "cur-meta", "cur-status",
+  "flags-box", "label-stale-prompt", "query-box", "budget-hint", "ai-extract-ref",
+  "ai-abstract-ref", "model-badge-label", "model-badge-extract", "model-badge-abstract",
+  "sel-style", "label-conf", "label-reason", "label-per-doc", "txt-extract", "txt-abstract",
+  "version-note", "docs-container", "m-total", "m-ext", "ext-word-inline", "m-compress",
+  "m-abs", "abs-word-inline", "m-abs-target", "abs-target-inline", "m-ratio-label", "m-ratio",
+  "m-edit-cov", "m-rouge2", "m-bart", "m-geval", "verbatim-bar", "issues-list", "btn-approve",
+  "judge-card", "judge-content", "versions-list", "cur-version-badge", "version-dirty-badge",
+  "versions-count", "versions-count-btn", "btn-save", "btn-rollback-prev", "btn-stop-file-ai",
+  "batch-progress", "btn-stop-batch", "btn-run-pending"
+]) {{
+  els.set(id, makeEl(id));
+}}
+
+globalThis.document = {{
+  getElementById: (id) => els.get(id) || null,
+  createElement: () => makeEl(),
+  querySelectorAll: () => [],
+  activeElement: null,
+}};
+
+const filePayloads = {{}};
+for (let i = 1; i <= 30; i++) {{
+  const stem = `S895${{String(i).padStart(2, "0")}}`;
+  filePayloads[stem] = {{
+    state: {{
+      stem, file: `${{stem}}.docx`, status: "chua_xu_ly", status_vi: "Chưa xử lý",
+      label: {{ value: "", reason: "" }}, extract: {{ text: "", words: 0, selections: {{}} }},
+      abstract: {{ text: "", words: 0 }}, checks: {{ n_errors: 0, n_warnings: 0, metrics: {{}}, issues: [] }},
+      flags: [], stale_steps: [],
+    }},
+    units: {{
+      query: "q",
+      budget: {{ total_words: 100, extract_min: 10, extract_max: 50, extract_target_low: 20, extract_target_high: 40, extract_target_mid: 30 }},
+      docs: [{{ n: 1, row: 1, words: 100, units: [{{ id: 1, para: 1, words: 10, text: "Câu 1." }}] }}],
+      ai_extract: "", ai_abstract: "",
+    }},
+    versions: [],
+  }};
+}}
+
+globalThis.fetch = async (url) => {{
+  const m = String(url).match(/\\/api\\/file\\/([^/]+)$/);
+  const payload = m ? filePayloads[decodeURIComponent(m[1])] : null;
+  return {{ ok: Boolean(payload), status: payload ? 200 : 404, json: async () => payload || {{}} }};
+}};
+
+const {{ store }} = await import("{modules_dir}/state.js");
+const {{ renderFileList }} = await import("{modules_dir}/sidebar.js");
+const {{ selectFile, renderDocsUnits }} = await import("{modules_dir}/editor.js");
+
+store.FILES = Object.keys(filePayloads).map((s) => ({{
+  file: `${{s}}.docx`, status: "chua_xu_ly", status_vi: "Chưa xử lý", label: "", n_errors: 0, n_warnings: 0,
+}}));
+store.CURRENT_STEM = "S89520";
+renderFileList();
+
+const ul = els.get("file-list");
+const origNode19 = ul.children.find((li) => li.dataset.stem === "S89519");
+assert.ok(origNode19);
+ul.scrollTop = 1850;
+ul.scrollLeft = 12;
+const clearsBeforeSelect = ul.innerHTMLClears;
+
+await selectFile("S89519");
+assert.equal(ul.innerHTMLClears, clearsBeforeSelect, "selectFile không được xóa/tạo lại DOM #file-list");
+assert.equal(ul.scrollTop, 1850);
+assert.equal(ul.scrollLeft, 12);
+assert.equal(ul.children.find((li) => li.dataset.stem === "S89519"), origNode19);
+assert.equal(origNode19.classList.contains("active"), true);
+assert.equal(ul.children.find((li) => li.dataset.stem === "S89520").classList.contains("active"), false);
+
+// Ngay cả khi renderFileList() chạy lại từ SSE/loadFileList và innerHTML='' reset scrollTop=0 -> phải khôi phục lại 1850
+renderFileList();
+assert.equal(ul.scrollTop, 1850);
+assert.equal(ul.scrollLeft, 12);
+
+// renderDocsUnits với preserveScroll=true giữ cuộn trên cùng file, nhưng chuyển file mới phải reset về 0
+const docsBox = els.get("docs-container");
+docsBox.scrollTop = 420;
+renderDocsUnits({{ preserveScroll: true }});
+assert.equal(docsBox.scrollTop, 420);
+await selectFile("S89518");
+assert.equal(docsBox.scrollTop, 0);
+"""
+    res = subprocess.run(
+        [node_exe, "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+    )
+    assert res.returncode == 0, f"Node test thất bại:\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}"
+
+
+
+
+
 
 
 

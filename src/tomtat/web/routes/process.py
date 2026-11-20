@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 from flask import Blueprint, Response, current_app, jsonify, request
@@ -109,15 +110,21 @@ def api_process_batch():
     ran, skipped, errs = [], [], []
     mgr = _batch_mgr()
     for p in targets:
-        acquired, err_msg = mgr.try_acquire_file(p.stem, "all")
-        if not acquired:
+        acquired, err_msg, job = mgr.reserve_rerun(p.stem, "all")
+        if not acquired or job is None:
             skipped.append(p.name)
             errs.append(err_msg or f"{p.name}: đang được xử lý.")
             continue
-        try:
-            res = svc.process(p, client, force=force)
-        finally:
-            mgr.release_file(p.stem)
+
+        def _run_target(ev, path=p):
+            out = svc.process(path, client, force=force, cancel_event=ev)
+            return out, 200
+
+        res, _ = mgr.run_rerun_job(
+            job,
+            _run_target,
+            lambda path=p: ({"skipped": True, "cancelled": True, "error": f"Đã dừng {path.name}."}, 200),
+        )
         if res.get("skipped"):
             skipped.append(p.name)
         else:
@@ -135,7 +142,7 @@ def api_process_batch():
 
 @bp.post("/api/file/<stem>/rerun")
 def api_rerun(stem: str):
-    """Chạy lại một bước (hoặc toàn bộ) bằng AI."""
+    """Chạy lại một bước (hoặc toàn bộ) bằng AI; tự xếp hàng chờ nếu đã đủ số luồng cho phép."""
     cfg = _cfg()
     svc = _service()
     files_map = svc.resolve_files()
@@ -146,24 +153,41 @@ def api_rerun(stem: str):
     step = payload.get("step") or None
     use_mock = bool(payload.get("mock", _mock()))
     ignore_mismatch = bool(payload.get("ignore_mismatch", False))
+    async_mode = bool(payload.get("async", False))
+    raw_conc = payload.get("concurrency")
+    requested_concurrency: int | None = None
+    if raw_conc not in (None, "", "auto", 0) and not isinstance(raw_conc, bool):
+        try:
+            parsed_c = int(raw_conc)
+            if parsed_c > 0:
+                requested_concurrency = parsed_c
+        except (TypeError, ValueError):
+            requested_concurrency = None
     # Khi chạy lại cả bài (step == "all" hoặc None), mặc định phải chạy lại từ đầu (restart=True)
     # trừ khi caller truyền tường minh `"restart": false`.
     restart = bool(payload["restart"]) if "restart" in payload else (step in (None, "all"))
 
+    cfg.reload()
     mgr = _batch_mgr()
-    acquired, err_msg = mgr.try_acquire_file(stem, step or "all")
-    if not acquired:
+    acquired, err_msg, job = mgr.reserve_rerun(
+        stem,
+        step or "all",
+        concurrency=requested_concurrency,
+    )
+    if not acquired or job is None:
         return jsonify({"error": err_msg, "already_running": True}), 409
 
-    cancel_ev = mgr.get_cancel_event(stem)
+    launched = False
     try:
         try:
-            cfg.reload()
             client = make_client(cfg, force_mock=use_mock)
         except RuntimeError as exc:
+            mgr.abort_unstarted_rerun(job["job_id"])
             return jsonify({"error": str(exc)}), 400
 
-        if cancel_ev is not None and cancel_ev.is_set():
+        cancel_ev = job["cancel_ev"]
+        if cancel_ev.is_set() or job.get("cancelled"):
+            mgr.abort_unstarted_rerun(job["job_id"])
             rpd = get_rpd_status(cfg)
             detail = svc.get_file_detail(stem)
             return jsonify({
@@ -196,20 +220,10 @@ def api_rerun(stem: str):
             if changed:
                 ws.save_state(st)
 
-        out = svc.process(
-            docx_path,
-            client,
-            force=True,
-            only_step=step if step != "all" else None,
-            ignore_mismatch=ignore_mismatch,
-            restart=restart,
-            cancel_event=cancel_ev,
-        )
-        svc.write_reports()
-        rpd = get_rpd_status(cfg)
-        detail = svc.get_file_detail(stem)
-        if out.get("cancelled"):
-            return jsonify({
+        def _on_cancelled() -> tuple[dict, int]:
+            rpd = get_rpd_status(cfg)
+            detail = svc.get_file_detail(stem)
+            return {
                 "ok": False,
                 "cancelled": True,
                 "message": f"Đã dừng chạy AI cho {stem}.docx theo yêu cầu.",
@@ -217,29 +231,83 @@ def api_rerun(stem: str):
                 "units": detail["units"],
                 "versions": detail["versions"],
                 "rpd_status": rpd,
-            })
-        if out.get("error"):
-            return jsonify({
-                "error": out["error"],
+            }, 200
+
+        def _execute(ev: threading.Event) -> tuple[dict, int]:
+            out = svc.process(
+                docx_path,
+                client,
+                force=True,
+                only_step=step if step != "all" else None,
+                ignore_mismatch=ignore_mismatch,
+                restart=restart,
+                cancel_event=ev,
+            )
+            svc.write_reports()
+            rpd = get_rpd_status(cfg)
+            detail = svc.get_file_detail(stem)
+            if out.get("cancelled"):
+                return {
+                    "ok": False,
+                    "cancelled": True,
+                    "message": f"Đã dừng chạy AI cho {stem}.docx theo yêu cầu.",
+                    "state": detail["state"],
+                    "units": detail["units"],
+                    "versions": detail["versions"],
+                    "rpd_status": rpd,
+                }, 200
+            if out.get("error"):
+                return {
+                    "error": out["error"],
+                    "state": detail["state"],
+                    "units": detail["units"],
+                    "versions": detail["versions"],
+                    "rpd_status": rpd,
+                }, 400
+            resp: dict = {
+                "ok": True,
                 "state": detail["state"],
                 "units": detail["units"],
                 "versions": detail["versions"],
                 "rpd_status": rpd,
-            }), 400
-        resp: dict = {
-            "ok": True,
-            "state": detail["state"],
-            "units": detail["units"],
-            "versions": detail["versions"],
-            "rpd_status": rpd,
-        }
-        if step == "label":
-            resp["label_changed"] = bool(out.get("label_changed"))
-            resp["previous_label"] = out.get("previous_label", "")
-            resp["new_label"] = out.get("new_label", "")
-        return jsonify(resp)
+            }
+            if step == "label":
+                resp["label_changed"] = bool(out.get("label_changed"))
+                resp["previous_label"] = out.get("previous_label", "")
+                resp["new_label"] = out.get("new_label", "")
+            return resp, 200
+
+        if async_mode:
+            was_queued = (job["status"] == "queued")
+            queue_pos = mgr.get_queue_position(job["job_id"]) if was_queued else 0
+            allowed_workers = mgr.get_allowed_workers(requested_concurrency)
+            launched = True
+            threading.Thread(
+                target=mgr.run_rerun_job,
+                args=(job, _execute, _on_cancelled),
+                daemon=True,
+                name=f"tomtat_rerun_{stem}",
+            ).start()
+            bst = mgr.status()
+            return jsonify({
+                "ok": True,
+                "accepted": True,
+                "job_id": job["job_id"],
+                "stem": stem,
+                "step": step or "all",
+                "queued": was_queued,
+                "queue_position": queue_pos,
+                "active_workers": bst.get("active_worker_count", 0),
+                "allowed_workers": allowed_workers,
+                "batch_status": bst,
+            }), 202
+
+        launched = True
+        resp_payload, status_code = mgr.run_rerun_job(job, _execute, _on_cancelled)
+        return jsonify(resp_payload), status_code
     finally:
-        mgr.release_file(stem)
+        if not launched:
+            mgr.abort_unstarted_rerun(job["job_id"])
 
 
 @bp.post("/api/file/<stem>/stop")

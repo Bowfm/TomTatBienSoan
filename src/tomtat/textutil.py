@@ -43,6 +43,12 @@ _active_config: TextConfig = TextConfig()
 _SPLIT_RE = re.compile(r'([.!?…]+["”’\')\]]*)\s+')
 _ROMAN_RE = re.compile(r"^[IVXLCDM]{1,6}$")
 _QUOTES = '"“”‘’()[]'
+_WIN_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:|\\\\[A-Za-z0-9_.-]+)"
+    r"(?:\\(?:[^\s\\.,;)\"'”’]+(?:\.[^\s\\.,;)\"'”’]+)*|\.\.?))+(?<!\.)"
+)
+_ESCAPE_SEQ_RE = re.compile(r"\\+(?:r\\+n|n\\+r|[nrt])")
+_SOURCE_BSLASH_TOK_RE = re.compile(r"\\+[A-Za-z]+")
 
 
 def configure(abbreviations: Iterable[str] | None = None,
@@ -75,6 +81,75 @@ def nfc(text: str | None) -> str:
 def norm(text: str | None) -> str:
     """Chuẩn hóa Unicode NFC và gộp khoảng trắng."""
     return re.sub(r"\s+", " ", nfc(text)).strip()
+
+
+def _is_real_windows_path(cand: str) -> bool:
+    """Phân biệt đường dẫn Windows thực (`C:\\new\\a.txt`) với nhãn/câu tiếng Việt (`A:\\nĐoạn`)."""
+    if cand.startswith("\\\\"):
+        return True
+    if len(cand) >= 3 and cand[1] == ":" and cand[2] == "\\":
+        after = cand[3:]
+        if not after:
+            return False
+        if after[0] in ("n", "r", "t") and (len(after) == 1 or after[1] not in "abcdefghijklmnopqrstuvwxyz0123456789_.-"):
+            return False
+        return True
+    return False
+
+
+def _mask_protected_escapes(text: str, preserve_source: str | None = None) -> tuple[str, list[str]]:
+    """Tạm ẩn đường dẫn Windows/UNC và các token backslash vốn có trong văn bản gốc."""
+    protected: list[str] = []
+
+    def _stash(val: str) -> str:
+        idx = len(protected)
+        protected.append(val)
+        return f"\uf8ffTOMTAT_ESC_{idx}\uf8ff"
+
+    masked = _WIN_PATH_RE.sub(lambda m: _stash(m.group(0)) if _is_real_windows_path(m.group(0)) else m.group(0), text)
+    if preserve_source and "\\" in preserve_source:
+        src_n = nfc(preserve_source)
+        src_tokens = set(_SOURCE_BSLASH_TOK_RE.findall(src_n))
+        if src_tokens:
+            masked = _SOURCE_BSLASH_TOK_RE.sub(
+                lambda m: _stash(m.group(0)) if m.group(0) in src_tokens else m.group(0),
+                masked,
+            )
+    return masked, protected
+
+
+def find_literal_escapes(text: str | None, *, preserve_source: str | None = None) -> list[str]:
+    """Tìm các chuỗi thoát điều khiển viết thô (`\\n`, `\\r`, `\\t`) còn sót trong văn bản."""
+    s = nfc(text)
+    if "\\" not in s:
+        return []
+    masked, _ = _mask_protected_escapes(s, preserve_source=preserve_source)
+    found: list[str] = []
+    for m in _ESCAPE_SEQ_RE.finditer(masked):
+        raw = m.group(0)
+        # Rút gọn nhiều dấu gạch chéo liên tiếp về dạng chuẩn dễ đọc để báo lỗi
+        norm_tok = re.sub(r"\\+", r"\\", raw)
+        if norm_tok not in found:
+            found.append(norm_tok)
+    return found
+
+
+def unescape_escaped_newlines(text: str | None, *, preserve_source: str | None = None) -> str:
+    """Chuyển chuỗi `\\n` / `\\r\\n` / `\\r` viết thô (do LLM double-escape trong JSON) thành xuống dòng thực."""
+    s = nfc(text).replace("\r\n", "\n").replace("\r", "\n")
+    if "\\" not in s:
+        s = re.sub(r"[ \t]*\n[ \t]*", "\n", s)
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        return s.strip()
+
+    masked, protected = _mask_protected_escapes(s, preserve_source=preserve_source)
+    masked = re.sub(r"\\+r\\+n|\\+n\\+r|\\+r|\\+n", "\n", masked)
+    masked = re.sub(r"[ ]*\\+t[ ]*", " ", masked)
+    for idx, orig in enumerate(protected):
+        masked = masked.replace(f"\uf8ffTOMTAT_ESC_{idx}\uf8ff", orig)
+    masked = re.sub(r"[ \t]*\n[ \t]*", "\n", masked)
+    masked = re.sub(r"\n{3,}", "\n\n", masked)
+    return masked.strip()
 
 
 def count_words(text: str | None, mode: str = "whitespace_alnum") -> int:

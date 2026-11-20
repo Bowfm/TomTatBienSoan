@@ -16,6 +16,7 @@ from .abstract_checks import (
     NUM_RE,
     check_abstract,
     check_length,
+    clean_abstract_text,
     clean_multi_doc_abstract,
 )
 from .core import (
@@ -63,6 +64,7 @@ __all__ = [
     "FORBIDDEN_TRANSITIONS_RE",
     "check_abstract",
     "check_length",
+    "clean_abstract_text",
     "clean_multi_doc_abstract",
     # Extract
     "check_extract",

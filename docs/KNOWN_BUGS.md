@@ -34,6 +34,9 @@
 | BUG-025 | 2026-11-20 | `services/file_service.py` | Rollback về phiên bản cũ kế thừa nhầm `stale_steps` / `stale_reason` ("Bản trích chọn vừa được AI tạo lại...") của snapshot lịch sử | `tests/test_regressions.py::test_bug_025_rollback_clears_stale_steps_and_stale_reason` |
 | BUG-026 | 2026-11-20 | `pipeline.py`, `services/file_service.py`, `web/routes/process.py`, `report.py`, `memory.py`, `web/static/modules/editor.js` | Chỉnh sửa phong cách thủ công (và chạy lại Trích chọn & Biên soạn) vẫn giữ nguyên ghi chú giải thích `label.reason`, độ chắc chắn và cờ cảnh báo của phong cách AI cũ | `tests/test_regressions.py::test_bug_026_*` |
 | BUG-027 | 2026-11-20 | `config.yaml`, `llm/{base,gemini}.py`, `memory.py`, `web/templates/index.html` | Nâng lên xử lý song song 3 luồng an toàn với mạch ngắt bão `503` tiết kiệm RPD, giãn nhịp cổng toàn cục & hạ nhiệt dùng chung chống `429 QPS` | `tests/test_regressions.py::test_bug_027_*` |
+| BUG-029 | 2026-11-20 | `services/batch_service.py`, `web/routes/{process,files,review,system}.py`, `web/static/` | Khi đã chạy đủ số luồng cho phép (vd 3/3), bấm 1 trong 5 nút AI ở file đang xem phải xếp hàng chờ lượt thay vì tạo thêm luồng thứ N+1 | `tests/test_regressions.py::test_bug_029_*` |
+| BUG-028 | 2026-11-20 | `textutil.py`, `checks/abstract_checks.py`, `pipeline.py`, `prompts.py`, `prompts/abstract.md` | Bản biên soạn xuất hiện ký tự `\n` viết thô (`S89777`) do LLM double-escape trong JSON; thêm làm sạch ở cả đơn/đa văn bản và lỗi cơ học `literal_escape` | `tests/test_regressions.py::test_bug_028_*` |
+| BUG-030 | 2026-11-20 | `web/static/{app.css,modules/{utils,sidebar,editor}.js}`, `web/templates/index.html` | Ấn chọn file ở cột bên trái làm danh sách tự cuộn xuống dưới ngay lập tức (nhất là khi zoom trình duyệt `< 100%`) | `tests/test_regressions.py::test_bug_030_sidebar_click_preserves_scroll_contract_and_behavior` |
 
 ---
 
@@ -307,6 +310,39 @@
   - Lỗi `503` / tạm thời bị giới hạn theo cả từng lượt (`max_transient_per_model: 8`) lẫn mạch hạ nhiệt dùng chung cho 3 luồng (`model_outage_threshold: 5`, `model_outage_cooldown_s: 30s`) khi còn model dự phòng khả dụng, ngăn đốt RPD hàng loạt mà vẫn tự phục hồi model chính sau cooldown.
   - `BaseClient._sem_lock` và `memory._MEMORY_LOCK` bảo vệ tài nguyên dùng chung khi thao tác đa luồng.
 - **Regression Test**: `tests/test_regressions.py::test_bug_027_three_workers_safe_and_pacing_contract`, `test_bug_027_503_circuit_breaker_and_outage_cooldown_saves_rpd`, `test_bug_027_anti_qps_stagger_shared_cooldown_and_retry_differentiation`, `test_bug_027_memory_and_semaphore_thread_safety`
+
+### BUG-028: Bản biên soạn xuất hiện ký tự `\n` viết thô (`S89777`)
+- **Commit / Nguồn**: Sửa đổi ngày 2026-11-20 trong `src/tomtat/{textutil.py,checks/abstract_checks.py,checks/__init__.py,pipeline.py,prompts.py}`, `prompts/abstract.md`, và dữ liệu `work/S89777`
+- **File / Symbol**: `src/tomtat/textutil.py` (`find_literal_escapes`, `unescape_escaped_newlines`), `src/tomtat/checks/abstract_checks.py` (`clean_abstract_text`, `clean_multi_doc_abstract`, `check_abstract`), `src/tomtat/pipeline.py` (`_generate_abstract_loop`), `src/tomtat/prompts.py` (`ABSTRACT_SCHEMA`), `prompts/abstract.md`
+- **Triệu chứng**: Ở văn bản `S89777.docx`, phần "Bản biên soạn" hiển thị liền một khối có dính chữ `\n` thô (`...tim mạch.\nTheo khuyến cáo...`) thay vì xuống dòng tách đoạn.
+- **Nguyên nhân gốc**: `prompts/abstract.md` và `ABSTRACT_SCHEMA` mô tả `"các đoạn cách nhau bằng \\n"`, khiến model đôi lúc double-escape thành `\\n` trong JSON trả về; đồng thời `_generate_abstract_loop` chỉ chạy `clean_multi_doc_abstract` khi `n_docs > 1` (bỏ qua đơn văn bản) và `check_abstract` chưa bắt lỗi chuỗi thoát viết thô (`\n`, `\r`, `\t`).
+- **Bất biến cần bảo vệ**:
+  - `prompts/abstract.md` và `ABSTRACT_SCHEMA` yêu cầu xuống dòng thực sự trong chuỗi JSON và nghiêm cấm viết ký tự `\n` / `\n\n` theo nghĩa đen.
+  - `_generate_abstract_loop` luôn chạy `clean_abstract_text(..., n_docs=n_docs, preserve_source=src_plain)` cho cả **đơn văn bản lẫn đa văn bản** để tự chuyển `\\n`/`\\r\\n`/`\\t` viết thô thành xuống dòng thực mà không làm hỏng đường dẫn Windows hay token có sẵn trong văn bản gốc.
+  - `check_abstract` / `run_checks` bắt buộc báo `ERROR` mã `literal_escape` nếu bản biên soạn còn sót ký tự `\n`, `\r`, `\t` viết thô (chặn duyệt/xuất `.docx` và khiến `process_file(..., restart=False)` tự sửa lại state cũ lỗi).
+- **Regression Test**: `tests/test_regressions.py::test_bug_028_unescape_and_detect_literal_escapes`, `tests/test_regressions.py::test_bug_028_checks_pipeline_and_prompt_prevent_literal_newline_export`
+
+### BUG-029: Bấm 1 trong 5 nút AI khi đang chạy đủ số luồng cho phép phải chờ lượt, không tạo thêm luồng thứ N+1
+- **Commit / Nguồn**: Sửa đổi ngày 2026-11-20 trong `src/tomtat/services/batch_service.py`, `src/tomtat/web/routes/{process,files,review,system}.py`, `src/tomtat/web/static/`, `src/tomtat/web/templates/index.html`
+- **File / Symbol**: `src/tomtat/services/batch_service.py` (`BatchManager.reserve_rerun`, `run_rerun_job`, `_run_all`, `_allowed_workers_unlocked`, `_active_slots_unlocked`, `stop_file`, `stop`, `status`), `src/tomtat/web/routes/process.py` (`api_rerun`, `api_process_batch`), `src/tomtat/web/routes/files.py` (`api_files`, `api_get_logs`), `src/tomtat/web/routes/review.py` (`_check_not_running`, `api_approve`), `src/tomtat/web/routes/system.py` (`api_self_update`), `src/tomtat/web/static/{app.js,app.css,modules/{state,sidebar,editor,batch,modals}.js}`
+- **Triệu chứng**: Khi hệ thống đang chạy đủ số luồng cho phép (ví dụ 3/3 luồng batch hoặc 3/3 luồng rerun), nếu người dùng mở xem một file khác và bấm 1 trong 5 nút AI (`Gán nhãn lại`, `Trích chọn lại`, `Biên soạn lại`, `Chấm G-Eval`, `Chạy lại cả bài`), request `/api/file/<stem>/rerun` chạy ngay lập tức trên luồng Flask riêng, tạo thành luồng AI thứ 4 vượt quá trần `workers` / `max_workers` và dễ gây burst QPS/RPM.
+- **Nguyên nhân gốc**: `BatchManager.start` dùng `ThreadPoolExecutor` tách biệt khỏi `try_acquire_file` của `api_rerun`; `try_acquire_file` chỉ kiểm tra trùng cùng một `stem` mà không dùng chung ngân sách slot luồng hay hàng chờ với các tiến trình đang chạy.
+- **Bất biến cần bảo vệ**:
+  - Tổng số file đang thực sự chạy AI đồng thời (`len(running_stems | set(rerun_stems))`) **tuyệt đối không bao giờ** vượt quá `allowed_workers` (bị kẹp bởi `workers` / `max_workers` và `concurrency` của batch đang chạy).
+  - Khi tất cả slot đã kín, `POST /api/file/<stem>/rerun` (cả `async=True` lẫn `async=False`) phải đưa file vào hàng chờ FIFO `_queued_reruns` (nhường lượt ngay cho file này khi 1 trong các luồng đang chạy hoàn thành, trước các file chưa bắt đầu trong `_batch_pending`), không bao giờ khởi chạy luồng AI thứ `N+1`.
+  - File đang trong hàng chờ (`queued_rerun_stems`) vẫn bị chặn `409` ở `/save`, `/restore`, `/approve`, `/self-update`, không thể bấm chạy trùng và có thể bấm `⏹ Hủy chờ AI` / `⏹ Dừng` ngay lập tức mà không tốn lượt gọi API.
+- **Regression Test**: `tests/test_regressions.py::test_bug_029_single_file_rerun_waits_when_batch_full_and_never_creates_extra_thread`, `test_bug_029_multiple_single_reruns_and_explicit_batch_concurrency_respected`, `test_bug_029_cancel_queued_rerun_and_frontend_queue_contract`
+
+### BUG-030: Ấn chọn file ở cột bên trái làm danh sách tự cuộn xuống dưới ngay lập tức
+- **Commit / Nguồn**: Sửa đổi ngày 2026-11-20 trong `src/tomtat/web/static/{app.css,modules/{utils,sidebar,editor}.js}`, `src/tomtat/web/templates/index.html`
+- **File / Symbol**: `src/tomtat/web/static/app.css` (`.file-list`, `.docs-container`, `.versions-list`), `src/tomtat/web/static/modules/utils.js` (`withPreservedScroll`), `src/tomtat/web/static/modules/sidebar.js` (`syncActiveFileItem`, `renderFileList`, `renderDoneList`), `src/tomtat/web/static/modules/editor.js` (`selectFile`, `renderEditor`, `renderDocsUnits`, `renderVersions`, `assembleFromSelections`)
+- **Triệu chứng**: Khi người dùng cuộn cột `Chờ duyệt` xuống vùng giữa (vd ở `S89592`) rồi bấm vào một file bất kỳ (vd `S89590`), khung danh sách bên trái lập tức tự động cuộn mạnh xuống dưới (tới tận cuối danh sách `S89512`), làm khuất chính file vừa chọn.
+- **Nguyên nhân gốc**: `selectFile` gọi lại `renderFileList()` vốn xóa sạch DOM qua `ul.innerHTML = ""` rồi tạo lại toàn bộ các thẻ `<li>` chỉ để đổi class `.active`; đồng thời `.file-list`, `.docs-container`, `.versions-list` giữ mặc định `overflow-anchor: auto`. Khi trình duyệt Chromium (Chrome/Edge) ở mức zoom `< 100%` (như `90%`), cơ chế Scroll Anchoring của Blink tính lệch hệ số zoom mỗi lần DOM trong vùng cuộn bị phá hủy và dựng lại, đẩy `scrollTop` nhảy tăng vọt xuống dưới; ngoài ra mọi lần `renderFileList` từ SSE/polling cũng đối mặt nguy cơ tương tự hoặc reset về `0`.
+- **Bất biến cần bảo vệ**:
+  - `.file-list`, `.docs-container` và `.versions-list` trong `app.css` phải đặt `overflow-anchor: none` để tắt Scroll Anchoring gây nhảy `scrollTop` ở các vùng cuộn động khi zoom khác `100%`.
+  - `selectFile` không được xóa/dựng lại DOM danh sách bên trái khi file đã có sẵn trong `#file-list` / `#done-list`; phải dùng `syncActiveFileItem()` cập nhật tại chỗ class `.active`.
+  - Mọi lần buộc phải dựng lại DOM (`renderFileList`, `renderDoneList`, `renderDocsUnits({ preserveScroll: true })`, `renderVersions`) đều phải bọc qua `withPreservedScroll` để bảo toàn `scrollTop`/`scrollLeft` (chỉ reset về `0` cho `docs-container` và `versions-list` khi chuyển sang file khác).
+- **Regression Test**: `tests/test_regressions.py::test_bug_030_sidebar_click_preserves_scroll_contract_and_behavior`
 
 ---
 

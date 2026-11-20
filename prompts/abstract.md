@@ -20,14 +20,14 @@ Hãy viết bản tóm tắt biên soạn (`abstract`) cho (các) văn bản g�
    - **Tuyệt đối không bịa thêm ý hay số liệu ngoài bản gốc.**
    - **Mọi con số xuất hiện trong bản biên soạn đều phải có mặt nguyên dạng trong văn bản gốc** (không làm tròn số, không đổi dạng viết, giữ nguyên dấu phẩy thập phân như `18,5`).
 3. **Định dạng văn bản thuần cho ô bảng Word:**
-   - Đối với đơn văn bản, các đoạn văn cách nhau bằng ký tự xuống dòng (`\n`).
+   - Đối với đơn văn bản, ngắt các đoạn văn bằng xuống dòng thực sự (dòng mới trong chuỗi JSON); TUYỆT ĐỐI KHÔNG viết hai ký tự `\n` theo nghĩa đen ra văn bản.
    - KHÔNG dùng ký hiệu Markdown (`**in đậm**`, `# tiêu đề`, `*in nghiêng*`).
    - Không có khoảng trắng thừa trước dấu câu, không có khoảng trắng kép; đóng mở ngoặc đơn `()` và ngoặc kép `""` / `“”` cân bằng.
 
 {% if (docs | length) > 1 %}
 4. **QUY TẮC ĐẶC BIỆT BẮT BUỘC CHO ĐA VĂN BẢN ({{ docs | length }} VĂN BẢN ĐỘC LẬP):**
    - **Mỗi bài ở file đa văn bản là độc lập (mỗi bài là một hàng), không dính líu gì tới nhau.** Vì vậy phần biên soạn cho từng bài cũng phải hoàn toàn độc lập.
-   - **Giữa các đoạn tóm tắt của từng văn bản BẮT BUỘC để trống 1 dòng** (ngăn cách bằng hai ký tự xuống dòng `\n\n`). Tuyệt đối không viết dính liền nhau.
+   - **Giữa các đoạn tóm tắt của từng văn bản BẮT BUỘC để trống 1 dòng** (tạo 1 dòng trắng phân cách giữa các đoạn trong chuỗi JSON). Tuyệt đối không viết dính liền nhau và KHÔNG viết chuỗi ký tự `\n\n` theo nghĩa đen.
    - **TUYỆT ĐỐI KHÔNG thêm từ nối hoặc câu dẫn dắt giữa hai đoạn** (CẤM các từ/câu như: *"Trong chia sẻ khác"*, *"Ở một chia sẻ khác"*, *"Bên cạnh đó"*, *"Mặt khác"*, *"Ngoài ra"*, *"Văn bản 2..."*, v.v.).
    - Hãy **đâm thẳng trực tiếp vào tóm tắt nội dung** của từng văn bản (Ví dụ: thay vì viết *"Trong chia sẻ khác, ngành dịch vụ được xem là..."*, hãy viết thẳng: *"Ngành dịch vụ được xem là..."*).
 {% endif %}

@@ -44,12 +44,22 @@ def api_files():
     running_stems: list[str] = []
     running_steps: dict[str, str] = {}
     stopping_stems: list[str] = []
+    queued_rerun_stems: list[str] = []
+    queued_rerun_steps: dict[str, str] = {}
+    queued_rerun_positions: dict[str, int] = {}
+    queued_reruns: list[dict] = []
+    allowed_workers = scaling.get("recommended_workers", 1)
     mgr = current_app.config.get("TOMTAT_BATCH_MGR")
     if mgr is not None:
         bst = mgr.status()
         running_stems = bst.get("all_running", bst.get("running", []))
         running_steps = bst.get("all_running_steps", bst.get("running_steps", {}))
         stopping_stems = bst.get("stopping_stems", [])
+        queued_rerun_stems = bst.get("queued_rerun_stems", [])
+        queued_rerun_steps = bst.get("queued_rerun_steps", {})
+        queued_rerun_positions = bst.get("queued_rerun_positions", {})
+        queued_reruns = bst.get("queued_reruns", [])
+        allowed_workers = bst.get("allowed_workers", allowed_workers)
     return jsonify({
         "files": rows,
         "styles": STYLES,
@@ -58,6 +68,7 @@ def api_files():
         "has_api_key": bool(keys),
         "api_key_count": len(keys),
         "pool_scaling": scaling,
+        "allowed_workers": allowed_workers,
         "primary_model": g.get("model", ""),
         "fallback_models": g.get("fallback_models") or [],
         "learned_count": svc.get_learned_count(),
@@ -65,6 +76,10 @@ def api_files():
         "running_stems": running_stems,
         "running_steps": running_steps,
         "stopping_stems": stopping_stems,
+        "queued_rerun_stems": queued_rerun_stems,
+        "queued_rerun_steps": queued_rerun_steps,
+        "queued_rerun_positions": queued_rerun_positions,
+        "queued_reruns": queued_reruns,
     })
 
 
@@ -184,6 +199,10 @@ def api_get_logs(stem: str):
     running_stems: list[str] = []
     running_steps: dict[str, str] = {}
     stopping_stems: list[str] = []
+    queued_rerun_stems: list[str] = []
+    queued_rerun_steps: dict[str, str] = {}
+    queued_rerun_positions: dict[str, int] = {}
+    allowed_workers = 0
     batch_active = False
     mgr = current_app.config.get("TOMTAT_BATCH_MGR")
     if mgr is not None:
@@ -192,6 +211,10 @@ def api_get_logs(stem: str):
         running_stems = bst.get("all_running", bst.get("running", []))
         running_steps = bst.get("all_running_steps", bst.get("running_steps", {}))
         stopping_stems = bst.get("stopping_stems", [])
+        queued_rerun_stems = bst.get("queued_rerun_stems", [])
+        queued_rerun_steps = bst.get("queued_rerun_steps", {})
+        queued_rerun_positions = bst.get("queued_rerun_positions", {})
+        allowed_workers = bst.get("allowed_workers", 0)
     res = svc.get_file_logs(
         stem,
         is_running=(stem in running_stems),
@@ -202,4 +225,8 @@ def api_get_logs(stem: str):
     res["running_stems"] = running_stems
     res["running_steps"] = running_steps
     res["stopping_stems"] = stopping_stems
+    res["queued_rerun_stems"] = queued_rerun_stems
+    res["queued_rerun_steps"] = queued_rerun_steps
+    res["queued_rerun_positions"] = queued_rerun_positions
+    res["allowed_workers"] = allowed_workers
     return jsonify(res)

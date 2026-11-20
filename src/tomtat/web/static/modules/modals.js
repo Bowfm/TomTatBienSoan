@@ -9,7 +9,7 @@ import {
   restoreVersion,
 } from "./editor.js";
 import { renderRpdStatus } from "./sidebar.js";
-import { store } from "./state.js";
+import { isStemBusy, store } from "./state.js";
 import { $, api, escapeHtml, showToast } from "./utils.js";
 
 let LOGS_POLL_TIMER = null;
@@ -177,6 +177,11 @@ function renderLogsToolbar(data) {
   if (data.current_step && LOG_VIEW_STEM) {
     runningSteps[LOG_VIEW_STEM] = data.current_step;
   }
+  const queuedSet = new Set(
+    [...(data.queued_rerun_stems || []), ...store.QUEUED_STEMS].filter((s) => !runningSet.has(s))
+  );
+  const queuedSteps = { ...store.QUEUED_STEPS, ...(data.queued_rerun_steps || {}) };
+  const queuedPositions = { ...store.QUEUED_POSITIONS, ...(data.queued_rerun_positions || {}) };
 
   const sel = $("logs-file-select");
   if (sel) {
@@ -192,15 +197,23 @@ function renderLogsToolbar(data) {
     if (LOG_VIEW_STEM && !seen.has(LOG_VIEW_STEM)) {
       allStems.unshift(LOG_VIEW_STEM);
     }
-    const optsSig = allStems.map((s) => `${s}:${runningSet.has(s) ? 1 : 0}:${runningSteps[s] || ""}`).join("|");
+    const optsSig = allStems
+      .map((s) => `${s}:${runningSet.has(s) ? 1 : queuedSet.has(s) ? 2 : 0}:${runningSteps[s] || queuedSteps[s] || ""}:${queuedPositions[s] || 0}`)
+      .join("|");
     if (sel.dataset.sig !== optsSig) {
       sel.dataset.sig = optsSig;
       sel.innerHTML = allStems
         .map((s) => {
           const isRun = runningSet.has(s);
-          const stp = STEP_NAMES_VI[runningSteps[s]] || runningSteps[s] || "";
-          const prefix = isRun ? "⏳ " : "";
-          const suffix = isRun && stp ? ` (đang chạy: ${stp})` : "";
+          const isQ = !isRun && queuedSet.has(s);
+          const stp = STEP_NAMES_VI[isQ ? queuedSteps[s] : runningSteps[s]] || (isQ ? queuedSteps[s] : runningSteps[s]) || "";
+          const prefix = isRun || isQ ? "⏳ " : "";
+          const qPos = queuedPositions[s];
+          const suffix = isRun && stp
+            ? ` (đang chạy: ${stp})`
+            : isQ
+              ? ` (chờ lượt${qPos ? ` #${qPos}` : ""}${stp ? `: ${stp}` : ""})`
+              : "";
           return `<option value="${escapeHtml(s)}">${prefix}${escapeHtml(s)}.docx${escapeHtml(suffix)}</option>`;
         })
         .join("");
@@ -214,6 +227,7 @@ function renderLogsToolbar(data) {
   const isThisRunning = Boolean(
     (LOG_VIEW_STEM && runningSet.has(LOG_VIEW_STEM)) || data.current_step || hasInProgressCall
   );
+  const isThisQueued = Boolean(!isThisRunning && LOG_VIEW_STEM && queuedSet.has(LOG_VIEW_STEM));
   const ind = $("logs-live-indicator");
   if (ind) {
     const curStep = (LOG_VIEW_STEM && runningSteps[LOG_VIEW_STEM]) || data.current_step || "";
@@ -221,6 +235,12 @@ function renderLogsToolbar(data) {
     if (isThisRunning) {
       ind.className = "logs-live-indicator is-live";
       ind.innerHTML = `<span class="live-dot"></span> Đang chạy trực tiếp${stepVi ? ` · Bước: <strong>${escapeHtml(stepVi)}</strong>` : ""}`;
+    } else if (isThisQueued) {
+      const qStep = (LOG_VIEW_STEM && queuedSteps[LOG_VIEW_STEM]) || "";
+      const qStepVi = STEP_NAMES_VI[qStep] || qStep || "";
+      const qPos = (LOG_VIEW_STEM && queuedPositions[LOG_VIEW_STEM]) || 0;
+      ind.className = "logs-live-indicator is-queued";
+      ind.innerHTML = `⏳ Đang chờ lượt${qPos ? ` (#${qPos})` : ""}${qStepVi ? ` · Bước: <strong>${escapeHtml(qStepVi)}</strong>` : ""}`;
     } else {
       ind.className = "logs-live-indicator";
       ind.innerHTML = `🟢 Tự động cập nhật thời gian thực (${escapeHtml(data.status_vi || "đã dừng")})`;
@@ -230,17 +250,33 @@ function renderLogsToolbar(data) {
   const runBar = $("logs-running-bar");
   if (runBar) {
     const runList = Array.from(runningSet);
-    if (runList.length > 0) {
+    const qList = Array.from(queuedSet).sort(
+      (a, b) => Number(queuedPositions[a] || 999) - Number(queuedPositions[b] || 999)
+    );
+    if (runList.length > 0 || qList.length > 0) {
       runBar.classList.remove("hidden");
-      runBar.innerHTML =
-        `<span style="font-weight:600;font-size:12px;color:#1e40af">⚡ Các luồng đang chạy song song (${runList.length}):</span>` +
-        runList
-          .map((s) => {
-            const stp = STEP_NAMES_VI[runningSteps[s]] || runningSteps[s] || "Đang xử lý";
-            const activeCls = s === LOG_VIEW_STEM ? " active" : "";
-            return `<button type="button" class="log-run-pill${activeCls}" data-log-stem="${escapeHtml(s)}">⏳ ${escapeHtml(s)}.docx <small>(${escapeHtml(stp)})</small></button>`;
-          })
-          .join("");
+      const runHtml = runList.length
+        ? `<span style="font-weight:600;font-size:12px;color:#1e40af">⚡ Các luồng đang chạy song song (${runList.length}):</span>` +
+          runList
+            .map((s) => {
+              const stp = STEP_NAMES_VI[runningSteps[s]] || runningSteps[s] || "Đang xử lý";
+              const activeCls = s === LOG_VIEW_STEM ? " active" : "";
+              return `<button type="button" class="log-run-pill${activeCls}" data-log-stem="${escapeHtml(s)}">⏳ ${escapeHtml(s)}.docx <small>(${escapeHtml(stp)})</small></button>`;
+            })
+            .join("")
+        : "";
+      const qHtml = qList.length
+        ? `<span style="font-weight:600;font-size:12px;color:#0369a1;margin-left:4px">🕒 Hàng chờ (${qList.length}):</span>` +
+          qList
+            .map((s) => {
+              const stp = STEP_NAMES_VI[queuedSteps[s]] || queuedSteps[s] || "Đang chờ";
+              const qPos = queuedPositions[s];
+              const activeCls = s === LOG_VIEW_STEM ? " active" : "";
+              return `<button type="button" class="log-run-pill log-queue-pill${activeCls}" data-log-stem="${escapeHtml(s)}">🕒 ${qPos ? `#${qPos} ` : ""}${escapeHtml(s)}.docx <small>(${escapeHtml(stp)})</small></button>`;
+            })
+            .join("")
+        : "";
+      runBar.innerHTML = runHtml + qHtml;
       runBar.querySelectorAll("button[data-log-stem]").forEach((btn) => {
         btn.addEventListener("click", () => switchLogsViewStem(btn.dataset.logStem));
       });
@@ -266,13 +302,42 @@ function renderLogsItems(data) {
     container.innerHTML = "";
   }
 
+  const runningSet = new Set([...(data.running_stems || []), ...store.RUNNING_STEMS]);
+  const queuedSet = new Set(
+    [...(data.queued_rerun_stems || []), ...store.QUEUED_STEMS].filter((s) => !runningSet.has(s))
+  );
+  const queuedSteps = { ...store.QUEUED_STEPS, ...(data.queued_rerun_steps || {}) };
+  const queuedPositions = { ...store.QUEUED_POSITIONS, ...(data.queued_rerun_positions || {}) };
+  const isThisQueued = Boolean(LOG_VIEW_STEM && queuedSet.has(LOG_VIEW_STEM));
+
   if (!logs.length) {
-    container.innerHTML = `<div class="muted" id="logs-empty-msg">Chưa có lượt gọi Gemini nào cho file <strong>${escapeHtml(LOG_VIEW_STEM || "")}.docx</strong>. Khi AI bắt đầu gọi API, log sẽ hiện ngay tại đây theo thời gian thực.</div>`;
+    if (isThisQueued) {
+      const qStep = queuedSteps[LOG_VIEW_STEM] || "";
+      const qStepVi = STEP_NAMES_VI[qStep] || qStep || "Chạy AI";
+      const qPos = queuedPositions[LOG_VIEW_STEM] || 1;
+      const maxW = Number(data.allowed_workers || store.ALLOWED_WORKERS || 3);
+      container.innerHTML = `<div id="logs-queue-banner" class="logs-queue-banner">⏳ File <strong>${escapeHtml(LOG_VIEW_STEM)}.docx</strong> đang chờ lượt (vị trí <strong>#${qPos}</strong> · Bước: <strong>${escapeHtml(qStepVi)}</strong>) do hiện đã chạy đủ ${runningSet.size}/${maxW} luồng AI cho phép. File sẽ tự động chạy ngay khi 1 luồng đang chạy hoàn thành.</div>`;
+    } else {
+      container.innerHTML = `<div class="muted" id="logs-empty-msg">Chưa có lượt gọi Gemini nào cho file <strong>${escapeHtml(LOG_VIEW_STEM || "")}.docx</strong>. Khi AI bắt đầu gọi API, log sẽ hiện ngay tại đây theo thời gian thực.</div>`;
+    }
     return;
   }
 
   const emptyMsg = $("logs-empty-msg");
   if (emptyMsg) emptyMsg.remove();
+  const existingQBanner = $("logs-queue-banner");
+  if (existingQBanner) existingQBanner.remove();
+  if (isThisQueued) {
+    const qStep = queuedSteps[LOG_VIEW_STEM] || "";
+    const qStepVi = STEP_NAMES_VI[qStep] || qStep || "Chạy AI";
+    const qPos = queuedPositions[LOG_VIEW_STEM] || 1;
+    const maxW = Number(data.allowed_workers || store.ALLOWED_WORKERS || 3);
+    const qb = document.createElement("div");
+    qb.id = "logs-queue-banner";
+    qb.className = "logs-queue-banner";
+    qb.innerHTML = `⏳ Yêu cầu mới (Bước: <strong>${escapeHtml(qStepVi)}</strong>) đang chờ lượt ở vị trí <strong>#${qPos}</strong> do đã chạy đủ ${runningSet.size}/${maxW} luồng AI cho phép. Sẽ tự chạy ngay khi 1 luồng hoàn thành.`;
+    container.prepend(qb);
+  }
 
   const existingMap = new Map();
   container.querySelectorAll("details[data-log-fn]").forEach((el) => {
@@ -575,7 +640,7 @@ export async function openVersionsModal(focusVersion = null) {
     const curVer = Number((store.CURRENT_STATE || {}).current_version || 0);
     const dirty = hasUnsavedVersionChanges();
     const isExactCurrent = !dirty && curVer > 0 && vNum === curVer;
-    const isRunning = store.RUNNING_STEMS.has(stem);
+    const isRunning = isStemBusy(stem);
 
     const curStyle = ($("sel-style") ? $("sel-style").value : "").trim();
     const curExt = $("txt-extract") ? $("txt-extract").value : "";

@@ -9,13 +9,15 @@ import {
   renderFileList,
   renderRpdStatus,
   sortFiles,
+  syncActiveFileItem,
   syncRunningProgressBar,
 } from "./sidebar.js";
-import { store } from "./state.js";
-import { $, api, escapeHtml, showToast } from "./utils.js";
+import { isStemBusy, isStemQueued, isStemRunning, store } from "./state.js";
+import { $, api, escapeHtml, showToast, withPreservedScroll } from "./utils.js";
 
 let checkTimer = null;
 let _previewVersionHandler = null;
+let _ensureTrackingHandler = null;
 let _lastRenderedStem = null;
 
 export const STEP_NAMES_VI = {
@@ -50,6 +52,10 @@ export const VERSION_SOURCE_VI = {
 
 export function registerPreviewVersionHandler(fn) {
   _previewVersionHandler = fn;
+}
+
+export function registerEnsureTrackingHandler(fn) {
+  _ensureTrackingHandler = fn;
 }
 
 export function formatVersionTime(isoStr) {
@@ -168,7 +174,9 @@ export async function selectFile(stem, opts = {}) {
     store.CUSTOM_EDITED = Boolean((store.CURRENT_STATE.extract || {}).custom_edited);
     initSelectionsFromState();
     if (!opts.skipSidebarRender) {
-      renderFileList();
+      if (!syncActiveFileItem()) {
+        renderFileList();
+      }
     }
     renderEditor(data.versions || []);
   } catch (err) {
@@ -269,7 +277,7 @@ export function renderFlagsAndStale() {
   if (!st) return;
   const staleSteps = Array.isArray(st.stale_steps) ? st.stale_steps : [];
   const staleSet = new Set(staleSteps);
-  const isRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
+  const isRunning = isStemBusy(store.CURRENT_STEM);
 
   const syncStaleCard = (cardId, badgeId, stepKey) => {
     const card = $(cardId);
@@ -420,63 +428,71 @@ export function renderEditor(versions) {
 
   $("txt-extract").value = (st.extract || {}).text || "";
   $("txt-abstract").value = (st.abstract || {}).text || "";
-  if (_lastRenderedStem !== st.stem) {
+  const stemChanged = _lastRenderedStem !== st.stem;
+  if (stemChanged) {
     if ($("version-note")) $("version-note").value = "";
     _lastRenderedStem = st.stem;
   }
 
-  renderDocsUnits();
+  renderDocsUnits({ preserveScroll: !stemChanged });
   renderChecks(st.checks);
   renderJudge(st.judge);
-  renderVersions(versions);
+  renderVersions(versions, { resetScroll: stemChanged });
   syncRerunButtonsState();
 }
 
-export function renderDocsUnits() {
+export function renderDocsUnits(opts = {}) {
   const box = $("docs-container");
-  box.innerHTML = "";
-  for (const d of store.CURRENT_UNITS.docs || []) {
-    const selSet = store.SELECTIONS[d.n] || new Set();
-    const block = document.createElement("div");
-    block.className = "doc-block";
-    const head = document.createElement("div");
-    head.className = "doc-header";
-    head.innerHTML = `
-      <span>Văn bản ${d.n} (${d.words} từ, ${d.units.length} câu/đề mục)</span>
-      <span>
-        <button class="btn btn-sm" data-doc-act="all" data-doc="${d.n}">Chọn hết</button>
-        <button class="btn btn-sm" data-doc-act="none" data-doc="${d.n}">Bỏ hết</button>
-      </span>
-    `;
-    block.appendChild(head);
+  if (!box) return;
+  withPreservedScroll(
+    box,
+    () => {
+      box.innerHTML = "";
+      for (const d of store.CURRENT_UNITS.docs || []) {
+        const selSet = store.SELECTIONS[d.n] || new Set();
+        const block = document.createElement("div");
+        block.className = "doc-block";
+        const head = document.createElement("div");
+        head.className = "doc-header";
+        head.innerHTML = `
+          <span>Văn bản ${d.n} (${d.words} từ, ${d.units.length} câu/đề mục)</span>
+          <span>
+            <button class="btn btn-sm" data-doc-act="all" data-doc="${d.n}">Chọn hết</button>
+            <button class="btn btn-sm" data-doc-act="none" data-doc="${d.n}">Bỏ hết</button>
+          </span>
+        `;
+        block.appendChild(head);
 
-    for (const unit of d.units) {
-      const row = document.createElement("label");
-      const checked = selSet.has(unit.id);
-      row.className = "unit-item" + (checked ? " selected" : "");
-      row.dataset.doc = d.n;
-      row.dataset.uid = unit.id;
-      row.innerHTML = `
-        <input type="checkbox" ${checked ? "checked" : ""}>
-        <span class="unit-id">[${unit.id}] (${unit.words}w)</span>
-        <span class="unit-text">${escapeHtml(unit.text)}</span>
-      `;
-      const cb = row.querySelector("input");
-      cb.addEventListener("change", () => onToggleUnit(d.n, unit.id, cb.checked));
-      block.appendChild(row);
-    }
-    box.appendChild(block);
-  }
-  box.querySelectorAll("button[data-doc-act]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const dn = Number(btn.dataset.doc);
-      const act = btn.dataset.docAct;
-      const docObj = store.CURRENT_UNITS.docs.find((x) => x.n === dn);
-      if (!docObj) return;
-      store.SELECTIONS[dn] = act === "all" ? new Set(docObj.units.map((u) => u.id)) : new Set();
-      assembleFromSelections();
-    });
-  });
+        for (const unit of d.units) {
+          const row = document.createElement("label");
+          const checked = selSet.has(unit.id);
+          row.className = "unit-item" + (checked ? " selected" : "");
+          row.dataset.doc = d.n;
+          row.dataset.uid = unit.id;
+          row.innerHTML = `
+            <input type="checkbox" ${checked ? "checked" : ""}>
+            <span class="unit-id">[${unit.id}] (${unit.words}w)</span>
+            <span class="unit-text">${escapeHtml(unit.text)}</span>
+          `;
+          const cb = row.querySelector("input");
+          cb.addEventListener("change", () => onToggleUnit(d.n, unit.id, cb.checked));
+          block.appendChild(row);
+        }
+        box.appendChild(block);
+      }
+      box.querySelectorAll("button[data-doc-act]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const dn = Number(btn.dataset.doc);
+          const act = btn.dataset.docAct;
+          const docObj = store.CURRENT_UNITS.docs.find((x) => x.n === dn);
+          if (!docObj) return;
+          store.SELECTIONS[dn] = act === "all" ? new Set(docObj.units.map((u) => u.id)) : new Set();
+          assembleFromSelections();
+        });
+      });
+    },
+    { reset: !opts.preserveScroll }
+  );
 }
 
 export async function onToggleUnit(docN, unitId, isChecked) {
@@ -507,7 +523,7 @@ export async function assembleFromSelections() {
     });
     store.CUSTOM_EDITED = false;
     $("txt-extract").value = data.extract || "";
-    renderDocsUnits();
+    renderDocsUnits({ preserveScroll: true });
     renderChecks(data.checks);
     syncVersionControls();
     autoSaveSilent();
@@ -641,7 +657,10 @@ export function renderChecks(chk) {
       list.appendChild(div);
     }
   }
-  $("btn-approve").disabled = (chk.n_errors || 0) > 0;
+  const approveBtn = $("btn-approve");
+  if (approveBtn) {
+    approveBtn.disabled = isStemBusy(store.CURRENT_STEM) || (chk.n_errors || 0) > 0;
+  }
 }
 
 export function renderJudge(j) {
@@ -670,7 +689,7 @@ export function syncVersionControls() {
   const curVer = Number((store.CURRENT_STATE || {}).current_version || 0);
   const dirty = hasUnsavedVersionChanges();
   const prevTarget = computePrevRollbackTarget();
-  const isRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
+  const isRunning = isStemBusy(store.CURRENT_STEM);
 
   const badge = $("cur-version-badge");
   if (badge) {
@@ -713,80 +732,86 @@ export function syncVersionControls() {
   }
 }
 
-export function renderVersions(versions) {
+export function renderVersions(versions, opts = {}) {
   store.CURRENT_VERSIONS = Array.isArray(versions) ? versions : [];
   const ul = $("versions-list");
   if (!ul) {
     syncVersionControls();
     return;
   }
-  ul.innerHTML = "";
-  const list = store.CURRENT_VERSIONS;
-  const curVer = Number((store.CURRENT_STATE || {}).current_version || 0);
-  const dirty = hasUnsavedVersionChanges();
+  withPreservedScroll(
+    ul,
+    () => {
+      ul.innerHTML = "";
+      const list = store.CURRENT_VERSIONS;
+      const curVer = Number((store.CURRENT_STATE || {}).current_version || 0);
+      const dirty = hasUnsavedVersionChanges();
 
-  if (!list.length) {
-    ul.innerHTML = `<li class="muted" style="padding:8px 4px">Chưa có version nào được lưu cho file này. Bấm <strong>💾 Lưu version</strong> hoặc chạy AI để tạo mốc đầu tiên.</li>`;
-    syncVersionControls();
-    return;
-  }
+      if (!list.length) {
+        ul.innerHTML = `<li class="muted" style="padding:8px 4px">Chưa có version nào được lưu cho file này. Bấm <strong>💾 Lưu version</strong> hoặc chạy AI để tạo mốc đầu tiên.</li>`;
+        syncVersionControls();
+        return;
+      }
 
-  for (const v of list) {
-    const vNum = Number(v.version || 0);
-    const vTag = formatVerTag(vNum);
-    const isExactCurrent = !dirty && curVer > 0 && vNum === curVer;
-    const srcLabel = VERSION_SOURCE_VI[v.source] || v.source || "Nháp";
-    const srcCls = versionSourceClass(v.source);
-    const extraApproveBadge =
-      v.approved && v.source !== "approve"
-        ? '<span class="badge ver-badge-src ver-badge-src-approve">✅ Đã duyệt</span>'
-        : "";
-    const lbVal = (v.label || {}).value || "(chưa nhãn)";
-    const ew = (v.extract || {}).words ?? 0;
-    const aw = (v.abstract || {}).words ?? 0;
-    const chk = v.checks_summary || {};
-    const chkTxt = chk.ok === true ? "✓ Đạt" : chk.ok === false ? `✕ ${chk.n_errors || 0} lỗi` : "—";
-    const modelTxt = v.model_used || (v.abstract || {}).model_used || (v.extract || {}).model_used || "";
-    const noteTxt = v.note ? ` · "${v.note}"` : "";
+      for (const v of list) {
+        const vNum = Number(v.version || 0);
+        const vTag = formatVerTag(vNum);
+        const isExactCurrent = !dirty && curVer > 0 && vNum === curVer;
+        const srcLabel = VERSION_SOURCE_VI[v.source] || v.source || "Nháp";
+        const srcCls = versionSourceClass(v.source);
+        const extraApproveBadge =
+          v.approved && v.source !== "approve"
+            ? '<span class="badge ver-badge-src ver-badge-src-approve">✅ Đã duyệt</span>'
+            : "";
+        const lbVal = (v.label || {}).value || "(chưa nhãn)";
+        const ew = (v.extract || {}).words ?? 0;
+        const aw = (v.abstract || {}).words ?? 0;
+        const chk = v.checks_summary || {};
+        const chkTxt = chk.ok === true ? "✓ Đạt" : chk.ok === false ? `✕ ${chk.n_errors || 0} lỗi` : "—";
+        const modelTxt = v.model_used || (v.abstract || {}).model_used || (v.extract || {}).model_used || "";
+        const noteTxt = v.note ? ` · "${v.note}"` : "";
 
-    const li = document.createElement("li");
-    if (isExactCurrent) li.className = "ver-active";
-    li.innerHTML = `
-      <div class="ver-item-main">
-        <div class="ver-item-head">
-          <strong>${escapeHtml(vTag)}</strong>
-          ${isExactCurrent ? '<span class="badge ver-badge-cur">Đang dùng</span>' : ""}
-          <span class="badge ver-badge-src ${srcCls}">${escapeHtml(srcLabel)}</span>
-          ${extraApproveBadge}
-          <span class="muted">${escapeHtml(formatVersionTime(v.saved_at))}</span>
-        </div>
-        <div class="ver-item-meta">
-          ${escapeHtml(lbVal)} · Trích ${ew}w · BSoạn ${aw}w · ${escapeHtml(chkTxt)}${modelTxt ? ` · 🤖 ${escapeHtml(modelTxt)}` : ""}${escapeHtml(noteTxt)}
-        </div>
-      </div>
-      <div class="ver-item-actions">
-        <button type="button" class="btn btn-sm" data-ver-preview="${vNum}" title="Xem nội dung &amp; so sánh với bản hiện tại">👁 Xem</button>
-        <button type="button" class="btn btn-sm" data-ver-restore="${vNum}" ${isExactCurrent ? "disabled" : ""}>${isExactCurrent ? "Đang dùng" : "↩ Rollback"}</button>
-      </div>
-    `;
-    const btnPrev = li.querySelector("button[data-ver-preview]");
-    if (btnPrev) {
-      btnPrev.addEventListener("click", () => {
-        if (_previewVersionHandler) _previewVersionHandler(vNum);
-      });
-    }
-    const btnRest = li.querySelector("button[data-ver-restore]");
-    if (btnRest) {
-      btnRest.addEventListener("click", () => restoreVersion(vNum));
-    }
-    ul.appendChild(li);
-  }
-  syncVersionControls();
+        const li = document.createElement("li");
+        if (isExactCurrent) li.className = "ver-active";
+        li.innerHTML = `
+          <div class="ver-item-main">
+            <div class="ver-item-head">
+              <strong>${escapeHtml(vTag)}</strong>
+              ${isExactCurrent ? '<span class="badge ver-badge-cur">Đang dùng</span>' : ""}
+              <span class="badge ver-badge-src ${srcCls}">${escapeHtml(srcLabel)}</span>
+              ${extraApproveBadge}
+              <span class="muted">${escapeHtml(formatVersionTime(v.saved_at))}</span>
+            </div>
+            <div class="ver-item-meta">
+              ${escapeHtml(lbVal)} · Trích ${ew}w · BSoạn ${aw}w · ${escapeHtml(chkTxt)}${modelTxt ? ` · 🤖 ${escapeHtml(modelTxt)}` : ""}${escapeHtml(noteTxt)}
+            </div>
+          </div>
+          <div class="ver-item-actions">
+            <button type="button" class="btn btn-sm" data-ver-preview="${vNum}" title="Xem nội dung &amp; so sánh với bản hiện tại">👁 Xem</button>
+            <button type="button" class="btn btn-sm" data-ver-restore="${vNum}" ${isExactCurrent ? "disabled" : ""}>${isExactCurrent ? "Đang dùng" : "↩ Rollback"}</button>
+          </div>
+        `;
+        const btnPrev = li.querySelector("button[data-ver-preview]");
+        if (btnPrev) {
+          btnPrev.addEventListener("click", () => {
+            if (_previewVersionHandler) _previewVersionHandler(vNum);
+          });
+        }
+        const btnRest = li.querySelector("button[data-ver-restore]");
+        if (btnRest) {
+          btnRest.addEventListener("click", () => restoreVersion(vNum));
+        }
+        ul.appendChild(li);
+      }
+      syncVersionControls();
+    },
+    { reset: Boolean(opts.resetScroll) }
+  );
 }
 
 export async function autoSaveSilent(opts = {}) {
   if (!store.CURRENT_STEM) return;
-  if (store.RUNNING_STEMS.has(store.CURRENT_STEM)) return;
+  if (isStemBusy(store.CURRENT_STEM)) return;
   try {
     const body = {
       style: $("sel-style").value,
@@ -807,7 +832,7 @@ export async function autoSaveSilent(opts = {}) {
       data.state &&
       store.CURRENT_STATE &&
       store.CURRENT_STATE.stem === store.CURRENT_STEM &&
-      !store.RUNNING_STEMS.has(store.CURRENT_STEM)
+      !isStemBusy(store.CURRENT_STEM)
     ) {
       const prevStale = JSON.stringify(store.CURRENT_STATE.stale_steps || []);
       const prevReason = store.CURRENT_STATE.stale_reason || null;
@@ -852,8 +877,8 @@ export async function autoSaveSilent(opts = {}) {
 
 export async function saveDraft() {
   if (!store.CURRENT_STEM) return;
-  if (store.RUNNING_STEMS.has(store.CURRENT_STEM)) {
-    showToast(`File ${store.CURRENT_STEM}.docx đang được AI xử lý, vui lòng đợi hoàn tất.`, true);
+  if (isStemBusy(store.CURRENT_STEM)) {
+    showToast(`File ${store.CURRENT_STEM}.docx đang chạy hoặc đang chờ lượt AI, vui lòng đợi hoàn tất.`, true);
     return;
   }
   clearTimeout(checkTimer);
@@ -883,17 +908,55 @@ export async function saveDraft() {
   }
 }
 
+export function applyRerunOutcome(stem, step, labelVi, data) {
+  if (!data) return;
+  if (data.cancelled) {
+    showToast(`⏹ Đã dừng '${labelVi}' cho ${stem}.docx.`, "warn");
+  } else if (data.error) {
+    showToast(data.error, true);
+  } else if (step === "label") {
+    const stale = (data.state && data.state.stale_steps) || data.stale_steps || [];
+    if (data.label_changed && stale.length) {
+      const partNames = stale.map((s) => STALE_PART_NAMES_VI[s] || STEP_NAMES_VI[s] || s);
+      const prevLb = data.previous_label || "(trống)";
+      const newLb = data.new_label || ((data.state && data.state.label && data.state.label.value) || "");
+      showToast(
+        `⚠️ Nhãn đổi từ '${prevLb}' sang '${newLb}' — cần chỉnh sửa lại: ${partNames.join(", ")}!`,
+        "warn"
+      );
+    } else if (!data.label_changed) {
+      const curLb = data.new_label || ((data.state && data.state.label && data.state.label.value) || "");
+      showToast(
+        curLb
+          ? `✓ Đã chạy xong 'Gán nhãn' cho ${stem}.docx (nhãn không đổi: '${curLb}').`
+          : `✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`
+      );
+    } else {
+      showToast(`✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`);
+    }
+  } else {
+    showToast(`✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`);
+  }
+}
+
 export function syncRerunButtonsState() {
-  const isRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
-  const isStopping = Boolean(store.CURRENT_STEM && isRunning && store.STOPPING_STEMS.has(store.CURRENT_STEM));
+  const isRunning = isStemRunning(store.CURRENT_STEM);
+  const isQueued = isStemQueued(store.CURRENT_STEM);
+  const isBusy = isRunning || isQueued;
+  const isStopping = Boolean(store.CURRENT_STEM && isBusy && store.STOPPING_STEMS.has(store.CURRENT_STEM));
   document.querySelectorAll("button[data-rerun], button[data-stale-rerun], button[data-stale-dismiss]").forEach((b) => {
-    b.disabled = isRunning;
+    b.disabled = isBusy;
   });
   const stopFileBtn = $("btn-stop-file-ai");
   if (stopFileBtn) {
-    stopFileBtn.classList.toggle("hidden", !isRunning);
-    stopFileBtn.disabled = !isRunning || isStopping;
-    stopFileBtn.textContent = isStopping ? "⏳ Đang dừng..." : "⏹ Dừng AI";
+    stopFileBtn.classList.toggle("hidden", !isBusy);
+    stopFileBtn.disabled = !isBusy || isStopping;
+    stopFileBtn.textContent = isStopping ? "⏳ Đang dừng..." : isQueued ? "⏹ Hủy chờ AI" : "⏹ Dừng AI";
+  }
+  const approveBtn = $("btn-approve");
+  if (approveBtn && store.CURRENT_STATE) {
+    const nErr = ((store.CURRENT_STATE.checks || {}).n_errors || 0);
+    approveBtn.disabled = isBusy || nErr > 0;
   }
   syncRunningProgressBar();
   syncVersionControls();
@@ -911,6 +974,18 @@ export function syncRerunButtonsState() {
       pill.textContent = stepVi ? `⏳ Đang chạy (${stepVi})...` : "⏳ Đang chạy AI...";
     }
     pill.className = "status-pill st-running";
+  } else if (isQueued) {
+    if (isStopping) {
+      pill.textContent = "⏳ Đang dừng...";
+    } else {
+      const qStep = (store.QUEUED_STEPS && store.QUEUED_STEPS[store.CURRENT_STEM]) || "";
+      const stepVi = STEP_NAMES_VI[qStep] || "";
+      const qPos = store.QUEUED_POSITIONS ? store.QUEUED_POSITIONS[store.CURRENT_STEM] : 0;
+      pill.textContent = stepVi
+        ? `⏳ Đang chờ lượt${qPos ? ` #${qPos}` : ""} (${stepVi})...`
+        : `⏳ Đang chờ lượt${qPos ? ` #${qPos}` : ""}...`;
+    }
+    pill.className = "status-pill st-queued";
   } else if (store.CURRENT_STATE) {
     pill.textContent = store.CURRENT_STATE.status_vi;
     pill.className = `status-pill st-${store.CURRENT_STATE.status}`;
@@ -926,13 +1001,34 @@ export async function stopFileAI(targetStem = null) {
   syncRerunButtonsState();
   try {
     const res = await api(`/api/file/${encodeURIComponent(stem)}/stop`, { method: "POST" });
-    if (res && res.stopped) {
+    if (res && res.was_queued) {
+      const pend = store.PENDING_RERUN_JOBS.get(stem);
+      if (pend && pend.jobId) store.SEEN_RERUN_JOB_IDS.add(pend.jobId);
+      store.PENDING_RERUN_JOBS.delete(stem);
+      store.STOPPING_STEMS.delete(stem);
+      store.LOCAL_QUEUED_STEMS.delete(stem);
+      store.QUEUED_STEMS.delete(stem);
+      delete store.QUEUED_STEPS[stem];
+      delete store.QUEUED_POSITIONS[stem];
+      await loadFileList(true);
+      if (store.CURRENT_STEM === stem) {
+        await selectFile(stem, { silent: true });
+      }
+      showToast(res.message || `Đã hủy chờ lượt chạy AI cho ${stem}.docx.`, "warn");
+    } else if (res && res.stopped) {
       showToast(res.message || `Đã gửi yêu cầu dừng chạy AI cho ${stem}.docx.`, "warn");
     } else {
+      const pend = store.PENDING_RERUN_JOBS.get(stem);
+      if (pend && pend.jobId) store.SEEN_RERUN_JOB_IDS.add(pend.jobId);
+      store.PENDING_RERUN_JOBS.delete(stem);
       store.STOPPING_STEMS.delete(stem);
       store.LOCAL_RERUN_STEMS.delete(stem);
+      store.LOCAL_QUEUED_STEMS.delete(stem);
       store.RUNNING_STEMS.delete(stem);
+      store.QUEUED_STEMS.delete(stem);
       delete store.RUNNING_STEPS[stem];
+      delete store.QUEUED_STEPS[stem];
+      delete store.QUEUED_POSITIONS[stem];
       await loadFileList(true);
       if (store.CURRENT_STEM === stem) {
         await selectFile(stem, { silent: true });
@@ -951,16 +1047,21 @@ export async function stopFileAI(targetStem = null) {
 export async function rerunStep(step) {
   if (!store.CURRENT_STEM) return;
   const stem = store.CURRENT_STEM;
-  if (store.RUNNING_STEMS.has(stem) || store.LOCAL_RERUN_STEMS.has(stem)) {
-    showToast(`File ${stem}.docx đang được AI xử lý, vui lòng đợi hoàn tất.`, true);
+  if (isStemBusy(stem)) {
+    showToast(`File ${stem}.docx đang chạy hoặc đang chờ lượt AI, vui lòng đợi hoàn tất.`, true);
     return;
   }
   const labelVi = STEP_NAMES_VI[step] || step;
 
   const chkMock = $("chk-mock");
+  const selConc = $("sel-concurrency");
+  const rawConc = selConc ? selConc.value : "auto";
+  const concurrencyVal = rawConc === "auto" ? "auto" : Number(rawConc) || "auto";
   const reqPayload = {
     step,
     restart: step === "all",
+    async: true,
+    concurrency: concurrencyVal,
     mock: chkMock ? chkMock.checked : false,
     style: $("sel-style").value,
     extract: $("txt-extract").value,
@@ -968,55 +1069,99 @@ export async function rerunStep(step) {
     ignore_mismatch: true,
   };
 
+  const maxAllowed = Math.max(1, Number(store.ALLOWED_WORKERS || 3));
+  const looksFull = store.RUNNING_STEMS.size >= maxAllowed || store.QUEUED_STEMS.size > 0;
+  const initStep = step === "all" ? "inspect" : step === "extract_abstract" ? "extract" : step;
+
   store.STOPPING_STEMS.delete(stem);
-  store.LOCAL_RERUN_STEMS.add(stem);
-  store.RUNNING_STEMS.add(stem);
-  store.RUNNING_STEPS[stem] = step === "all" ? "inspect" : step === "extract_abstract" ? "extract" : step;
+  if (looksFull) {
+    store.LOCAL_QUEUED_STEMS.add(stem);
+    store.QUEUED_STEMS.add(stem);
+    store.QUEUED_STEPS[stem] = step;
+    store.QUEUED_POSITIONS[stem] = store.QUEUED_STEMS.size;
+  } else {
+    store.LOCAL_RERUN_STEMS.add(stem);
+    store.RUNNING_STEMS.add(stem);
+    store.RUNNING_STEPS[stem] = initStep;
+  }
   renderFileList();
   syncRerunButtonsState();
-  showToast(`⏳ Đang chạy '${labelVi}' cho ${stem}.docx...`);
-
-  // Poll nhẹ tiến độ bước trong lúc chờ request rerun (đặc biệt khi chạy lại cả bài)
-  let rerunPollTimer = setInterval(async () => {
-    if (!store.RUNNING_STEMS.has(stem)) return;
-    try {
-      const snap = await api(`/api/file/${encodeURIComponent(stem)}`);
-      if (snap && snap.rpd_status) {
-        renderRpdStatus(snap.rpd_status);
-      }
-      if (snap && snap.state) {
-        if (snap.state.current_step) {
-          store.RUNNING_STEPS[stem] = snap.state.current_step;
-        }
-        if (store.CURRENT_STEM === stem && snap.state.updated_at !== (store.CURRENT_STATE || {}).updated_at) {
-          store.CURRENT_STATE = snap.state;
-          store.CURRENT_UNITS = snap.units || store.CURRENT_UNITS;
-          initSelectionsFromState();
-          renderEditor(snap.versions || []);
-        }
-        renderFileList();
-        syncRerunButtonsState();
-      }
-    } catch (_) {
-      // Bỏ qua lỗi poll tạm thời
-    }
-  }, 1000);
 
   try {
     const data = await api(`/api/file/${encodeURIComponent(stem)}/rerun`, {
       method: "POST",
       body: JSON.stringify(reqPayload),
     });
-    clearInterval(rerunPollTimer);
-    rerunPollTimer = null;
+    store.LOCAL_RERUN_STEMS.delete(stem);
+    store.LOCAL_QUEUED_STEMS.delete(stem);
+
+    if (data && data.accepted) {
+      const recent = data.batch_status && data.batch_status.recent_rerun_results
+        ? data.batch_status.recent_rerun_results[stem]
+        : null;
+      if (recent && recent.job_id === data.job_id) {
+        store.SEEN_RERUN_JOB_IDS.add(data.job_id);
+        store.RUNNING_STEMS.delete(stem);
+        store.QUEUED_STEMS.delete(stem);
+        delete store.RUNNING_STEPS[stem];
+        delete store.QUEUED_STEPS[stem];
+        delete store.QUEUED_POSITIONS[stem];
+        if (data.batch_status && data.batch_status.rpd_status) {
+          renderRpdStatus(data.batch_status.rpd_status);
+        }
+        await loadFileList(true);
+        if (store.CURRENT_STEM === stem) {
+          await selectFile(stem, { silent: true, onlyIfCurrent: true, skipSidebarRender: true });
+        }
+        applyRerunOutcome(stem, step, labelVi, recent);
+        return;
+      }
+
+      store.PENDING_RERUN_JOBS.set(stem, {
+        jobId: data.job_id,
+        step,
+        labelVi,
+        notifiedStart: !data.queued,
+      });
+      if (data.queued) {
+        store.RUNNING_STEMS.delete(stem);
+        delete store.RUNNING_STEPS[stem];
+        store.QUEUED_STEMS.add(stem);
+        store.QUEUED_STEPS[stem] = step;
+        store.QUEUED_POSITIONS[stem] = data.queue_position || 1;
+        const activeW = Number(data.active_workers || store.ALLOWED_WORKERS || 3);
+        const allowW = Number(data.allowed_workers || store.ALLOWED_WORKERS || 3);
+        showToast(
+          `⏳ Đang chạy đủ ${activeW}/${allowW} luồng AI — '${labelVi}' cho ${stem}.docx đã vào hàng chờ (#${store.QUEUED_POSITIONS[stem]}) và sẽ tự chạy khi 1 luồng hoàn thành.`,
+          "warn"
+        );
+      } else {
+        store.QUEUED_STEMS.delete(stem);
+        delete store.QUEUED_STEPS[stem];
+        delete store.QUEUED_POSITIONS[stem];
+        store.RUNNING_STEMS.add(stem);
+        store.RUNNING_STEPS[stem] = initStep;
+        showToast(`⏳ Đang chạy '${labelVi}' cho ${stem}.docx...`);
+      }
+      renderFileList();
+      syncRerunButtonsState();
+      if (_ensureTrackingHandler) {
+        _ensureTrackingHandler();
+      }
+      return;
+    }
+
+    // Fallback xử lý đồng bộ (giữ tương thích nếu server trả về trực tiếp kết quả)
     if (data.rpd_status) {
       renderRpdStatus(data.rpd_status);
     }
     store.STOPPING_STEMS.delete(stem);
-    store.LOCAL_RERUN_STEMS.delete(stem);
     store.RUNNING_STEMS.delete(stem);
+    store.QUEUED_STEMS.delete(stem);
     delete store.RUNNING_STEPS[stem];
-    if (store.CURRENT_STEM === stem) {
+    delete store.QUEUED_STEPS[stem];
+    delete store.QUEUED_POSITIONS[stem];
+    if (store.CURRENT_STEM === stem && data.state) {
       store.CURRENT_STATE = data.state;
       store.CURRENT_UNITS = data.units || store.CURRENT_UNITS;
       store.CUSTOM_EDITED = Boolean((store.CURRENT_STATE.extract || {}).custom_edited);
@@ -1024,42 +1169,18 @@ export async function rerunStep(step) {
       renderEditor(data.versions || []);
     }
     await loadFileList(true);
-    if (data.cancelled) {
-      showToast(`⏹ Đã dừng '${labelVi}' cho ${stem}.docx.`, "warn");
-    } else if (step === "label") {
-      const stale = (data.state && data.state.stale_steps) || [];
-      if (data.label_changed && stale.length) {
-        const partNames = stale.map((s) => STALE_PART_NAMES_VI[s] || STEP_NAMES_VI[s] || s);
-        const prevLb = data.previous_label || "(trống)";
-        const newLb = data.new_label || ((data.state && data.state.label && data.state.label.value) || "");
-        showToast(
-          `⚠️ Nhãn đổi từ '${prevLb}' sang '${newLb}' — cần chỉnh sửa lại: ${partNames.join(", ")}!`,
-          "warn"
-        );
-      } else if (!data.label_changed) {
-        const curLb = data.new_label || ((data.state && data.state.label && data.state.label.value) || "");
-        showToast(
-          curLb
-            ? `✓ Đã chạy xong 'Gán nhãn' cho ${stem}.docx (nhãn không đổi: '${curLb}').`
-            : `✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`
-        );
-      } else {
-        showToast(`✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`);
-      }
-    } else {
-      showToast(`✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`);
-    }
+    applyRerunOutcome(stem, step, labelVi, data);
   } catch (err) {
-    if (rerunPollTimer) {
-      clearInterval(rerunPollTimer);
-      rerunPollTimer = null;
-    }
     store.STOPPING_STEMS.delete(stem);
     store.LOCAL_RERUN_STEMS.delete(stem);
+    store.LOCAL_QUEUED_STEMS.delete(stem);
     const alreadyRunning = err && (err.status === 409 || (err.data && err.data.already_running));
     if (!alreadyRunning) {
       store.RUNNING_STEMS.delete(stem);
+      store.QUEUED_STEMS.delete(stem);
       delete store.RUNNING_STEPS[stem];
+      delete store.QUEUED_STEPS[stem];
+      delete store.QUEUED_POSITIONS[stem];
     }
     await loadFileList(true);
     if (store.CURRENT_STEM === stem) {
@@ -1073,8 +1194,8 @@ export async function rerunStep(step) {
 
 export async function restoreVersion(ver = null) {
   if (!store.CURRENT_STEM) return false;
-  if (store.RUNNING_STEMS.has(store.CURRENT_STEM)) {
-    showToast(`File ${store.CURRENT_STEM}.docx đang được AI xử lý, vui lòng đợi hoàn tất.`, true);
+  if (isStemBusy(store.CURRENT_STEM)) {
+    showToast(`File ${store.CURRENT_STEM}.docx đang chạy hoặc đang chờ lượt AI, vui lòng đợi hoàn tất.`, true);
     return false;
   }
   clearTimeout(checkTimer);
@@ -1114,6 +1235,10 @@ export async function rollbackPreviousVersion() {
 
 export async function approveAndExport(confirmWarnings = false) {
   if (!store.CURRENT_STEM) return;
+  if (isStemBusy(store.CURRENT_STEM)) {
+    showToast(`File ${store.CURRENT_STEM}.docx đang chạy hoặc đang chờ lượt AI, vui lòng đợi hoàn tất.`, true);
+    return;
+  }
   clearTimeout(checkTimer);
   const approvedStem = store.CURRENT_STEM;
   const prevPendingStems = pendingFiles().map((r) => r.file.replace(/\.docx$/i, ""));

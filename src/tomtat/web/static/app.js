@@ -129,7 +129,11 @@ window.addEventListener("DOMContentLoaded", () => {
     .then((st) => {
       if (st && st.active) {
         startBatchPolling();
-      } else if (st && Array.isArray(st.all_running) && st.all_running.length > 0) {
+      } else if (
+        st &&
+        ((Array.isArray(st.all_running) && st.all_running.length > 0) ||
+          (Array.isArray(st.queued_rerun_stems) && st.queued_rerun_stems.length > 0))
+      ) {
         startBatchPollingFallback();
       }
     })

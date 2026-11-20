@@ -1,10 +1,13 @@
 """Batch service — quản lý tiến trình chạy AI hàng loạt ở tầng server."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 import threading
+import time
 from typing import Callable
+import uuid
 
 from .. import config as _cfg_mod
 from ..config import Config, clamp_workers, get_pool_scaling
@@ -57,10 +60,14 @@ def make_client(cfg: Config, force_mock: bool = False):
 
 
 class BatchManager:
-    """Quản lý tiến trình chạy AI hàng loạt ở tầng server bằng ThreadPoolExecutor.
+    """Quản lý tiến trình chạy AI ở tầng server bằng ThreadPoolExecutor và hàng chờ thống nhất.
 
-    Giải phóng hoàn toàn kết nối HTTP của trình duyệt (tránh giới hạn 6 socket
-    của Chrome khiến giao diện bị đơ/lag, không ấn được nút Duyệt hoặc Xem log).
+    - Giải phóng hoàn toàn kết nối HTTP của trình duyệt (tránh giới hạn 6 socket
+      của Chrome khiến giao diện bị đơ/lag, không ấn được nút Duyệt hoặc Xem log).
+    - Điều phối một ngân sách luồng chung (`<= allowed_workers`) cho cả chạy hàng loạt
+      lẫn chạy lại từng file từ 5 nút AI: khi đã chạy đủ số luồng cho phép, yêu cầu chạy lại
+      từng file sẽ vào hàng chờ và tự chạy ngay khi 1 luồng đang chạy hoàn thành (không bao giờ
+      tạo thêm luồng thứ N+1).
     """
 
     def __init__(
@@ -73,6 +80,7 @@ class BatchManager:
         self._client_factory = client_factory or make_client
         self._files_resolver = files_resolver or resolve_files
         self.lock = threading.Lock()
+        self._slot_cv = threading.Condition(self.lock)
         self.is_active = False
         self.stop_requested = False
         self.total = 0
@@ -81,6 +89,13 @@ class BatchManager:
         self.stems: list[str] = []
         self.running_stems: set[str] = set()
         self.rerun_stems: dict[str, str] = {}
+        self._queued_reruns: list[dict] = []
+        self._rerun_jobs: dict[str, dict] = {}
+        self._active_job_id_by_stem: dict[str, str] = {}
+        self._recent_rerun_results: dict[str, dict] = {}
+        self._batch_pending: deque[str] = deque()
+        self._batch_requested_concurrency: int | None = None
+        self._batch_cancelled_by_user: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
         self._stopping_stems: set[str] = set()
         self.completed_stems: list[str] = []
@@ -88,8 +103,83 @@ class BatchManager:
         self.errors: dict[str, str] = {}
         self.executor: ThreadPoolExecutor | None = None
 
-    def start(self, stems: list[str], concurrency: int | None = None, use_mock: bool = False) -> dict:
+    def _allowed_workers_unlocked(self, requested_concurrency: int | None = None) -> int:
+        limit = clamp_workers(None, self.cfg)
+        if self.is_active and self._batch_requested_concurrency:
+            limit = min(limit, self._batch_requested_concurrency)
+        if requested_concurrency is not None:
+            limit = min(limit, clamp_workers(requested_concurrency, self.cfg))
+        return max(1, limit)
+
+    def _active_slots_unlocked(self) -> int:
+        return len(self.running_stems | set(self.rerun_stems.keys()))
+
+    def _is_stem_queued_unlocked(self, stem: str) -> bool:
+        return any(j["stem"] == stem for j in self._queued_reruns)
+
+    def _remove_queued_job_unlocked(self, job_or_stem: dict | str) -> dict | None:
+        if isinstance(job_or_stem, str):
+            for idx, item in enumerate(self._queued_reruns):
+                if item["stem"] == job_or_stem:
+                    return self._queued_reruns.pop(idx)
+            return None
+        target_id = job_or_stem.get("job_id")
+        for idx, item in enumerate(self._queued_reruns):
+            if item["job_id"] == target_id:
+                return self._queued_reruns.pop(idx)
+        return None
+
+    def _record_finished_rerun(self, job: dict, payload: dict) -> None:
         with self.lock:
+            stem = job["stem"]
+            active_id = self._active_job_id_by_stem.get(stem)
+            if active_id is not None and active_id != job["job_id"]:
+                return
+            if active_id == job["job_id"]:
+                self._active_job_id_by_stem.pop(stem, None)
+            summary = {
+                "job_id": job["job_id"],
+                "stem": stem,
+                "step": job["step"],
+                "ok": bool(payload.get("ok")),
+                "cancelled": bool(payload.get("cancelled")),
+                "error": payload.get("error") or "",
+                "message": payload.get("message") or "",
+                "label_changed": bool(payload.get("label_changed")),
+                "previous_label": payload.get("previous_label", ""),
+                "new_label": payload.get("new_label", ""),
+                "stale_steps": list(((payload.get("state") or {}).get("stale_steps")) or []),
+                "completed_at": time.time(),
+            }
+            self._recent_rerun_results[stem] = summary
+            if len(self._recent_rerun_results) > 50:
+                oldest = sorted(
+                    self._recent_rerun_results.items(),
+                    key=lambda kv: kv[1].get("completed_at", 0.0),
+                )[:-50]
+                for old_k, _ in oldest:
+                    self._recent_rerun_results.pop(old_k, None)
+            if len(self._rerun_jobs) > 100:
+                done_ids = [
+                    jid for jid, j in self._rerun_jobs.items()
+                    if j["done_ev"].is_set() and jid != job["job_id"]
+                ]
+                for jid in done_ids[:-50]:
+                    self._rerun_jobs.pop(jid, None)
+
+    def get_allowed_workers(self, requested_concurrency: int | None = None) -> int:
+        with self.lock:
+            return self._allowed_workers_unlocked(requested_concurrency)
+
+    def get_queue_position(self, job_id: str) -> int:
+        with self.lock:
+            for idx, item in enumerate(self._queued_reruns, start=1):
+                if item["job_id"] == job_id:
+                    return idx
+            return 0
+
+    def start(self, stems: list[str], concurrency: int | None = None, use_mock: bool = False) -> dict:
+        with self._slot_cv:
             if self.is_active:
                 return {"ok": False, "message": "Tiến trình batch đang chạy dở."}
             if not stems:
@@ -102,15 +192,19 @@ class BatchManager:
             self.done_count = 0
             self.err_count = 0
             self.running_stems = set()
+            self._batch_pending = deque(stems)
+            self._batch_cancelled_by_user.clear()
             self.completed_stems = []
             self.cancelled_stems = []
             self.errors = {}
             scaling = get_pool_scaling(self.cfg)
             # Luôn kẹp theo trần cứng max_workers (chặn cả khi gọi API trực tiếp với concurrency lớn)
-            eff_concurrency = clamp_workers(concurrency, self.cfg)
-            eff_concurrency = max(1, min(eff_concurrency, len(stems)))
-            BaseClient.ensure_concurrency_limit(max(eff_concurrency, scaling["max_concurrent_calls"]))
+            requested_conc = clamp_workers(concurrency, self.cfg)
+            self._batch_requested_concurrency = requested_conc
+            eff_concurrency = max(1, min(requested_conc, len(stems)))
+            BaseClient.ensure_concurrency_limit(max(requested_conc, scaling["max_concurrent_calls"]))
             self.executor = ThreadPoolExecutor(max_workers=eff_concurrency, thread_name_prefix="tomtat_batch")
+            self._slot_cv.notify_all()
 
         threading.Thread(target=self._run_all, args=(stems, use_mock), daemon=True).start()
         return {"ok": True, "message": f"Đã khởi động xử lý {len(stems)} file trên {eff_concurrency} luồng (pool {scaling['key_count']} keys)."}
@@ -119,47 +213,90 @@ class BatchManager:
         files_map = self._files_resolver(self.cfg)
         client = self._client_factory(self.cfg, force_mock=use_mock)
 
-        def _process_one(stem: str):
-            with self.lock:
-                if self.stop_requested:
-                    return
-                if stem in self.running_stems or stem in self.rerun_stems:
-                    self.err_count += 1
-                    self.errors[stem] = f"File '{stem}.docx' đang được AI xử lý ở luồng khác."
-                    return
-                self.running_stems.add(stem)
-                cancel_ev = threading.Event()
-                self._cancel_events[stem] = cancel_ev
-                self._stopping_stems.discard(stem)
-
+        def _process_one(stem: str, cancel_ev: threading.Event):
             try:
+                if cancel_ev.is_set() or self.stop_requested:
+                    with self._slot_cv:
+                        if stem not in self.cancelled_stems:
+                            self.cancelled_stems.append(stem)
+                    return
                 docx_path = files_map.get(stem) or (self.cfg.input_dir / f"{stem}.docx")
                 with bind_cancel_event(cancel_ev):
                     res = process_file(docx_path, self.cfg, client, force=True, ignore_mismatch=False)
-                with self.lock:
+                with self._slot_cv:
                     if isinstance(res, dict) and res.get("cancelled"):
-                        self.cancelled_stems.append(stem)
+                        if stem not in self.cancelled_stems:
+                            self.cancelled_stems.append(stem)
                     else:
                         self.done_count += 1
                         self.completed_stems.append(stem)
             except Exception as e:
-                with self.lock:
+                with self._slot_cv:
                     self.err_count += 1
                     self.errors[stem] = str(e)
             finally:
-                with self.lock:
+                with self._slot_cv:
                     self.running_stems.discard(stem)
                     self._cancel_events.pop(stem, None)
                     self._stopping_stems.discard(stem)
+                    self._slot_cv.notify_all()
 
-        # Chạy từng file qua thread pool theo đúng thứ tự stems
-        futures = []
-        for s in stems:
-            if self.stop_requested:
-                break
-            futures.append(self.executor.submit(_process_one, s))
+        # Điều phối từng file qua pool dùng chung: luôn nhường lượt cho các file đang chờ từ 5 nút AI
+        # và tuyệt đối không vượt tổng số luồng cho phép (running_stems + rerun_stems <= allowed_workers).
+        in_flight: set[Future] = set()
+        while True:
+            done_futs = {f for f in in_flight if f.done()}
+            if done_futs:
+                for f in done_futs:
+                    try:
+                        f.result()
+                    except Exception:
+                        pass
+                in_flight.difference_update(done_futs)
 
-        for f in futures:
+            with self._slot_cv:
+                if self.stop_requested:
+                    self._batch_pending.clear()
+                    if not in_flight:
+                        break
+                else:
+                    if self._batch_cancelled_by_user and self._batch_pending:
+                        self._batch_pending = deque(
+                            s for s in self._batch_pending
+                            if s not in self._batch_cancelled_by_user
+                        )
+                    if not self._batch_pending and not in_flight:
+                        break
+                    allowed = self._allowed_workers_unlocked()
+                    exec_cap = self.executor._max_workers if self.executor else allowed
+                    while (
+                        not self.stop_requested
+                        and self._batch_pending
+                        and not self._queued_reruns
+                        and self._active_slots_unlocked() < allowed
+                        and len(self.running_stems) < exec_cap
+                    ):
+                        chosen = None
+                        for cand in self._batch_pending:
+                            if (
+                                cand not in self.running_stems
+                                and cand not in self.rerun_stems
+                                and not self._is_stem_queued_unlocked(cand)
+                            ):
+                                chosen = cand
+                                break
+                        if chosen is None:
+                            break
+                        self._batch_pending.remove(chosen)
+                        self.running_stems.add(chosen)
+                        cancel_ev = threading.Event()
+                        self._cancel_events[chosen] = cancel_ev
+                        self._stopping_stems.discard(chosen)
+                        fut = self.executor.submit(_process_one, chosen, cancel_ev)
+                        in_flight.add(fut)
+                self._slot_cv.wait(timeout=0.05)
+
+        for f in list(in_flight):
             try:
                 f.result()
             except Exception:
@@ -170,40 +307,221 @@ class BatchManager:
         except Exception:
             pass
 
-        with self.lock:
+        with self._slot_cv:
             self.is_active = False
+            self._batch_requested_concurrency = None
+            self._batch_pending.clear()
+            self._batch_cancelled_by_user.clear()
             self.running_stems.clear()
             if self.executor:
                 self.executor.shutdown(wait=False)
                 self.executor = None
+            self._slot_cv.notify_all()
 
     def try_acquire_file(self, stem: str, step: str = "") -> tuple[bool, str | None]:
-        """Đăng ký khóa chạy AI đơn lẻ cho 1 file; trả về (False, lý do) nếu file đang chạy."""
-        with self.lock:
+        """Đăng ký khóa chạy AI đơn lẻ cho 1 file; trả về (False, lý do) nếu file đang chạy hoặc đang chờ."""
+        with self._slot_cv:
             if stem in self.running_stems:
                 return False, f"File '{stem}.docx' đang được AI xử lý trong tiến trình chạy hàng loạt."
             if stem in self.rerun_stems:
                 return False, f"File '{stem}.docx' đang được AI xử lý. Vui lòng đợi hoàn tất."
+            if self._is_stem_queued_unlocked(stem):
+                return False, f"File '{stem}.docx' đang chờ lượt chạy AI. Vui lòng đợi hoàn tất."
             self.rerun_stems[stem] = step or "all"
             self._cancel_events[stem] = threading.Event()
             self._stopping_stems.discard(stem)
+            self._slot_cv.notify_all()
             return True, None
 
+    def reserve_rerun(
+        self,
+        stem: str,
+        step: str = "",
+        *,
+        concurrency: int | None = None,
+    ) -> tuple[bool, str | None, dict | None]:
+        """Đăng ký chạy lại AI cho 1 file theo đúng ngân sách luồng dùng chung.
+
+        - Nếu còn slot trống và chưa có file nào đợi trước: chiếm ngay 1 slot chạy (`rerun_stems`).
+        - Nếu đang chạy đủ số luồng cho phép: đưa vào hàng chờ FIFO (`_queued_reruns`), không tạo luồng phụ.
+        """
+        with self._slot_cv:
+            if stem in self.running_stems:
+                return False, f"File '{stem}.docx' đang được AI xử lý trong tiến trình chạy hàng loạt.", None
+            if stem in self.rerun_stems:
+                return False, f"File '{stem}.docx' đang được AI xử lý. Vui lòng đợi hoàn tất.", None
+            if self._is_stem_queued_unlocked(stem):
+                return False, f"File '{stem}.docx' đang chờ lượt chạy AI. Vui lòng đợi hoàn tất.", None
+
+            self._recent_rerun_results.pop(stem, None)
+            allowed = self._allowed_workers_unlocked(concurrency)
+            can_run_now = (not self._queued_reruns) and (self._active_slots_unlocked() < allowed)
+            cancel_ev = threading.Event()
+            done_ev = threading.Event()
+            job_id = uuid.uuid4().hex[:12]
+            eff_step = step or "all"
+            job = {
+                "job_id": job_id,
+                "stem": stem,
+                "step": eff_step,
+                "queued_at": time.time(),
+                "cancel_ev": cancel_ev,
+                "done_ev": done_ev,
+                "status": "running" if can_run_now else "queued",
+                "cancelled": False,
+                "concurrency": concurrency,
+                "result": None,
+                "status_code": 200,
+            }
+            self._rerun_jobs[job_id] = job
+            self._active_job_id_by_stem[stem] = job_id
+            self._cancel_events[stem] = cancel_ev
+            self._stopping_stems.discard(stem)
+            if can_run_now:
+                self.rerun_stems[stem] = eff_step
+            else:
+                self._queued_reruns.append(job)
+            self._slot_cv.notify_all()
+
+        BaseClient.ensure_concurrency_limit(allowed)
+        return True, None, job
+
+    def abort_unstarted_rerun(self, job_id: str) -> None:
+        """Hủy đăng ký job rerun khi gặp lỗi trước lúc bắt đầu thực thi (ví dụ thiếu API key)."""
+        with self._slot_cv:
+            job = self._rerun_jobs.pop(job_id, None)
+            if not job:
+                return
+            stem = job["stem"]
+            cancel_ev = job["cancel_ev"]
+            if self._active_job_id_by_stem.get(stem) == job_id:
+                self._active_job_id_by_stem.pop(stem, None)
+                self.rerun_stems.pop(stem, None)
+            self._remove_queued_job_unlocked(job)
+            if self._cancel_events.get(stem) is cancel_ev:
+                self._cancel_events.pop(stem, None)
+                self._stopping_stems.discard(stem)
+            job["done_ev"].set()
+            self._slot_cv.notify_all()
+
+    def run_rerun_job(
+        self,
+        job: dict,
+        runner: Callable[[threading.Event], tuple[dict, int]],
+        on_cancelled: Callable[[], tuple[dict, int]],
+    ) -> tuple[dict, int]:
+        """Chờ đến lượt (nếu đang xếp hàng), chạy `runner(cancel_ev)` và giải phóng slot an toàn."""
+        stem = job["stem"]
+        cancel_ev: threading.Event = job["cancel_ev"]
+        acquired_slot = (job["status"] == "running")
+        concurrency = job.get("concurrency")
+        try:
+            if not acquired_slot:
+                with self._slot_cv:
+                    while True:
+                        if cancel_ev.is_set() or job.get("cancelled"):
+                            self._remove_queued_job_unlocked(job)
+                            if self._cancel_events.get(stem) is cancel_ev:
+                                self._cancel_events.pop(stem, None)
+                                self._stopping_stems.discard(stem)
+                            job["status"] = "cancelled"
+                            self._slot_cv.notify_all()
+                            break
+                        allowed = self._allowed_workers_unlocked(concurrency)
+                        is_head = bool(
+                            self._queued_reruns
+                            and self._queued_reruns[0]["job_id"] == job["job_id"]
+                        )
+                        if is_head and self._active_slots_unlocked() < allowed:
+                            self._queued_reruns.pop(0)
+                            self.rerun_stems[stem] = job["step"]
+                            job["status"] = "running"
+                            acquired_slot = True
+                            self._slot_cv.notify_all()
+                            break
+                        self._slot_cv.wait(timeout=0.1)
+
+            if not acquired_slot:
+                payload, code = on_cancelled()
+                job["result"] = payload
+                job["status_code"] = code
+                self._record_finished_rerun(job, payload)
+                return payload, code
+
+            if cancel_ev.is_set() or job.get("cancelled"):
+                payload, code = on_cancelled()
+                job["status"] = "cancelled"
+                job["result"] = payload
+                job["status_code"] = code
+                self._record_finished_rerun(job, payload)
+                return payload, code
+
+            payload, code = runner(cancel_ev)
+            job["status"] = (
+                "cancelled"
+                if payload.get("cancelled")
+                else ("done" if payload.get("ok") else "error")
+            )
+            job["result"] = payload
+            job["status_code"] = code
+            self._record_finished_rerun(job, payload)
+            return payload, code
+        except Exception as exc:  # noqa: BLE001
+            err_payload = {"error": str(exc)}
+            job["status"] = "error"
+            job["result"] = err_payload
+            job["status_code"] = 500
+            self._record_finished_rerun(job, err_payload)
+            return err_payload, 500
+        finally:
+            with self._slot_cv:
+                if acquired_slot and self._active_job_id_by_stem.get(stem) in (None, job["job_id"]):
+                    self.rerun_stems.pop(stem, None)
+                else:
+                    self._remove_queued_job_unlocked(job)
+                if self._cancel_events.get(stem) is cancel_ev:
+                    self._cancel_events.pop(stem, None)
+                    self._stopping_stems.discard(stem)
+                if self._active_job_id_by_stem.get(stem) == job["job_id"]:
+                    self._active_job_id_by_stem.pop(stem, None)
+                self._slot_cv.notify_all()
+            job["done_ev"].set()
+
     def get_cancel_event(self, stem: str) -> threading.Event | None:
-        """Lấy Event hủy gắn với một file đang chạy (nếu có)."""
+        """Lấy Event hủy gắn với một file đang chạy hoặc đang chờ (nếu có)."""
         with self.lock:
             return self._cancel_events.get(stem)
 
     def release_file(self, stem: str) -> None:
         """Giải phóng khóa chạy AI đơn lẻ cho 1 file."""
-        with self.lock:
+        with self._slot_cv:
             self.rerun_stems.pop(stem, None)
+            self._remove_queued_job_unlocked(stem)
             self._cancel_events.pop(stem, None)
             self._stopping_stems.discard(stem)
+            self._slot_cv.notify_all()
 
     def stop_file(self, stem: str) -> dict:
-        """Gửi yêu cầu dừng tiến trình AI đang chạy cho một file cụ thể."""
-        with self.lock:
+        """Gửi yêu cầu dừng tiến trình AI đang chạy hoặc đang chờ lượt cho một file cụ thể."""
+        with self._slot_cv:
+            queued_job = self._remove_queued_job_unlocked(stem)
+            if queued_job is not None:
+                queued_job["cancelled"] = True
+                queued_job["cancel_ev"].set()
+                if stem in self._batch_pending:
+                    self._batch_cancelled_by_user.add(stem)
+                    if stem not in self.cancelled_stems:
+                        self.cancelled_stems.append(stem)
+                self._cancel_events.pop(stem, None)
+                self._stopping_stems.discard(stem)
+                self._slot_cv.notify_all()
+                return {
+                    "ok": True,
+                    "stem": stem,
+                    "stopped": True,
+                    "was_queued": True,
+                    "message": f"Đã hủy chờ lượt chạy AI cho {stem}.docx.",
+                }
             ev = self._cancel_events.get(stem)
             is_running = (stem in self.running_stems) or (stem in self.rerun_stems)
             if ev is not None or is_running:
@@ -212,6 +530,7 @@ class BatchManager:
                     self._cancel_events[stem] = ev
                 ev.set()
                 self._stopping_stems.add(stem)
+                self._slot_cv.notify_all()
                 return {
                     "ok": True,
                     "stem": stem,
@@ -226,9 +545,20 @@ class BatchManager:
             }
 
     def stop(self) -> dict:
-        with self.lock:
-            self.stop_requested = True
+        with self._slot_cv:
+            if self.is_active:
+                self.stop_requested = True
+            self._batch_pending.clear()
             active_stems = sorted(set(self.running_stems) | set(self.rerun_stems))
+            queued_stems: list[str] = []
+            while self._queued_reruns:
+                q_job = self._queued_reruns.pop(0)
+                q_stem = q_job["stem"]
+                queued_stems.append(q_stem)
+                q_job["cancelled"] = True
+                q_job["cancel_ev"].set()
+                self._cancel_events.pop(q_stem, None)
+                self._stopping_stems.discard(q_stem)
             for stem in active_stems:
                 ev = self._cancel_events.get(stem)
                 if ev is None:
@@ -236,9 +566,11 @@ class BatchManager:
                     self._cancel_events[stem] = ev
                 ev.set()
                 self._stopping_stems.add(stem)
+            self._slot_cv.notify_all()
+            all_stopped = sorted(set(active_stems) | set(queued_stems))
             return {
                 "ok": True,
-                "stopped_stems": active_stems,
+                "stopped_stems": all_stopped,
                 "message": "Đã gửi tín hiệu dừng tới các luồng AI.",
             }
 
@@ -256,6 +588,19 @@ class BatchManager:
             done_count = self.done_count
             err_count = self.err_count
             stopped = self.stop_requested
+            allowed_workers = self._allowed_workers_unlocked()
+            queued_reruns = [
+                {
+                    "job_id": j["job_id"],
+                    "stem": j["stem"],
+                    "step": j["step"],
+                    "position": idx,
+                    "queued_at": j["queued_at"],
+                }
+                for idx, j in enumerate(self._queued_reruns, start=1)
+            ]
+            batch_pending_count = len(self._batch_pending)
+            recent_results = {k: dict(v) for k, v in self._recent_rerun_results.items()}
 
         running_steps: dict[str, str] = {}
         running_updated: dict[str, str] = {}
@@ -274,11 +619,16 @@ class BatchManager:
                 ws = FileWorkspace(self.cfg.work_dir, self.cfg.input_dir / f"{s}.docx")
                 st = ws.load_state()
                 rerun_steps[s] = str(st.get("current_step") or fallback_step or "")
+                if s not in running_updated:
+                    running_updated[s] = str(st.get("updated_at") or "")
             except Exception:
                 rerun_steps[s] = str(fallback_step or "")
 
         all_running = sorted(set(running_list) | set(rerun_dict.keys()))
         all_running_steps = {**rerun_steps, **running_steps}
+        queued_stems = [q["stem"] for q in queued_reruns]
+        queued_steps = {q["stem"]: q["step"] for q in queued_reruns}
+        queued_positions = {q["stem"]: q["position"] for q in queued_reruns}
 
         keys = _cfg_mod.get_api_keys()
         scaling = get_pool_scaling(self.cfg, api_keys=keys)
@@ -295,6 +645,14 @@ class BatchManager:
             "rerun_steps": rerun_steps,
             "all_running": all_running,
             "all_running_steps": all_running_steps,
+            "allowed_workers": allowed_workers,
+            "active_worker_count": len(all_running),
+            "queued_reruns": queued_reruns,
+            "queued_rerun_stems": queued_stems,
+            "queued_rerun_steps": queued_steps,
+            "queued_rerun_positions": queued_positions,
+            "batch_pending_count": batch_pending_count,
+            "recent_rerun_results": recent_results,
             "stopping_stems": stopping_list,
             "completed": completed_list,
             "cancelled": cancelled_list,

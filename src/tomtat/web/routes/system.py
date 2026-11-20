@@ -52,7 +52,13 @@ def api_self_update():
     mgr = current_app.config.get("TOMTAT_BATCH_MGR")
     if mgr is not None:
         st = mgr.status()
-        if st.get("active") or st.get("running") or st.get("all_running") or st.get("rerun_running"):
+        if (
+            st.get("active")
+            or st.get("running")
+            or st.get("all_running")
+            or st.get("rerun_running")
+            or st.get("queued_rerun_stems")
+        ):
             return jsonify({
                 "ok": False,
                 "output": "Đang có tiến trình AI chạy. Vui lòng đợi chạy xong hoặc bấm Dừng AI trước khi cập nhật.",

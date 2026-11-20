@@ -1,6 +1,6 @@
 // Quản lý cột bên trái: danh sách Chờ duyệt & Đã duyệt, lọc, sắp xếp, xóa file
-import { store } from "./state.js";
-import { $, api, escapeHtml, setText, showToast } from "./utils.js";
+import { isStemBusy, isStemQueued, isStemRunning, store } from "./state.js";
+import { $, api, escapeHtml, setText, showToast, withPreservedScroll } from "./utils.js";
 
 let _selectFileHandler = null;
 let _syncRerunButtonsHandler = null;
@@ -50,16 +50,39 @@ export function syncRunningProgressBar(batchProgressText = null) {
     return;
   }
 
-  if (store.RUNNING_STEMS.size > 0) {
-    const runningList = Array.from(store.RUNNING_STEMS).map((s) => {
+  const runningSet = new Set([...store.RUNNING_STEMS, ...store.LOCAL_RERUN_STEMS]);
+  const queuedSet = new Set(
+    [...store.QUEUED_STEMS, ...store.LOCAL_QUEUED_STEMS].filter((s) => !runningSet.has(s))
+  );
+
+  if (runningSet.size > 0 || queuedSet.size > 0) {
+    const runningList = Array.from(runningSet).map((s) => {
       const sc = (store.RUNNING_STEPS || {})[s] || "";
       const sv = STEP_SHORT_VI[sc] || sc || "";
       return sv ? `${s}.docx (${sv})` : `${s}.docx`;
     });
-    const allStopping = Array.from(store.RUNNING_STEMS).every((s) => store.STOPPING_STEMS.has(s));
-    box.textContent = allStopping
-      ? `⏳ Đang dừng AI: ${runningList.join(", ")}...`
-      : `⏳ Đang chạy AI (${runningList.length} file): ${runningList.join(", ")}`;
+    const queuedList = Array.from(queuedSet)
+      .sort((a, b) => Number((store.QUEUED_POSITIONS || {})[a] || 999) - Number((store.QUEUED_POSITIONS || {})[b] || 999))
+      .map((s) => {
+        const sc = (store.QUEUED_STEPS || {})[s] || "";
+        const sv = STEP_SHORT_VI[sc] || sc || "";
+        const pos = (store.QUEUED_POSITIONS || {})[s];
+        const meta = [sv, pos ? `#${pos}` : ""].filter(Boolean).join(", ");
+        return meta ? `${s}.docx (${meta})` : `${s}.docx`;
+      });
+    const busyList = [...runningSet, ...queuedSet];
+    const allStopping = busyList.length > 0 && busyList.every((s) => store.STOPPING_STEMS.has(s));
+    const maxW = Number(store.ALLOWED_WORKERS || 0);
+    const slotDesc = maxW > 0 ? `${runningList.length}/${maxW} luồng` : `${runningList.length} file`;
+    if (allStopping) {
+      box.textContent = `⏳ Đang dừng AI: ${runningList.concat(queuedList).join(", ")}...`;
+    } else if (runningList.length > 0 && queuedList.length > 0) {
+      box.textContent = `⏳ Đang chạy AI (${slotDesc}): ${runningList.join(", ")} · Chờ lượt: ${queuedList.join(", ")}`;
+    } else if (runningList.length > 0) {
+      box.textContent = `⏳ Đang chạy AI (${slotDesc}): ${runningList.join(", ")}`;
+    } else {
+      box.textContent = `⏳ Đang chờ lượt AI: ${queuedList.join(", ")}`;
+    }
     box.classList.remove("hidden");
     if (stopBtn) {
       stopBtn.classList.remove("hidden");
@@ -141,6 +164,9 @@ export function renderRpdStatus(rpdList) {
 
 export function syncPoolScalingUI(scaling) {
   if (!scaling) return;
+  if (scaling.recommended_workers) {
+    store.ALLOWED_WORKERS = Number(scaling.recommended_workers);
+  }
   const sel = $("sel-concurrency");
   if (sel) {
     const rec = Number(scaling.recommended_workers || 4);
@@ -179,15 +205,32 @@ export function syncPoolScalingUI(scaling) {
 export async function loadFileList(keepCurrent = true) {
   const data = await api("/api/files");
   store.FILES = data.files || [];
+  if (data.allowed_workers) {
+    store.ALLOWED_WORKERS = Number(data.allowed_workers);
+  }
   if (Array.isArray(data.running_stems)) {
     const srvSteps = data.running_steps || {};
     store.RUNNING_STEMS = new Set([...data.running_stems, ...store.LOCAL_RERUN_STEMS]);
+    const srvQueued = Array.isArray(data.queued_rerun_stems) ? data.queued_rerun_stems : [];
+    const srvQueuedSteps = data.queued_rerun_steps || {};
+    const srvQueuedPos = data.queued_rerun_positions || {};
+    store.QUEUED_STEMS = new Set(
+      [...srvQueued, ...store.LOCAL_QUEUED_STEMS].filter((s) => !store.RUNNING_STEMS.has(s))
+    );
+    const nextQueuedSteps = {};
+    const nextQueuedPos = {};
+    for (const s of store.QUEUED_STEMS) {
+      nextQueuedSteps[s] = srvQueuedSteps[s] || store.QUEUED_STEPS[s] || "";
+      if (srvQueuedPos[s]) nextQueuedPos[s] = Number(srvQueuedPos[s]);
+    }
+    store.QUEUED_STEPS = nextQueuedSteps;
+    store.QUEUED_POSITIONS = nextQueuedPos;
     const srvStopping = new Set(data.stopping_stems || []);
     for (const s of Array.from(store.STOPPING_STEMS)) {
-      if (!store.RUNNING_STEMS.has(s)) store.STOPPING_STEMS.delete(s);
+      if (!store.RUNNING_STEMS.has(s) && !store.QUEUED_STEMS.has(s)) store.STOPPING_STEMS.delete(s);
     }
     for (const s of srvStopping) {
-      if (store.RUNNING_STEMS.has(s)) store.STOPPING_STEMS.add(s);
+      if (store.RUNNING_STEMS.has(s) || store.QUEUED_STEMS.has(s)) store.STOPPING_STEMS.add(s);
     }
     const nextSteps = {};
     for (const s of store.RUNNING_STEMS) {
@@ -255,7 +298,7 @@ export async function loadFileList(keepCurrent = true) {
         Number(curRow.current_version || 0) !== Number(st.current_version || 0);
       const activeId = document.activeElement ? document.activeElement.id : "";
       const isActivelyEditing =
-        !store.RUNNING_STEMS.has(store.CURRENT_STEM) &&
+        !isStemBusy(store.CURRENT_STEM) &&
         (activeId === "txt-extract" ||
           activeId === "txt-abstract" ||
           activeId === "sel-style" ||
@@ -269,6 +312,52 @@ export async function loadFileList(keepCurrent = true) {
       }
     }
   }
+}
+
+function buildFileItemState(r, defaultPillText) {
+  const stem = r.file.replace(/\.docx$/i, "");
+  const isRunning = isStemRunning(stem);
+  const isQueued = isStemQueued(stem);
+  const isBusy = isRunning || isQueued;
+  const isStopping = isBusy && store.STOPPING_STEMS.has(stem);
+  const stepCode = isQueued
+    ? ((store.QUEUED_STEPS && store.QUEUED_STEPS[stem]) || "")
+    : ((store.RUNNING_STEPS && store.RUNNING_STEPS[stem]) || r.current_step || "");
+  const stepVi = STEP_SHORT_VI[stepCode] || "";
+  const qPos = store.QUEUED_POSITIONS ? store.QUEUED_POSITIONS[stem] : 0;
+  const pillClass = isRunning ? "st-running" : isQueued ? "st-queued" : `st-${r.status}`;
+  let pillText = defaultPillText;
+  if (isRunning) {
+    pillText = isStopping ? "⏳ Đang dừng..." : (stepVi ? `⏳ Đang chạy (${stepVi})...` : "⏳ Đang chạy AI...");
+  } else if (isQueued) {
+    pillText = isStopping
+      ? "⏳ Đang dừng..."
+      : stepVi
+        ? `⏳ Chờ lượt${qPos ? ` #${qPos}` : ""} (${stepVi})`
+        : `⏳ Chờ lượt${qPos ? ` #${qPos}` : ""}...`;
+  }
+  const stopItemHtml = isBusy
+    ? `<button type="button" class="btn-stop-item" data-stop-stem="${escapeHtml(stem)}" title="${isStopping ? "Đang dừng..." : isQueued ? `Hủy chờ lượt AI cho ${escapeHtml(r.file)}` : `Dừng chạy AI cho ${escapeHtml(r.file)}`}" ${isStopping ? "disabled" : ""}>${isStopping ? "⏳" : "⏹"}</button>`
+    : "";
+  const suspBadge = r.is_suspicious
+    ? `<span class="badge-suspicious" title="${escapeHtml((r.suspicious_reasons || []).join("; ") || "File có dấu hiệu lỗi cần hủy")}">⚠️ Nghi hủy</span>`
+    : "";
+  return { stem, isBusy, pillClass, pillText, stopItemHtml, suspBadge };
+}
+
+export function syncActiveFileItem() {
+  const cur = store.CURRENT_STEM;
+  let matched = false;
+  for (const listId of ["file-list", "done-list"]) {
+    const ul = $(listId);
+    if (!ul) continue;
+    ul.querySelectorAll(".file-item[data-stem]").forEach((li) => {
+      const isCur = Boolean(cur && li.dataset.stem === cur);
+      li.classList.toggle("active", isCur);
+      if (isCur) matched = true;
+    });
+  }
+  return matched;
 }
 
 export function renderFileList() {
@@ -297,62 +386,50 @@ export function renderFileList() {
 
   const ul = $("file-list");
   if (!ul) return;
-  ul.innerHTML = "";
-  const list = pendingFiles();
-  if (!list.length) {
-    ul.innerHTML = `<li class="muted" style="padding:10px 12px">Không có file nào trong mục này.</li>`;
-  } else {
-    for (const r of list) {
-      const stem = r.file.replace(/\.docx$/i, "");
-      const isRunning = store.RUNNING_STEMS.has(stem);
-      const isStopping = isRunning && store.STOPPING_STEMS.has(stem);
-      const li = document.createElement("li");
-      li.className = "file-item" + (stem === store.CURRENT_STEM ? " active" : "");
-      li.dataset.stem = stem;
-      const pillClass = isRunning ? "st-running" : `st-${r.status}`;
-      const stepCode = (store.RUNNING_STEPS && store.RUNNING_STEPS[stem]) || r.current_step || "";
-      const stepVi = STEP_SHORT_VI[stepCode] || "";
-      const pillText = isRunning
-        ? (isStopping ? "⏳ Đang dừng..." : (stepVi ? `⏳ Đang chạy (${stepVi})...` : "⏳ Đang chạy AI..."))
-        : r.status_vi;
-      const stopItemHtml = isRunning
-        ? `<button type="button" class="btn-stop-item" data-stop-stem="${escapeHtml(stem)}" title="${isStopping ? "Đang dừng..." : `Dừng chạy AI cho ${escapeHtml(r.file)}`}" ${isStopping ? "disabled" : ""}>${isStopping ? "⏳" : "⏹"}</button>`
-        : "";
-      const suspBadge = r.is_suspicious
-        ? `<span class="badge-suspicious" title="${escapeHtml((r.suspicious_reasons || []).join("; ") || "File có dấu hiệu lỗi cần hủy")}">⚠️ Nghi hủy</span>`
-        : "";
-      li.innerHTML = `
-        <div class="file-item-top">
-          <span style="display:inline-flex;align-items:center;gap:6px">${escapeHtml(r.file)} ${suspBadge}</span>
-          <span style="display:flex;align-items:center;gap:4px">
-            <span class="status-pill ${pillClass}">${escapeHtml(pillText)}</span>
-            ${stopItemHtml}
-            <button class="btn-del-item" data-del-stem="${stem}" title="${isRunning ? "Hãy dừng AI trước khi xóa file" : `Xóa file ${escapeHtml(r.file)}`}" ${isRunning ? "disabled" : ""}>✕</button>
-          </span>
-        </div>
-        <div class="file-item-sub">
-          <span>${escapeHtml(r.label || "(chưa gán nhãn)")}${r.model_used ? ` <strong style="color:#1d4ed8">[${escapeHtml(r.model_used)}]</strong>` : ""}</span>
-          <span>${r.n_errors ? `Lỗi: ${r.n_errors}` : `CB: ${r.n_warnings || 0}`}</span>
-        </div>
-      `;
-      const stopBtn = li.querySelector(".btn-stop-item");
-      if (stopBtn) {
-        stopBtn.addEventListener("click", (e) => {
+  withPreservedScroll(ul, () => {
+    ul.innerHTML = "";
+    const list = pendingFiles();
+    if (!list.length) {
+      ul.innerHTML = `<li class="muted" style="padding:10px 12px">Không có file nào trong mục này.</li>`;
+    } else {
+      for (const r of list) {
+        const { stem, isBusy, pillClass, pillText, stopItemHtml, suspBadge } = buildFileItemState(r, r.status_vi);
+        const li = document.createElement("li");
+        li.className = "file-item" + (stem === store.CURRENT_STEM ? " active" : "");
+        li.dataset.stem = stem;
+        li.innerHTML = `
+          <div class="file-item-top">
+            <span style="display:inline-flex;align-items:center;gap:6px">${escapeHtml(r.file)} ${suspBadge}</span>
+            <span style="display:flex;align-items:center;gap:4px">
+              <span class="status-pill ${pillClass}">${escapeHtml(pillText)}</span>
+              ${stopItemHtml}
+              <button class="btn-del-item" data-del-stem="${stem}" title="${isBusy ? "Hãy dừng AI trước khi xóa file" : `Xóa file ${escapeHtml(r.file)}`}" ${isBusy ? "disabled" : ""}>✕</button>
+            </span>
+          </div>
+          <div class="file-item-sub">
+            <span>${escapeHtml(r.label || "(chưa gán nhãn)")}${r.model_used ? ` <strong style="color:#1d4ed8">[${escapeHtml(r.model_used)}]</strong>` : ""}</span>
+            <span>${r.n_errors ? `Lỗi: ${r.n_errors}` : `CB: ${r.n_warnings || 0}`}</span>
+          </div>
+        `;
+        const stopBtn = li.querySelector(".btn-stop-item");
+        if (stopBtn) {
+          stopBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (_stopFileHandler) _stopFileHandler(stem);
+          });
+        }
+        li.querySelector(".btn-del-item").addEventListener("click", (e) => {
           e.stopPropagation();
-          if (_stopFileHandler) _stopFileHandler(stem);
+          if (isStemBusy(stem)) return;
+          deleteFiles("selected", [stem], `Bạn có chắc muốn xóa file '${r.file}'?`);
         });
+        li.addEventListener("click", () => {
+          if (_selectFileHandler) _selectFileHandler(stem);
+        });
+        ul.appendChild(li);
       }
-      li.querySelector(".btn-del-item").addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (store.RUNNING_STEMS.has(stem)) return;
-        deleteFiles("selected", [stem], `Bạn có chắc muốn xóa file '${r.file}'?`);
-      });
-      li.addEventListener("click", () => {
-        if (_selectFileHandler) _selectFileHandler(stem);
-      });
-      ul.appendChild(li);
     }
-  }
+  });
   renderDoneList();
 }
 
@@ -360,64 +437,51 @@ export function renderDoneList() {
   const doneUl = $("done-list");
   if (!doneUl) return;
   const doneFiles = approvedFiles();
-
-  doneUl.innerHTML = "";
-  if (!doneFiles.length) {
-    doneUl.innerHTML = `<li class="muted" style="padding:10px 12px">Chưa có file nào đã duyệt.</li>`;
-  } else {
-    for (const r of doneFiles) {
-      const stem = r.file.replace(/\.docx$/i, "");
-      const isRunning = store.RUNNING_STEMS.has(stem);
-      const isStopping = isRunning && store.STOPPING_STEMS.has(stem);
-      const stepCode = (store.RUNNING_STEPS && store.RUNNING_STEPS[stem]) || r.current_step || "";
-      const stepVi = STEP_SHORT_VI[stepCode] || "";
-      const pillClass = isRunning ? "st-running" : `st-${r.status}`;
-      const pillText = isRunning
-        ? (isStopping ? "⏳ Đang dừng..." : (stepVi ? `⏳ Đang chạy (${stepVi})...` : "⏳ Đang chạy AI..."))
-        : "Đã duyệt";
-      const stopItemHtml = isRunning
-        ? `<button type="button" class="btn-stop-item" data-stop-stem="${escapeHtml(stem)}" title="${isStopping ? "Đang dừng..." : `Dừng chạy AI cho ${escapeHtml(r.file)}`}" ${isStopping ? "disabled" : ""}>${isStopping ? "⏳" : "⏹"}</button>`
-        : "";
-      const suspBadge = r.is_suspicious
-        ? `<span class="badge-suspicious" title="${escapeHtml((r.suspicious_reasons || []).join("; ") || "File có dấu hiệu lỗi cần hủy")}">⚠️ Nghi hủy</span>`
-        : "";
-      const li = document.createElement("li");
-      li.className = "file-item" + (stem === store.CURRENT_STEM ? " active" : "");
-      li.dataset.stem = stem;
-      li.innerHTML = `
-        <div class="file-item-top">
-          <span style="display:inline-flex;align-items:center;gap:6px">
-            <strong>${escapeHtml(r.file)}</strong>
-            ${suspBadge}
-          </span>
-          <span style="display:flex;align-items:center;gap:4px">
-            <span class="status-pill ${pillClass}">${escapeHtml(pillText)}</span>
-            ${stopItemHtml}
-            <button class="btn-del-item" data-del-stem="${stem}" title="${isRunning ? "Hãy dừng AI trước khi xóa file" : `Xóa file ${escapeHtml(r.file)}`}" ${isRunning ? "disabled" : ""}>✕</button>
-          </span>
-        </div>
-        <div class="done-item-actions">
-          <span class="muted">${escapeHtml(r.label || "")}</span>
-        </div>
-      `;
-      const stopBtn = li.querySelector(".btn-stop-item");
-      if (stopBtn) {
-        stopBtn.addEventListener("click", (e) => {
+  withPreservedScroll(doneUl, () => {
+    doneUl.innerHTML = "";
+    if (!doneFiles.length) {
+      doneUl.innerHTML = `<li class="muted" style="padding:10px 12px">Chưa có file nào đã duyệt.</li>`;
+    } else {
+      for (const r of doneFiles) {
+        const { stem, isBusy, pillClass, pillText, stopItemHtml, suspBadge } = buildFileItemState(r, "Đã duyệt");
+        const li = document.createElement("li");
+        li.className = "file-item" + (stem === store.CURRENT_STEM ? " active" : "");
+        li.dataset.stem = stem;
+        li.innerHTML = `
+          <div class="file-item-top">
+            <span style="display:inline-flex;align-items:center;gap:6px">
+              <strong>${escapeHtml(r.file)}</strong>
+              ${suspBadge}
+            </span>
+            <span style="display:flex;align-items:center;gap:4px">
+              <span class="status-pill ${pillClass}">${escapeHtml(pillText)}</span>
+              ${stopItemHtml}
+              <button class="btn-del-item" data-del-stem="${stem}" title="${isBusy ? "Hãy dừng AI trước khi xóa file" : `Xóa file ${escapeHtml(r.file)}`}" ${isBusy ? "disabled" : ""}>✕</button>
+            </span>
+          </div>
+          <div class="done-item-actions">
+            <span class="muted">${escapeHtml(r.label || "")}</span>
+          </div>
+        `;
+        const stopBtn = li.querySelector(".btn-stop-item");
+        if (stopBtn) {
+          stopBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            if (_stopFileHandler) _stopFileHandler(stem);
+          });
+        }
+        li.querySelector(".btn-del-item").addEventListener("click", (e) => {
           e.stopPropagation();
-          if (_stopFileHandler) _stopFileHandler(stem);
+          if (isStemBusy(stem)) return;
+          deleteFiles("selected", [stem], `Bạn có chắc muốn xóa file '${r.file}'?`);
         });
+        li.addEventListener("click", () => {
+          if (_selectFileHandler) _selectFileHandler(stem);
+        });
+        doneUl.appendChild(li);
       }
-      li.querySelector(".btn-del-item").addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (store.RUNNING_STEMS.has(stem)) return;
-        deleteFiles("selected", [stem], `Bạn có chắc muốn xóa file '${r.file}'?`);
-      });
-      li.addEventListener("click", () => {
-        if (_selectFileHandler) _selectFileHandler(stem);
-      });
-      doneUl.appendChild(li);
     }
-  }
+  });
 }
 
 export function moveFile(delta) {

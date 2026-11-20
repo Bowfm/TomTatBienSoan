@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import re
 
-from ..textutil import bigrams, count_words, lines_of, nfc
+from ..textutil import (
+    bigrams,
+    count_words,
+    find_literal_escapes,
+    lines_of,
+    nfc,
+    unescape_escaped_newlines,
+)
 from ..units import abstract_targets
 from .core import ERROR, INFO, WARNING, CheckResult, is_heading_like
 from .scoring import estimate_bartscore, estimate_geval_heuristic
@@ -28,14 +35,20 @@ FORBIDDEN_TRANSITIONS_RE = re.compile(
 )
 
 
-def clean_multi_doc_abstract(abstract: str, n_docs: int = 1) -> str:
+def clean_multi_doc_abstract(
+    abstract: str,
+    n_docs: int = 1,
+    preserve_source: str | None = None,
+) -> str:
     """Chuẩn hóa bản biên soạn đa văn bản:
-    1. Giữa các đoạn tóm tắt của từng văn bản để trống 1 dòng (\\n\\n).
-    2. Loại bỏ câu nối/từ dẫn dắt giữa các đoạn và viết hoa trực tiếp nội dung văn bản.
+    1. Chuyển chuỗi `\\n` viết thô (nếu LLM double-escape) thành xuống dòng thực sự.
+    2. Giữa các đoạn tóm tắt của từng văn bản để trống 1 dòng (\\n\\n).
+    3. Loại bỏ câu nối/từ dẫn dắt giữa các đoạn và viết hoa trực tiếp nội dung văn bản.
     """
-    if not abstract:
+    normalized = unescape_escaped_newlines(abstract, preserve_source=preserve_source)
+    if not normalized:
         return ""
-    paras = [p.strip() for p in re.split(r"\n+", nfc(abstract).strip()) if p.strip()]
+    paras = [p.strip() for p in re.split(r"\n+", normalized) if p.strip()]
     if not paras:
         return ""
     if n_docs > 1:
@@ -47,6 +60,17 @@ def clean_multi_doc_abstract(abstract: str, n_docs: int = 1) -> str:
             cleaned_paras.append(cleaned)
         return "\n\n".join(cleaned_paras)
     return "\n".join(paras)
+
+
+def clean_abstract_text(
+    abstract: str,
+    n_docs: int = 1,
+    preserve_source: str | None = None,
+) -> str:
+    """Chuẩn hóa văn bản biên soạn từ LLM cho cả đơn văn bản lẫn đa văn bản."""
+    if n_docs > 1:
+        return clean_multi_doc_abstract(abstract, n_docs=n_docs, preserve_source=preserve_source)
+    return unescape_escaped_newlines(abstract, preserve_source=preserve_source)
 
 
 def check_length(n_ext: int, n_abs: int, cfg: dict, res: CheckResult) -> None:
@@ -84,6 +108,19 @@ def check_abstract(data: dict, style: str, extract: str, abstract: str, cfg: dic
         res.metrics["abstract_targets"] = abstract_targets(n_ext, cfg)
         return
     check_length(n_ext, n_abs, cfg, res)
+
+    src_plain = nfc(" ".join(u["text"] for d in data["docs"] for u in d["units"]))
+    abs_n = nfc(abstract)
+    bad_escapes = find_literal_escapes(abs_n, preserve_source=src_plain)
+    if bad_escapes:
+        samples = ", ".join(bad_escapes[:3])
+        res.add(
+            ERROR,
+            "literal_escape",
+            f"Bản biên soạn chứa ký tự xuống dòng/điều khiển viết thô ({samples}); "
+            "hãy thay bằng xuống dòng thực sự (Enter).",
+            "abstract",
+        )
 
     a_lines = lines_of(abstract)
     # markdown không hợp lệ trong ô Word
@@ -145,8 +182,6 @@ def check_abstract(data: dict, style: str, extract: str, abstract: str, cfg: dic
     if (abstract.count('"') % 2) or (abstract.count("“") != abstract.count("”")):
         res.add(WARNING, "quotes", "Dấu ngoặc kép không cân bằng trong bản biên soạn.")
 
-    src_plain = nfc(" ".join(u["text"] for d in data["docs"] for u in d["units"]))
-    abs_n = nfc(abstract)
     decs = DEC_POINT_RE.findall(abs_n)
     hard = [x for x in decs if x.replace(".", ",") in src_plain and x not in src_plain]
     soft = [x for x in decs if x not in hard and x not in src_plain]

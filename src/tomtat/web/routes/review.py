@@ -26,6 +26,9 @@ def _check_not_running(stem: str) -> str | None:
     running = bst.get("all_running", bst.get("running", []))
     if stem in running:
         return f"File '{stem}.docx' đang được AI xử lý, vui lòng đợi hoàn tất."
+    queued = bst.get("queued_rerun_stems") or []
+    if stem in queued:
+        return f"File '{stem}.docx' đang chờ lượt chạy AI, vui lòng đợi hoàn tất hoặc bấm Dừng AI."
     return None
 
 
@@ -166,6 +169,10 @@ def api_restore(stem: str):
 @bp.post("/api/file/<stem>/approve")
 def api_approve(stem: str):
     """Duyệt và ghi ra output\\<file>.docx (chặn nếu còn LỖI)."""
+    err_running = _check_not_running(stem)
+    if err_running:
+        return jsonify({"error": err_running, "already_running": True}), 409
+
     svc = _service()
     payload = request.get_json(force=True) or {}
     files_map = svc.resolve_files()

@@ -40,3 +40,13 @@ export function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
+
+export function withPreservedScroll(el, fn, opts = {}) {
+  if (!el) return;
+  const reset = Boolean(opts.reset);
+  const prevTop = reset ? 0 : el.scrollTop;
+  const prevLeft = reset ? 0 : el.scrollLeft;
+  fn();
+  el.scrollTop = prevTop;
+  el.scrollLeft = prevLeft;
+}

@@ -73,7 +73,7 @@ ABSTRACT_SCHEMA = {
     "properties": {
         "abstract": {
             "type": "string",
-            "description": "Văn bản tóm tắt biên soạn hoàn chỉnh (các đoạn cách nhau bằng \\n).",
+            "description": "Văn bản tóm tắt biên soạn hoàn chỉnh (ngắt đoạn bằng xuống dòng thực sự, tuyệt đối không viết ký tự \\n theo nghĩa đen hay Markdown).",
         },
         "note": {
             "type": "string",
