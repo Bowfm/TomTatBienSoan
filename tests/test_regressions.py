@@ -3933,6 +3933,68 @@ assert.equal(docsBox.scrollTop, 0);
     assert res.returncode == 0, f"Node test thất bại:\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}"
 
 
+# ---------------------------------------------------------------------------
+# BUG-031: _reserve_gateway_wait cộng jitter sau vòng lặp làm slot đè lên nhau
+# ---------------------------------------------------------------------------
+
+def test_bug_031_reserve_gateway_wait_jitter_never_collides_with_existing_slots(tmp_path, monkeypatch):
+    """BUG-031: Jitter trong _reserve_gateway_wait không bao giờ được đẩy mốc đặt chỗ mới
+    đè vào khoảng < global_min_dispatch_interval_s của một slot đã đặt trước đó."""
+    import random as _random
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys = [f"key_gw_{i:02d}" for i in range(1, 5)]
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["backoff_base_s"] = 0.12
+    cfg["gemini"]["backoff_max_s"] = 1.0
+    cfg["gemini"]["global_min_dispatch_interval_s"] = 0.08
+    cfg["gemini"]["qps_global_cooldown_s"] = 0.0
+
+    client = GeminiClient(cfg, keys)
+    base_now = 1_000_000.0
+    monkeypatch.setattr("tomtat.llm.gemini.time.time", lambda: base_now)
+
+    # Tái hiện đúng kịch bản gây lỗi ở BUG-027:
+    # - Slot 0 ở base_now
+    # - Slot 1 va chạm Slot 0 -> nhảy sang base_now + 0.08 + jitter (ví dụ +0.20 = base_now + 0.28)
+    # - Thread 2 gọi tại base_now với jitter 0.20 (nếu cộng jitter sau vòng lặp sẽ thành
+    #   base_now + 0.08 + 0.20 = base_now + 0.28, trùng hệt Slot 1!)
+    monkeypatch.setattr(_random, "uniform", lambda a, b: 0.20 if b >= 0.20 else b)
+    client._dispatch_slots = [base_now, base_now + 0.28]
+
+    wait_s = client._reserve_gateway_wait(min_wait_s=0.0)
+    assert len(client._dispatch_slots) == 3
+    slots_sorted = sorted(client._dispatch_slots)
+    for prev_s, next_s in zip(slots_sorted, slots_sorted[1:]):
+        assert next_s - prev_s >= 0.08 - 1e-9, (
+            f"Slot mới va chạm slot cũ: {slots_sorted} (wait_s={wait_s})"
+        )
+
+    # Kiểm tra cả cấu hình thực tế global_min_dispatch_interval_s = 1.5s khi có slot chờ phía trước
+    cfg["gemini"]["global_min_dispatch_interval_s"] = 1.5
+    cfg["gemini"]["backoff_max_s"] = 10.0
+    client_prod = GeminiClient(cfg, keys)
+    monkeypatch.setattr(_random, "uniform", lambda a, b: 0.20)
+    client_prod._dispatch_slots = [base_now, base_now + 3.10]
+    client_prod._reserve_gateway_wait(min_wait_s=0.0)
+    prod_sorted = sorted(client_prod._dispatch_slots)
+    for prev_s, next_s in zip(prod_sorted, prod_sorted[1:]):
+        assert next_s - prev_s >= 1.5 - 1e-9, f"Slot production va chạm: {prod_sorted}"
+
+    # Kiểm tra dãy jitter biến thiên ngẫu nhiên qua nhiều cụm burst liên tiếp
+    rng = _random.Random(42)
+    monkeypatch.setattr(_random, "uniform", rng.uniform)
+    for _ in range(25):
+        client._dispatch_slots.clear()
+        for _slot_idx in range(6):
+            client._reserve_gateway_wait(min_wait_s=0.0)
+        ordered = sorted(client._dispatch_slots)
+        for prev_s, next_s in zip(ordered, ordered[1:]):
+            assert next_s - prev_s >= 0.08 - 1e-9
+
+
+
 
 
 

@@ -37,6 +37,7 @@
 | BUG-029 | 2026-11-20 | `services/batch_service.py`, `web/routes/{process,files,review,system}.py`, `web/static/` | Khi đã chạy đủ số luồng cho phép (vd 3/3), bấm 1 trong 5 nút AI ở file đang xem phải xếp hàng chờ lượt thay vì tạo thêm luồng thứ N+1 | `tests/test_regressions.py::test_bug_029_*` |
 | BUG-028 | 2026-11-20 | `textutil.py`, `checks/abstract_checks.py`, `pipeline.py`, `prompts.py`, `prompts/abstract.md` | Bản biên soạn xuất hiện ký tự `\n` viết thô (`S89777`) do LLM double-escape trong JSON; thêm làm sạch ở cả đơn/đa văn bản và lỗi cơ học `literal_escape` | `tests/test_regressions.py::test_bug_028_*` |
 | BUG-030 | 2026-11-20 | `web/static/{app.css,modules/{utils,sidebar,editor}.js}`, `web/templates/index.html` | Ấn chọn file ở cột bên trái làm danh sách tự cuộn xuống dưới ngay lập tức (nhất là khi zoom trình duyệt `< 100%`) | `tests/test_regressions.py::test_bug_030_sidebar_click_preserves_scroll_contract_and_behavior` |
+| BUG-031 | 2026-11-20 | `llm/gemini.py` | Jitter trong `_reserve_gateway_wait` cộng sau vòng lặp `slots` làm slot mới có thể nhảy đè lên slot đã đặt kế tiếp (`test_bug_027_anti_qps_stagger...` fail ngẫu nhiên) | `tests/test_regressions.py::test_bug_031_reserve_gateway_wait_jitter_never_collides_with_existing_slots` |
 
 ---
 
@@ -343,6 +344,16 @@
   - `selectFile` không được xóa/dựng lại DOM danh sách bên trái khi file đã có sẵn trong `#file-list` / `#done-list`; phải dùng `syncActiveFileItem()` cập nhật tại chỗ class `.active`.
   - Mọi lần buộc phải dựng lại DOM (`renderFileList`, `renderDoneList`, `renderDocsUnits({ preserveScroll: true })`, `renderVersions`) đều phải bọc qua `withPreservedScroll` để bảo toàn `scrollTop`/`scrollLeft` (chỉ reset về `0` cho `docs-container` và `versions-list` khi chuyển sang file khác).
 - **Regression Test**: `tests/test_regressions.py::test_bug_030_sidebar_click_preserves_scroll_contract_and_behavior`
+
+### BUG-031: Jitter trong `_reserve_gateway_wait` cộng sau vòng lặp `slots` làm slot mới đè lên slot đã đặt
+- **Commit / Nguồn**: Sửa đổi ngày 2026-11-20 trong `src/tomtat/llm/gemini.py`
+- **File / Symbol**: `src/tomtat/llm/gemini.py` (`GeminiClient._reserve_gateway_wait`)
+- **Triệu chứng**: Khi nhiều luồng cùng đặt chỗ gửi API qua `_reserve_gateway_wait`, luồng sau có thể nhận thời điểm gửi trùng hoặc cách slot liền sau nhỏ hơn `global_min_dispatch_interval_s` (khiến `test_bug_027_anti_qps_stagger_shared_cooldown_and_retry_differentiation` fail ngẫu nhiên trên Windows và làm 2 luồng có thể bắn API sát nhau).
+- **Nguyên nhân gốc**: Sau vòng lặp `for s in slots:` tìm khoảng trống `t_cand`, hàm mới cộng thêm `random.uniform(0.05, 0.25)` khi `t_cand > earliest` mà không kiểm tra lại khoảng cách với các slot tiếp theo (nên có thể nhảy đè vào slot thứ 2 khi có khoảng trống vừa khít hoặc vượt qua biên `s - dispatch_gap`).
+- **Bất biến cần bảo vệ**:
+  - Jitter phải được cộng **ngay trong bước trượt slot** (`t_cand = s + dispatch_gap + random.uniform(jitter_min, jitter_cap)`) khi phát hiện va chạm, để mọi vòng lặp tiếp theo tiếp tục kiểm tra và đảm bảo `|t_new - s| >= global_min_dispatch_interval_s` với **toàn bộ** các slot đang hiệu lực.
+  - `jitter_cap` không vượt quá `0.25s` và tỉ lệ hợp lý theo `dispatch_gap` (`min(0.25, max(0.02, dispatch_gap * 0.5))`).
+- **Regression Test**: `tests/test_regressions.py::test_bug_031_reserve_gateway_wait_jitter_never_collides_with_existing_slots`
 
 ---
 

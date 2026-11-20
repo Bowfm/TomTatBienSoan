@@ -686,16 +686,18 @@ class GeminiClient(BaseClient):
             earliest = max(base_ts, self._global_qps_next_ts)
             dispatch_gap = self.global_min_dispatch_interval_s if len(self._api_keys) > 1 else 0.0
             if dispatch_gap > 0.0:
-                cutoff = now - 10.0
+                cutoff = now - max(10.0, dispatch_gap * 2.0)
                 slots = sorted(t for t in self._dispatch_slots if t > cutoff)
                 t_cand = earliest
+                # Giới hạn jitter tỉ lệ theo dispatch_gap và cộng ngay trong lúc trượt slot
+                # để luôn giữ khoảng cách >= dispatch_gap với mọi slot đã đặt kế tiếp.
+                jitter_cap = min(0.25, max(0.02, dispatch_gap * 0.5))
+                jitter_min = min(0.05, jitter_cap * 0.5)
                 for s in slots:
                     if t_cand + dispatch_gap <= s:
                         break
-                    if abs(t_cand - s) < dispatch_gap:
-                        t_cand = s + dispatch_gap
-                if t_cand > earliest:
-                    t_cand += random.uniform(0.05, 0.25)
+                    if t_cand < s + dispatch_gap:
+                        t_cand = s + dispatch_gap + random.uniform(jitter_min, jitter_cap)
                 slots.append(t_cand)
                 self._dispatch_slots = slots
                 earliest = t_cand
