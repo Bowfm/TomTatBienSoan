@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Duyệt Tóm tắt - Biên soạn</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v=20261120b">
 </head>
 <body>
   <header class="topbar">
@@ -23,6 +23,16 @@
     </div>
   </header>
 
+  <div id="rpd-bar" class="rpd-bar" aria-label="Theo dõi RPD của từng model">
+    <span class="rpd-bar-label" title="Số requests đã sử dụng / Giới hạn requests trong ngày của từng model (reset lúc 15:00 giờ VN)">📊 RPD trong ngày:</span>
+    <div id="rpd-models-list" class="rpd-models-list">
+      {% for item in rpd_status or [] %}
+      {% set state_cls = 'rpd-exhausted' if ((item.limit > 0 and item.used >= item.limit) or (item.key_count > 0 and item.exhausted_keys >= item.key_count)) else ('rpd-warn' if (item.limit > 0 and (item.used / item.limit) >= 0.8) else ('rpd-active' if item.used > 0 else 'rpd-ok')) %}
+      <span class="rpd-pill {{ state_cls }}" data-model="{{ item.model }}" title="{{ item.model }}: Đã sử dụng {{ item.used }}/{{ item.limit }} requests trong ngày ({{ item.rpd_per_key }} RPD/key × {{ item.key_count }} key · Reset lúc 15:00 giờ VN)">{{ item.model }}: {{ item.used }}/{{ item.limit }}</span>
+      {% endfor %}
+    </div>
+  </div>
+
   <div id="update-notification-banner" class="update-banner hidden">
     <span>🔔 <strong>Đã có bản cập nhật mới trên GitHub!</strong> <span id="update-banner-msg"></span></span>
     <div class="update-banner-actions">
@@ -39,7 +49,7 @@
         <div class="upload-btn-row">
           <button id="btn-add-files" class="btn btn-primary" style="flex:1">+ Thêm file .docx</button>
           <button id="btn-run-pending" class="btn" title="Chạy AI cho các file chưa xử lý">▶ Chạy AI</button>
-          <button id="btn-stop-batch" class="btn hidden" style="color:#b91c1c;border-color:#fca5a5">⏹ Dừng</button>
+          <button id="btn-stop-batch" class="btn btn-stop-ai hidden" title="Dừng tiến trình AI đang chạy">⏹ Dừng</button>
         </div>
         <div id="batch-progress" class="batch-progress hidden"></div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
@@ -47,20 +57,19 @@
             <input type="checkbox" id="chk-run-on-upload" checked>
             Tự động chạy AI khi thêm file
           </label>
-          <label class="chk-inline" title="Số file chạy song song cùng lúc (tận dụng pool API keys)" style="font-size:12px;color:var(--muted);gap:4px">
+          <label class="chk-inline" title="Số file chạy song song cùng lúc (tự động điều chỉnh theo tổng số API keys)" style="font-size:12px;color:var(--muted);gap:4px">
             Luồng:
             <select id="sel-concurrency" style="padding:1px 4px;font-size:12px;border-radius:4px;border:1px solid #cbd5e1;cursor:pointer">
-              <option value="4">4 luồng</option>
-              <option value="6">6 luồng</option>
-              <option value="8" selected>8 luồng</option>
-              <option value="10">10 luồng</option>
-              <option value="12">12 luồng</option>
+              <option value="auto" selected>Tự động (theo số key)</option>
+              <option value="1">1 luồng</option>
+              <option value="2">2 luồng</option>
             </select>
           </label>
         </div>
         <div class="counts-summary">
           <span>Tổng: <strong id="cnt-total">0</strong></span>
-          <span>· Chờ duyệt: <strong id="cnt-pending">0</strong></span>
+          <span>· Đã có nháp: <strong id="cnt-draft">0</strong></span>
+          <span id="cnt-unprocessed-wrap">· Chưa xử lý: <strong id="cnt-unprocessed">0</strong></span>
           <span>· Đã duyệt: <strong id="cnt-approved">0</strong></span>
           <button id="btn-clear-all" class="btn-link-danger" title="Xóa toàn bộ file của ca/ngày hiện tại để làm ngày mới">🧹 Xóa hết</button>
         </div>
@@ -99,16 +108,10 @@
               <span>Đã duyệt</span>
               <span id="done-count" class="count-pill pill-approved">0</span>
             </div>
-            <label class="chk-inline">
-              <input type="checkbox" id="chk-done-all" checked> Chọn hết
-            </label>
           </div>
           <ul id="done-list" class="file-list done-list"></ul>
           <div class="sb-col-foot">
-            <button id="btn-download-zip" class="btn btn-primary btn-zip" disabled>
-              ⬇ Tải ZIP hôm nay
-            </button>
-            <button id="btn-clear-approved" class="btn btn-sm btn-danger-outline" style="width:100%;margin-top:5px" disabled>
+            <button id="btn-clear-approved" class="btn btn-sm btn-danger-outline" style="width:100%" disabled>
               🗑 Xóa các file đã duyệt
             </button>
           </div>
@@ -136,12 +139,25 @@
           </div>
           <div id="flags-box" class="flags-box hidden"></div>
           <div class="ai-rerun-bar">
-            <input id="ai-note" type="text" placeholder="Ghi chú gửi cho AI khi chạy lại (ví dụ: giữ giọng trang trọng hơn, rút ngắn 20 từ)...">
             <button class="btn btn-sm" data-rerun="label">AI: Gán nhãn lại</button>
             <button class="btn btn-sm" data-rerun="extract">AI: Trích chọn lại</button>
             <button class="btn btn-sm" data-rerun="abstract">AI: Biên soạn lại</button>
             <button class="btn btn-sm" data-rerun="judge">AI: Chấm G-Eval</button>
             <button class="btn btn-sm" data-rerun="all">AI: Chạy lại cả bài</button>
+            <button id="btn-stop-file-ai" type="button" class="btn btn-sm btn-stop-ai hidden" title="Dừng chạy AI cho file hiện tại">⏹ Dừng AI</button>
+          </div>
+          <div class="version-bar" id="version-bar">
+            <div class="version-bar-info">
+              <span class="version-label">📌 Phiên bản:</span>
+              <strong id="cur-version-badge" class="version-pill">Chưa lưu</strong>
+              <span id="version-dirty-badge" class="badge version-dirty hidden" title="Nội dung hiện tại đã sửa so với mốc version mới nhất">Chưa lưu mốc mới</span>
+            </div>
+            <div class="version-bar-actions">
+              <input id="version-note" type="text" placeholder="Ghi chú khi lưu version (tùy chọn)...">
+              <button id="btn-save" class="btn btn-sm btn-save-ver" title="Lưu trạng thái hiện tại thành một version mới">💾 Lưu version</button>
+              <button id="btn-rollback-prev" class="btn btn-sm" title="Quay lại version trước đó của file này" disabled>↩ Rollback version trước</button>
+              <button id="btn-versions-modal" class="btn btn-sm" title="Xem chi tiết, so sánh và khôi phục các phiên bản">🕘 Lịch sử (<span id="versions-count-btn">0</span>)</button>
+            </div>
           </div>
         </section>
 
@@ -242,12 +258,13 @@
               </div>
               <div id="label-reason" class="muted small-mt"></div>
               <div id="label-per-doc" class="per-doc-list"></div>
+              <div id="label-stale-prompt" class="stale-inline-prompt hidden"></div>
             </div>
 
             <!-- Bước 2: Bản trích chọn -->
-            <div class="card">
+            <div id="card-extract" class="card">
               <div class="section-head">
-                <h3>2. Bản trích chọn (<span id="ext-word-inline">0</span> từ) <span id="model-badge-extract" class="badge"></span></h3>
+                <h3>2. Bản trích chọn (<span id="ext-word-inline">0</span> từ) <span id="model-badge-extract" class="badge"></span> <span id="stale-badge-extract" class="badge badge-stale hidden">⚠️ Cần chỉnh sửa lại</span></h3>
                 <button id="btn-rebuild-extract" class="btn btn-sm" title="Ghép lại nguyên văn từ các ô đã tick bên trái">Ghép lại từ các câu đã tick</button>
               </div>
               <p class="hint">Có thể tick/bỏ tick từng câu ở cột trái, hoặc xóa bớt thành phần phụ ở đầu câu ngay trong ô dưới đây (hệ thống kiểm tra nguyên văn tức thì):</p>
@@ -256,9 +273,9 @@
             </div>
 
             <!-- Bước 3: Bản biên soạn -->
-            <div class="card">
+            <div id="card-abstract" class="card">
               <div class="section-head">
-                <h3>3. Bản biên soạn (<span id="abs-word-inline">0</span> từ) <span id="model-badge-abstract" class="badge"></span></h3>
+                <h3>3. Bản biên soạn (<span id="abs-word-inline">0</span> từ) <span id="model-badge-abstract" class="badge"></span> <span id="stale-badge-abstract" class="badge badge-stale hidden">⚠️ Cần chỉnh sửa lại</span></h3>
                 <span id="abs-target-inline" class="muted"></span>
               </div>
               <textarea id="txt-abstract" rows="10" spellcheck="false"></textarea>
@@ -266,8 +283,19 @@
 
             <!-- Bước 5: Kết quả chấm G-Eval (nếu có) -->
             <div id="judge-card" class="card hidden">
-              <h3>Điểm G-Eval tự chấm</h3>
+              <div class="section-head">
+                <h3>Điểm G-Eval tự chấm <span id="stale-badge-judge" class="badge badge-stale hidden">⚠️ Cần chấm lại</span></h3>
+              </div>
               <div id="judge-content"></div>
+            </div>
+
+            <!-- Lịch sử phiên bản & Rollback -->
+            <div id="versions-card" class="card">
+              <div class="section-head">
+                <h3>4. Lịch sử phiên bản (<span id="versions-count">0</span>)</h3>
+                <span class="muted">Lưu từng mốc &amp; rollback cho riêng file này</span>
+              </div>
+              <ul id="versions-list" class="versions-list"></ul>
             </div>
           </section>
         </div>

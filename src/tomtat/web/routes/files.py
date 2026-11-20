@@ -7,8 +7,10 @@ from pathlib import Path
 from flask import Blueprint, current_app, jsonify, request
 
 from ... import STYLES
-from ...config import get_api_key, get_api_keys, load_config
+from ... import config as _cfg_mod
+from ...config import get_pool_scaling, load_config
 from ...docx_io import DocxError
+from ...llm import get_rpd_status
 from ...services.file_service import FileService
 from ...state import STATUS_VI
 from ...textutil import nfc
@@ -31,20 +33,51 @@ def _service() -> FileService:
 
 @bp.get("/api/files")
 def api_files():
+    cfg = _cfg()
+    cfg.reload()
     fresh_cfg = load_config()
     svc = _service()
     rows = svc.get_status_rows()
     g = fresh_cfg.get("gemini", {})
+    keys = _cfg_mod.get_api_keys()
+    scaling = get_pool_scaling(cfg, api_keys=keys)
+    running_stems: list[str] = []
+    running_steps: dict[str, str] = {}
+    stopping_stems: list[str] = []
+    mgr = current_app.config.get("TOMTAT_BATCH_MGR")
+    if mgr is not None:
+        bst = mgr.status()
+        running_stems = bst.get("all_running", bst.get("running", []))
+        running_steps = bst.get("all_running_steps", bst.get("running_steps", {}))
+        stopping_stems = bst.get("stopping_stems", [])
     return jsonify({
         "files": rows,
         "styles": STYLES,
         "status_vi": STATUS_VI,
         "mock": _mock(),
-        "has_api_key": bool(get_api_key()),
-        "api_key_count": len(get_api_keys()),
+        "has_api_key": bool(keys),
+        "api_key_count": len(keys),
+        "pool_scaling": scaling,
         "primary_model": g.get("model", ""),
         "fallback_models": g.get("fallback_models") or [],
         "learned_count": svc.get_learned_count(),
+        "rpd_status": get_rpd_status(cfg, api_keys=keys),
+        "running_stems": running_stems,
+        "running_steps": running_steps,
+        "stopping_stems": stopping_stems,
+    })
+
+
+@bp.get("/api/rpd")
+def api_rpd():
+    """Trả về thống kê RPD (Requests Per Day) hiện tại của từng model."""
+    cfg = _cfg()
+    cfg.reload()
+    keys = _cfg_mod.get_api_keys()
+    return jsonify({
+        "api_key_count": len(keys),
+        "pool_scaling": get_pool_scaling(cfg, api_keys=keys),
+        "rpd_status": get_rpd_status(cfg, api_keys=keys),
     })
 
 
@@ -133,7 +166,9 @@ def api_get_file(stem: str):
     cfg.reload()
     svc = _service()
     try:
-        return jsonify(svc.get_file_detail(stem))
+        detail = svc.get_file_detail(stem)
+        detail["rpd_status"] = get_rpd_status(cfg)
+        return jsonify(detail)
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
     except DocxError as exc:
@@ -143,5 +178,28 @@ def api_get_file(stem: str):
 @bp.get("/api/file/<stem>/logs")
 def api_get_logs(stem: str):
     """Trả về danh sách các lần gọi Gemini (logs) của file để xem trực tiếp trên web."""
+    cfg = _cfg()
+    cfg.reload()
     svc = _service()
-    return jsonify(svc.get_file_logs(stem))
+    running_stems: list[str] = []
+    running_steps: dict[str, str] = {}
+    stopping_stems: list[str] = []
+    batch_active = False
+    mgr = current_app.config.get("TOMTAT_BATCH_MGR")
+    if mgr is not None:
+        bst = mgr.status()
+        batch_active = bst.get("active", False)
+        running_stems = bst.get("all_running", bst.get("running", []))
+        running_steps = bst.get("all_running_steps", bst.get("running_steps", {}))
+        stopping_stems = bst.get("stopping_stems", [])
+    res = svc.get_file_logs(
+        stem,
+        is_running=(stem in running_stems),
+        server_started_epoch=current_app.config.get("TOMTAT_STARTED_EPOCH"),
+    )
+    res["rpd_status"] = get_rpd_status(cfg)
+    res["batch_active"] = batch_active
+    res["running_stems"] = running_stems
+    res["running_steps"] = running_steps
+    res["stopping_stems"] = stopping_stems
+    return jsonify(res)

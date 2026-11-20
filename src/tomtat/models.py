@@ -16,10 +16,6 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from .checks.core import CheckResult, Issue
-from .llm.base import LLMError, LLMResult
-from .textutil import TextConfig
-
 
 # ---------------------------------------------------------------- state.json
 class LabelStep(TypedDict, total=False):
@@ -70,6 +66,7 @@ class FileState(TypedDict, total=False):
     flags: list[str]
     error_message: str | None
     stale_steps: list[str]
+    stale_reason: str | None
     label: LabelStep
     extract: ExtractStep
     abstract: AbstractStep
@@ -78,6 +75,7 @@ class FileState(TypedDict, total=False):
     current_version: int
     output_path: str | None
     model_used: str | None
+    current_step: str | None
 
 
 # ---------------------------------------------------------------- units.json
@@ -123,6 +121,11 @@ class UnitsData(TypedDict):
     budget: DocumentBudget
     filename_mismatch: str | None
 
+
+# ---------------------------------------------------------------- Re-exports (cuối file để tránh circular import)
+from .checks.core import CheckResult, Issue  # noqa: E402
+from .llm.base import LLMError, LLMResult  # noqa: E402
+from .textutil import TextConfig  # noqa: E402
 
 __all__ = [
     # Re-export

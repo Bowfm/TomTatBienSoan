@@ -1,19 +1,18 @@
 """FileService — Tầng nghiệp vụ xử lý, duyệt, lưu trữ và xuất file tài liệu."""
 from __future__ import annotations
 
-from datetime import datetime
-import io
-import json
+import copy
 from pathlib import Path
 import shutil
-import zipfile
+import threading
 
 from ..checks import run_checks
 from ..config import Config
 from ..docx_io import DocxError, fill_docx
+from ..llm import DEFAULT_TIMEOUT_S, get_model_timeout_s
 from ..memory import load_memory, record_approved_sample
 from ..models import FileState, UnitsData
-from ..pipeline import Pipeline, finalize_status, process_file, step_inspect
+from ..pipeline import Pipeline, _mark_stale_after, finalize_status, process_file, step_inspect
 from ..report import _infer_model_from_logs, collect_rows, infer_step_models_from_logs, write_reports
 from ..state import (
     STATUS_APPROVED,
@@ -21,7 +20,9 @@ from ..state import (
     STATUS_EXPORTED,
     STATUS_PENDING,
     FileWorkspace,
+    _normalize_selections_sig,
     discover_docx_files,
+    read_json,
 )
 from ..textutil import count_words, nfc
 from ..units import assemble_extract, compute_budget, normalize_selections
@@ -74,9 +75,9 @@ class FileService:
         client,
         force: bool = False,
         only_step: str | None = None,
-        user_note: str = "",
         ignore_mismatch: bool = False,
         restart: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Chạy pipeline AI cho một file docx."""
         pipeline = Pipeline(self.cfg, client)
@@ -84,9 +85,9 @@ class FileService:
             docx_path,
             force=force,
             only_step=only_step,
-            user_note=user_note,
             ignore_mismatch=ignore_mismatch,
             restart=restart,
+            cancel_event=cancel_event,
         )
 
     async def process_async(
@@ -95,9 +96,9 @@ class FileService:
         client,
         force: bool = False,
         only_step: str | None = None,
-        user_note: str = "",
         ignore_mismatch: bool = False,
         restart: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Chạy pipeline AI bất đồng bộ (asyncio) cho một file docx."""
         pipeline = Pipeline(self.cfg, client)
@@ -105,10 +106,38 @@ class FileService:
             docx_path,
             force=force,
             only_step=only_step,
-            user_note=user_note,
             ignore_mismatch=ignore_mismatch,
             restart=restart,
+            cancel_event=cancel_event,
         )
+
+    @staticmethod
+    def _apply_draft_fields(
+        st: FileState,
+        units_data: UnitsData | None,
+        style: str,
+        extract: str,
+        abstract: str,
+        selections: dict | None = None,
+        custom_edited: bool | None = None,
+    ) -> None:
+        style = nfc(style).strip()
+        extract = nfc(extract)
+        abstract = nfc(abstract)
+        st.setdefault("label", {})["value"] = style
+        ext = st.setdefault("extract", {})
+        if selections is not None:
+            ext["selections"] = selections
+        total = (units_data.get("budget") or {}).get("total_words", 0) if units_data else 0
+        n_ext = count_words(extract)
+        ext["text"] = extract
+        ext["words"] = n_ext
+        ext["compress"] = round(n_ext / total, 4) if total else 0.0
+        if custom_edited is not None:
+            ext["custom_edited"] = bool(custom_edited)
+        ab = st.setdefault("abstract", {})
+        ab["text"] = abstract
+        ab["words"] = count_words(abstract)
 
     def save_draft(
         self,
@@ -119,77 +148,231 @@ class FileService:
         selections: dict | None = None,
         note: str = "",
         custom_edited: bool = False,
+        *,
+        create_version: bool = True,
+        source: str = "user",
+        dismiss_stale: bool = False,
     ) -> dict:
-        """Lưu bản nháp hiện tại và ghi thêm một phiên bản lịch sử."""
+        """Lưu bản nháp hiện tại và (tùy chọn) ghi thêm một phiên bản lịch sử."""
         files_map = self.resolve_files()
         if stem not in files_map:
             raise FileNotFoundError(f"Không tìm thấy file '{stem}'.")
 
         ws = FileWorkspace(self.cfg.work_dir, files_map[stem])
         st = ws.load_state()
+        prev_status = st.get("status")
+        prev_style = nfc(str((st.get("label") or {}).get("value") or "")).strip()
+        new_style = nfc(str(style or "")).strip()
+        latest_snap = ws.latest_draft_version()
+        ref_snap = latest_snap if create_version else None
+        ref_ext = copy.deepcopy((ref_snap or st).get("extract") or {})
+        ref_ab = copy.deepcopy((ref_snap or st).get("abstract") or {})
         units_data = ws.load_units()
         if not units_data:
             units_data = step_inspect(ws, self.cfg, st)
         if units_data and "total_words" in (units_data.get("budget") or {}):
             units_data["budget"] = compute_budget(units_data["budget"]["total_words"], self.cfg)
 
-        style = nfc(style).strip()
-        extract = nfc(extract)
-        abstract = nfc(abstract)
-        selections = selections or st.get("extract", {}).get("selections") or {}
-
-        st.setdefault("label", {})["value"] = style
-        total = (units_data.get("budget") or {}).get("total_words", 0)
-        n_ext = count_words(extract)
-        st["extract"].update({
-            "selections": selections,
-            "text": extract,
-            "words": n_ext,
-            "compress": round(n_ext / total, 4) if total else 0.0,
-            "custom_edited": custom_edited,
-        })
-        st["abstract"].update({
-            "text": abstract,
-            "words": count_words(abstract),
-        })
-        chk = run_checks(units_data, style, extract, abstract, self.cfg)
+        self._apply_draft_fields(
+            st,
+            units_data,
+            style,
+            extract,
+            abstract,
+            selections=selections,
+            custom_edited=custom_edited,
+        )
+        chk = run_checks(
+            units_data,
+            st["label"]["value"],
+            st["extract"]["text"],
+            st["abstract"]["text"],
+            self.cfg,
+        )
         st["checks"] = chk.to_dict()
         if st["status"] not in (STATUS_APPROVED, STATUS_EXPORTED):
             st["status"] = STATUS_DRAFT if chk.ok else STATUS_PENDING
 
-        ver = ws.save_draft_version(st, source="user", note=note or "Lưu nháp thủ công")
+        if dismiss_stale:
+            st["stale_steps"] = []
+            st["stale_reason"] = None
+        elif new_style and prev_style and new_style != prev_style:
+            baseline_style = nfc(str(((latest_snap or {}).get("label") or {}).get("value") or "")).strip()
+            latest_clean = bool(latest_snap is not None and not (latest_snap.get("stale_steps") or []))
+            if (
+                latest_clean
+                and new_style == baseline_style
+                and str(st.get("stale_reason") or "").startswith("Nhãn phong cách đã thay đổi")
+            ):
+                st["stale_steps"] = []
+                st["stale_reason"] = None
+            else:
+                _mark_stale_after(
+                    st,
+                    "label",
+                    reason=f"Nhãn phong cách đã thay đổi từ '{prev_style}' sang '{new_style}'",
+                )
+
+        if create_version and st.get("stale_steps"):
+            stale = list(st.get("stale_steps") or [])
+            cur_ext_txt = nfc(str((st.get("extract") or {}).get("text") or "")).strip()
+            ref_ext_txt = nfc(str(ref_ext.get("text") or "")).strip()
+            cur_ext_sel = _normalize_selections_sig((st.get("extract") or {}).get("selections"))
+            ref_ext_sel = _normalize_selections_sig(ref_ext.get("selections"))
+            if "extract" in stale and (cur_ext_txt != ref_ext_txt or cur_ext_sel != ref_ext_sel):
+                stale.remove("extract")
+            cur_ab_txt = nfc(str((st.get("abstract") or {}).get("text") or "")).strip()
+            ref_ab_txt = nfc(str(ref_ab.get("text") or "")).strip()
+            if "abstract" in stale and cur_ab_txt != ref_ab_txt:
+                stale.remove("abstract")
+            st["stale_steps"] = stale
+            if not stale:
+                st["stale_reason"] = None
+
+        if create_version:
+            ver = ws.save_draft_version(
+                st,
+                source=source,
+                note=nfc(note).strip() or "Lưu thủ công",
+            )
+            saved_new_version = True
+        else:
+            ver = int(st.get("current_version") or 0)
+            saved_new_version = False
+
         ws.save_state(st)
-        write_reports(self.cfg)
+        if saved_new_version or st.get("status") != prev_status:
+            write_reports(self.cfg)
+        prev_snap = ws.find_previous_version(st)
         return {
             "version": ver,
+            "saved_new_version": saved_new_version,
+            "has_unsaved_changes": ws.differs_from_latest_version(st),
+            "previous_version": prev_snap.get("version") if prev_snap else None,
             "state": st,
             "versions": ws.list_draft_versions(),
             "checks": chk.to_dict(),
         }
 
-    def restore_draft(self, stem: str, version: int) -> dict:
-        """Khôi phục một phiên bản nháp từ lịch sử."""
+    def restore_draft(
+        self,
+        stem: str,
+        version: int | None = None,
+        *,
+        current_draft: dict | None = None,
+    ) -> dict:
+        """Khôi phục một phiên bản nháp từ lịch sử (hoặc lùi về version trước nếu version=None)."""
         files_map = self.resolve_files()
         if stem not in files_map:
             raise FileNotFoundError(f"Không tìm thấy file '{stem}'.")
-        ws = FileWorkspace(self.cfg.work_dir, files_map[stem])
-        snap = ws.get_draft_version(version)
-        if not snap:
-            raise ValueError(f"Không tìm thấy phiên bản v{version:03d}.")
+        docx_path = files_map[stem]
+        ws = FileWorkspace(self.cfg.work_dir, docx_path)
         st = ws.load_state()
         units_data = ws.load_units()
-        st["label"] = snap.get("label") or st["label"]
-        st["extract"].update(snap.get("extract") or {})
-        st["abstract"].update(snap.get("abstract") or {})
-        if snap.get("judge") is not None:
-            st["judge"] = snap["judge"]
+        if not units_data and docx_path.exists():
+            units_data = step_inspect(ws, self.cfg, st)
+        if units_data and "total_words" in (units_data.get("budget") or {}):
+            units_data["budget"] = compute_budget(units_data["budget"]["total_words"], self.cfg)
+
+        # Đồng bộ bản sửa tay mới nhất trên trình duyệt (nếu chưa kịp auto-save) để không mất khi rollback
+        if isinstance(current_draft, dict):
+            self._apply_draft_fields(
+                st,
+                units_data,
+                style=str(current_draft.get("style", (st.get("label") or {}).get("value", ""))),
+                extract=str(current_draft.get("extract", (st.get("extract") or {}).get("text", ""))),
+                abstract=str(current_draft.get("abstract", (st.get("abstract") or {}).get("text", ""))),
+                selections=current_draft.get("selections"),
+                custom_edited=current_draft.get("custom_edited"),
+            )
+
+        if version is None:
+            prev_snap = ws.find_previous_version(st)
+            if not prev_snap:
+                raise ValueError("Chưa có phiên bản trước đó để rollback.")
+            target_ver = int(prev_snap["version"])
+            snap = prev_snap
+        else:
+            target_ver = int(version)
+            snap = ws.get_draft_version(target_ver)
+            if not snap:
+                raise ValueError(f"Không tìm thấy phiên bản v{target_ver:03d}.")
+
+        # Bảo toàn các chỉnh sửa chưa tạo mốc version trước khi ghi đè state bằng bản khôi phục
+        if ws.differs_from_latest_version(st):
+            ws.save_draft_version(
+                st,
+                source="auto:before_restore",
+                note=f"Tự động lưu trước khi rollback về v{target_ver:03d}",
+            )
+
+        defaults = ws.default_state()
+        if "label" in snap and isinstance(snap["label"], dict):
+            lb = copy.deepcopy(defaults["label"])
+            lb.update(copy.deepcopy(snap["label"]))
+            st["label"] = lb
+        if "extract" in snap and isinstance(snap["extract"], dict):
+            ex = copy.deepcopy(defaults["extract"])
+            ex.update(copy.deepcopy(snap["extract"]))
+            ex_text = nfc(ex.get("text") or "")
+            ex["text"] = ex_text
+            ex["words"] = count_words(ex_text)
+            total_w = (units_data.get("budget") or {}).get("total_words", 0) if units_data else 0
+            if total_w:
+                ex["compress"] = round(ex["words"] / total_w, 4)
+            st["extract"] = ex
+        if "abstract" in snap and isinstance(snap["abstract"], dict):
+            ab = copy.deepcopy(defaults["abstract"])
+            ab.update(copy.deepcopy(snap["abstract"]))
+            ab_text = nfc(ab.get("text") or "")
+            ab["text"] = ab_text
+            ab["words"] = count_words(ab_text)
+            st["abstract"] = ab
+        if "judge" in snap:
+            st["judge"] = copy.deepcopy(snap["judge"])
+        if "flags" in snap:
+            st["flags"] = copy.deepcopy(snap.get("flags") or [])
+        else:
+            st["flags"] = [
+                f for f in (st.get("flags") or [])
+                if not str(f).startswith("Gọi Gemini thất bại")
+                and not str(f).startswith("Bỏ qua bước tự chấm G-Eval")
+            ]
+        # Rollback là chủ động khôi phục một snapshot lịch sử cụ thể; không kế thừa
+        # cảnh báo tạm (stale_steps / stale_reason) từ thời điểm AI vừa chạy một bước đơn lẻ.
+        st["stale_steps"] = []
+        st["stale_reason"] = None
+        st["error_message"] = None
+        st["current_step"] = None
+        if "model_used" in snap:
+            st["model_used"] = snap.get("model_used") or ""
+        else:
+            st["model_used"] = (
+                (st.get("abstract") or {}).get("model_used")
+                or (st.get("extract") or {}).get("model_used")
+                or (st.get("label") or {}).get("model_used")
+                or ""
+            )
+
         if units_data:
             finalize_status(units_data, st, self.cfg, ignore_mismatch=True)
-        new_ver = ws.save_draft_version(st, source="restore", note=f"Khôi phục từ v{version:03d}")
+            if st.get("status") not in (STATUS_APPROVED, STATUS_EXPORTED):
+                st["output_path"] = None
+
+        new_ver = ws.save_draft_version(
+            st,
+            source="restore",
+            note=f"Khôi phục từ v{target_ver:03d}",
+            restored_from=target_ver,
+        )
         ws.save_state(st)
         write_reports(self.cfg)
+        prev_after = ws.find_previous_version(st)
         return {
             "version": new_ver,
+            "restored_from": target_ver,
+            "has_unsaved_changes": False,
+            "previous_version": prev_after.get("version") if prev_after else None,
             "state": st,
             "versions": ws.list_draft_versions(),
         }
@@ -216,12 +399,8 @@ class FileService:
         extract = nfc(extract)
         abstract = nfc(abstract)
 
+        self._apply_draft_fields(st, units_data, style, extract, abstract)
         chk = run_checks(units_data, style, extract, abstract, self.cfg)
-        st["label"]["value"] = style
-        st["extract"]["text"] = extract
-        st["extract"]["words"] = count_words(extract)
-        st["abstract"]["text"] = abstract
-        st["abstract"]["words"] = count_words(abstract)
         st["checks"] = chk.to_dict()
 
         if not chk.ok:
@@ -253,15 +432,31 @@ class FileService:
 
         st["status"] = STATUS_EXPORTED if out_path.exists() else STATUS_APPROVED
         st["output_path"] = str(out_path)
-        ws.save_draft_version(st, source="approve", note="Đã duyệt và xuất .docx")
+        st["stale_steps"] = []
+        st["stale_reason"] = None
+        latest_snap = ws.latest_draft_version()
+        if latest_snap is not None and not ws.differs_from_latest_version(st):
+            latest_ver = int(latest_snap["version"])
+            ws.mark_version_approved(latest_ver, status=st["status"], checks=st["checks"])
+            st["current_version"] = latest_ver
+        else:
+            ws.save_draft_version(
+                st,
+                source="approve",
+                note="Đã duyệt và xuất .docx",
+                approved=True,
+            )
         ws.save_state(st)
         mem = record_approved_sample(self.cfg.work_dir, units_data, st, style, extract, abstract)
         write_reports(self.cfg)
+        prev_snap = ws.find_previous_version(st)
         return {
             "ok": True,
             "fill": fill_info,
             "state": st,
             "versions": ws.list_draft_versions(),
+            "has_unsaved_changes": False,
+            "previous_version": prev_snap.get("version") if prev_snap else None,
             "learned_count": mem.get("total_approved_learned", 0),
         }
 
@@ -364,34 +559,6 @@ class FileService:
         write_reports(self.cfg)
         return deleted
 
-    def create_zip_export(self, stems: list[str] | None = None) -> tuple[str, bytes]:
-        """Đóng gói file ZIP các bài đã hoàn thành."""
-        files_map = self.resolve_files()
-        ready_paths: list[Path] = []
-        for stem, src_path in sorted(files_map.items()):
-            if stems and stem not in stems:
-                continue
-            ws = FileWorkspace(self.cfg.work_dir, src_path)
-            st = ws.load_state()
-            out_path = self.cfg.output_dir / src_path.name
-            if st["status"] in (STATUS_APPROVED, STATUS_EXPORTED) and out_path.exists():
-                ready_paths.append(out_path)
-
-        if not ready_paths:
-            raise ValueError("Chưa có file nào đã duyệt/đã xuất để tải ZIP.")
-
-        today_tag = datetime.now().strftime("%d-%m")
-        zip_name = f"{today_tag}.zip"
-
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for p in ready_paths:
-                zf.write(p, arcname=p.name)
-
-        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
-        (self.cfg.output_dir / zip_name).write_bytes(buf.getvalue())
-        return zip_name, buf.getvalue()
-
     def get_status_rows(self) -> list[dict]:
         """Thu thập danh sách trạng thái chi tiết của tất cả các file."""
         return collect_rows(self.cfg)
@@ -425,28 +592,138 @@ class FileService:
             inferred = _infer_model_from_logs(ws, st)
             if inferred:
                 st["model_used"] = inferred
+        prev_snap = ws.find_previous_version(st)
         return {
             "state": st,
             "units": units_data,
             "versions": ws.list_draft_versions(),
+            "has_unsaved_changes": ws.differs_from_latest_version(st),
+            "previous_version": prev_snap.get("version") if prev_snap else None,
         }
 
-    def get_file_logs(self, stem: str, limit: int = 40) -> dict:
-        """Đọc danh sách log các lần gọi Gemini của một file."""
+    def get_file_versions(self, stem: str) -> dict:
+        """Lấy danh sách phiên bản lịch sử và gợi ý rollback của một file."""
+        files_map = self.resolve_files()
+        if stem not in files_map:
+            raise FileNotFoundError(f"Không tìm thấy file '{stem}'.")
+        ws = FileWorkspace(self.cfg.work_dir, files_map[stem])
+        st = ws.load_state()
+        prev_snap = ws.find_previous_version(st)
+        return {
+            "stem": stem,
+            "file": st.get("file") or f"{stem}.docx",
+            "current_version": int(st.get("current_version") or 0),
+            "has_unsaved_changes": ws.differs_from_latest_version(st),
+            "previous_version": prev_snap.get("version") if prev_snap else None,
+            "versions": ws.list_draft_versions(),
+        }
+
+    def get_file_logs(
+        self,
+        stem: str,
+        limit: int = 60,
+        *,
+        is_running: bool = False,
+        server_started_epoch: float | None = None,
+    ) -> dict:
+        """Đọc danh sách log các lần gọi Gemini của một file (hỗ trợ theo dõi thời gian thực)."""
+        import time
+
         ws = self.get_workspace(stem)
+        st = ws.load_state()
         items = []
+        now_ts = time.time()
         if ws.logs_dir.exists():
-            for lp in sorted(ws.logs_dir.glob("*.json"), reverse=True)[:limit]:
+            all_files = [
+                lp for lp in sorted(ws.logs_dir.glob("*.json"))
+                if not lp.name.startswith(".") and not lp.name.endswith(".tmp")
+            ]
+            # Duyệt theo thứ tự thời gian tăng dần để tự động suy luận số thứ tự retry (net_try)
+            # chính xác cho cả các file log cũ chưa lưu trường net_try.
+            raw_entries: list[tuple[Path, dict]] = []
+            for lp in all_files[-limit:]:
+                d = read_json(lp)
+                if d:
+                    raw_entries.append((lp, d))
+
+            inferred_try = 0
+            prev_step_attempt: tuple[str, int] | None = None
+            prev_had_error = False
+
+            for lp, d in raw_entries:
                 try:
-                    d = json.loads(lp.read_text(encoding="utf-8"))
+                    step_name = str(d.get("step", ""))
+                    attempt_num = int(d.get("attempt", 1) or 1)
+                    cur_key = (step_name, attempt_num)
+                    if cur_key == prev_step_attempt and prev_had_error:
+                        inferred_try += 1
+                    else:
+                        inferred_try = 1
+                    prev_step_attempt = cur_key
+                    prev_had_error = bool(d.get("error"))
+
+                    saved_net_try = d.get("net_try")
+                    try:
+                        parsed_net_try = int(saved_net_try) if saved_net_try is not None else 0
+                    except (TypeError, ValueError):
+                        parsed_net_try = 0
+                    net_try = parsed_net_try if parsed_net_try >= 1 else inferred_try
+
+                    in_prog = bool(d.get("in_progress", False))
+                    started_epoch = float(d.get("started_epoch") or 0.0)
+                    dur = d.get("duration_s", 0)
+                    if in_prog and started_epoch > 0:
+                        elapsed = round(max(0.0, now_ts - started_epoch), 1)
+                        dur = elapsed
+                        started_before_server = (
+                            server_started_epoch is not None
+                            and started_epoch < (server_started_epoch - 1.0)
+                        )
+                        actively_in_current_server = is_running and not started_before_server
+                        if not actively_in_current_server:
+                            model_name = str(d.get("model") or "")
+                            logged_timeout = d.get("timeout_s")
+                            try:
+                                if (
+                                    isinstance(logged_timeout, (int, float))
+                                    and not isinstance(logged_timeout, bool)
+                                    and float(logged_timeout) > 0
+                                ):
+                                    model_timeout = float(logged_timeout)
+                                else:
+                                    cfg_timeout = get_model_timeout_s(model_name, self.cfg) if model_name else None
+                                    if cfg_timeout is not None:
+                                        model_timeout = cfg_timeout
+                                    else:
+                                        model_timeout = (
+                                            DEFAULT_TIMEOUT_S.get(model_name, 180.0) if model_name else 180.0
+                                        )
+                            except (TypeError, ValueError):
+                                model_timeout = DEFAULT_TIMEOUT_S.get(model_name, 180.0) if model_name else 180.0
+                            wait_s_val = float(d.get("wait_s") or 0.0)
+                            # Ngưỡng phát hiện log treo phải lớn hơn timeout thực tế của model (+30s đệm)
+                            # cộng thời gian chờ giãn cách RPM để tránh báo lỗi giả khi API vẫn đang chạy;
+                            # nếu file đang chạy lại trong server hiện tại mà gặp log có từ trước khi server khởi động -> chắc chắn log cũ đã chết.
+                            stale_after_s = max(180.0, model_timeout + wait_s_val + 30.0, wait_s_val + 60.0)
+                            if elapsed > stale_after_s or (is_running and started_before_server):
+                                in_prog = False
+                                if not d.get("error"):
+                                    d["error"] = "Quá thời gian chờ hoặc tiến trình cũ đã kết thúc"
                     items.append({
                         "filename": lp.name,
                         "started_at": d.get("started_at", ""),
-                        "step": d.get("step", ""),
-                        "attempt": d.get("attempt", 1),
-                        "net_try": d.get("net_try", 0),
+                        "started_epoch": started_epoch,
+                        "step": step_name,
+                        "attempt": attempt_num,
+                        "net_try": net_try,
                         "model": d.get("model", ""),
-                        "duration_s": d.get("duration_s", 0),
+                        "key_label": d.get("key_label", ""),
+                        "in_progress": in_prog,
+                        "status": d.get("status", ""),
+                        "action": d.get("action", ""),
+                        "phase": d.get("phase", ""),
+                        "wait_s": d.get("wait_s", 0),
+                        "duration_s": dur,
                         "usage": d.get("usage") or {},
                         "error": d.get("error", ""),
                         "response_text": d.get("response_text", ""),
@@ -454,7 +731,16 @@ class FileService:
                     })
                 except Exception:  # noqa: BLE001
                     pass
-        return {"logs": items, "log_dir": str(ws.logs_dir)}
+            items.reverse()  # Mới nhất lên đầu
+        return {
+            "stem": stem,
+            "file": st.get("file") or f"{stem}.docx",
+            "status": st.get("status", ""),
+            "status_vi": st.get("status_vi", ""),
+            "current_step": st.get("current_step") or "",
+            "logs": items,
+            "log_dir": str(ws.logs_dir),
+        }
 
     def check_content(self, stem: str, style: str, extract: str, abstract: str) -> dict:
         """Kiểm tra cơ học tức thì cho nội dung nhãn / trích chọn / biên soạn của một file."""

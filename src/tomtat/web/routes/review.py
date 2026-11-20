@@ -18,6 +18,17 @@ def _service() -> FileService:
     return FileService(_cfg())
 
 
+def _check_not_running(stem: str) -> str | None:
+    mgr = current_app.config.get("TOMTAT_BATCH_MGR")
+    if mgr is None:
+        return None
+    bst = mgr.status()
+    running = bst.get("all_running", bst.get("running", []))
+    if stem in running:
+        return f"File '{stem}.docx' đang được AI xử lý, vui lòng đợi hoàn tất."
+    return None
+
+
 @bp.post("/api/file/<stem>/check")
 def api_check(stem: str):
     """Kiểm tra tức thì khi người dùng sửa nhãn / trích chọn / biên soạn."""
@@ -56,11 +67,31 @@ def api_assemble(stem: str):
         return jsonify({"error": str(exc)}), 400
 
 
+@bp.get("/api/file/<stem>/versions")
+def api_versions(stem: str):
+    """Lấy lịch sử phiên bản của một file."""
+    svc = _service()
+    try:
+        return jsonify(svc.get_file_versions(stem))
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
 @bp.post("/api/file/<stem>/save")
 def api_save(stem: str):
-    """Lưu bản nháp hiện tại và ghi thêm một phiên bản vào lịch sử."""
+    """Lưu bản nháp hiện tại và (tùy chọn) ghi thêm một phiên bản vào lịch sử."""
+    err_running = _check_not_running(stem)
+    if err_running:
+        return jsonify({"error": err_running, "already_running": True}), 409
+
     svc = _service()
     payload = request.get_json(force=True) or {}
+    auto_save = bool(payload.get("auto_save", False))
+    create_version = (
+        bool(payload["create_version"])
+        if "create_version" in payload
+        else (not auto_save)
+    )
     try:
         res = svc.save_draft(
             stem=stem,
@@ -70,12 +101,18 @@ def api_save(stem: str):
             selections=payload.get("selections"),
             note=payload.get("note", ""),
             custom_edited=bool(payload.get("custom_edited", False)),
+            create_version=create_version,
+            dismiss_stale=bool(payload.get("dismiss_stale", False)),
         )
         return jsonify({
             "ok": True,
             "version": res["version"],
+            "saved_new_version": res["saved_new_version"],
+            "has_unsaved_changes": res["has_unsaved_changes"],
+            "previous_version": res["previous_version"],
             "state": res["state"],
             "versions": res["versions"],
+            "checks": res["checks"],
         })
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
@@ -83,22 +120,47 @@ def api_save(stem: str):
 
 @bp.post("/api/file/<stem>/restore")
 def api_restore(stem: str):
-    """Khôi phục một phiên bản nháp trong lịch sử."""
+    """Khôi phục một phiên bản nháp trong lịch sử (hoặc rollback về version trước)."""
+    err_running = _check_not_running(stem)
+    if err_running:
+        return jsonify({"error": err_running, "already_running": True}), 409
+
     svc = _service()
     payload = request.get_json(force=True) or {}
-    ver = int(payload.get("version", 0))
+    raw_ver = payload.get("version")
+    if raw_ver in (None, "", "previous"):
+        ver = None
+    else:
+        try:
+            ver = int(raw_ver)
+        except (TypeError, ValueError):
+            return jsonify({"error": f"Số phiên bản không hợp lệ: {raw_ver!r}"}), 400
+        if ver <= 0:
+            return jsonify({"error": "Số phiên bản phải >= 1."}), 400
+
+    current_draft = None
+    if any(k in payload for k in ("style", "extract", "abstract", "selections")):
+        current_draft = {
+            k: payload[k]
+            for k in ("style", "extract", "abstract", "selections", "custom_edited")
+            if k in payload
+        }
+
     try:
-        res = svc.restore_draft(stem=stem, version=ver)
+        res = svc.restore_draft(stem=stem, version=ver, current_draft=current_draft)
         return jsonify({
             "ok": True,
             "version": res["version"],
+            "restored_from": res["restored_from"],
+            "has_unsaved_changes": res["has_unsaved_changes"],
+            "previous_version": res["previous_version"],
             "state": res["state"],
             "versions": res["versions"],
         })
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 404
+        return jsonify({"error": str(exc)}), 400 if ver is None else 404
 
 
 @bp.post("/api/file/<stem>/approve")

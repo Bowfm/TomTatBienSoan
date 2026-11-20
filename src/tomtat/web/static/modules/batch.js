@@ -1,12 +1,23 @@
 // Tải lên file .docx, chạy AI hàng loạt, và theo dõi tiến độ qua SSE (kèm fallback polling)
-import { selectFile } from "./editor.js";
-import { loadFileList, pendingFiles, renderFileList } from "./sidebar.js";
+import { STEP_NAMES_VI, selectFile, syncRerunButtonsState } from "./editor.js";
+import {
+  loadFileList,
+  pendingFiles,
+  renderFileList,
+  renderRpdStatus,
+  syncPoolScalingUI,
+  syncRunningProgressBar,
+} from "./sidebar.js";
 import { store } from "./state.js";
 import { $, api, showToast } from "./utils.js";
 
 let BATCH_POLL_TIMER = null; // dự phòng polling khi trình duyệt/kết nối không hỗ trợ SSE
 let BATCH_EVENTS = null;     // EventSource đang mở tới /api/batch/events
 let LAST_BATCH_DONE = -1;
+let LAST_BATCH_ERR = -1;
+let LAST_CURRENT_UPDATED = "";
+let LAST_RUNNING_KEY = "";
+let WAS_BATCH_ACTIVE = false;
 
 export async function uploadFiles(fileList, overwrite = false) {
   const filesArr = Array.from(fileList || []);
@@ -72,25 +83,14 @@ export async function uploadFiles(fileList, overwrite = false) {
 }
 
 export function setBatchProgress(text) {
-  const box = $("batch-progress");
-  const stopBtn = $("btn-stop-batch");
-  const runBtn = $("btn-run-pending");
-  if (!box) return;
-  if (text) {
-    box.textContent = text;
-    box.classList.remove("hidden");
-    if (stopBtn) stopBtn.classList.remove("hidden");
-    if (runBtn) runBtn.disabled = true;
-  } else {
-    box.classList.add("hidden");
-    if (stopBtn) stopBtn.classList.add("hidden");
-    if (runBtn) runBtn.disabled = false;
-  }
+  syncRunningProgressBar(text || "");
 }
 
 export async function runBatchOnServer(stems, useMock) {
   if (!stems || !stems.length) return;
-  const concurrencyVal = $("sel-concurrency") ? Number($("sel-concurrency").value) || 8 : 8;
+  const selEl = $("sel-concurrency");
+  const rawVal = selEl ? selEl.value : "auto";
+  const concurrencyVal = rawVal === "auto" ? "auto" : Number(rawVal) || "auto";
 
   try {
     const res = await api("/api/batch/start", {
@@ -105,6 +105,7 @@ export async function runBatchOnServer(stems, useMock) {
       showToast(res.message || "Không thể khởi động batch", true);
       return;
     }
+    WAS_BATCH_ACTIVE = true;
     showToast(res.message);
     startBatchPolling();
   } catch (err) {
@@ -113,10 +114,26 @@ export async function runBatchOnServer(stems, useMock) {
 }
 
 export async function stopBatch() {
+  for (const s of store.RUNNING_STEMS) {
+    store.STOPPING_STEMS.add(s);
+  }
+  if (store.BATCH_ACTIVE) {
+    store.BATCH_STOPPED = true;
+  }
+  renderFileList();
+  syncRunningProgressBar();
+  syncRerunButtonsState();
   try {
     const res = await api("/api/batch/stop", { method: "POST" });
-    showToast(res.message || "Đã gửi yêu cầu dừng.");
+    showToast(res.message || "Đã gửi yêu cầu dừng.", "warn");
   } catch (err) {
+    for (const s of Array.from(store.STOPPING_STEMS)) {
+      store.STOPPING_STEMS.delete(s);
+    }
+    store.BATCH_STOPPED = false;
+    renderFileList();
+    syncRunningProgressBar();
+    syncRerunButtonsState();
     showToast(err.message, true);
   }
 }
@@ -135,34 +152,127 @@ export function stopBatchTracking() {
 export async function handleBatchStatus(st) {
   if (!st) return;
 
-  store.RUNNING_STEMS.clear();
-  (st.running || []).forEach((s) => store.RUNNING_STEMS.add(s));
+  if (st.pool_scaling) {
+    syncPoolScalingUI(st.pool_scaling);
+  }
+  if (st.rpd_status) {
+    renderRpdStatus(st.rpd_status);
+  }
+
+  const wasCurrentRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
+
+  const serverRunning = [...(st.running || []), ...(st.rerun_running || [])];
+  const serverSteps = { ...(st.rerun_steps || {}), ...(st.running_steps || {}) };
+  store.RUNNING_STEMS = new Set([...serverRunning, ...store.LOCAL_RERUN_STEMS]);
+  const srvStopping = new Set(st.stopping_stems || []);
+  for (const s of Array.from(store.STOPPING_STEMS)) {
+    if (!store.RUNNING_STEMS.has(s)) store.STOPPING_STEMS.delete(s);
+  }
+  for (const s of srvStopping) {
+    if (store.RUNNING_STEMS.has(s)) store.STOPPING_STEMS.add(s);
+  }
+  const nextSteps = {};
+  for (const s of store.RUNNING_STEMS) {
+    nextSteps[s] = serverSteps[s] || store.RUNNING_STEPS[s] || "";
+  }
+  store.RUNNING_STEPS = nextSteps;
+  store.BATCH_ACTIVE = Boolean(st.active);
+  store.BATCH_STOPPED = Boolean(st.active && st.stopped);
 
   if (st.active) {
-    const activeList = (st.running || []).map((s) => `${s}.docx`).join(", ");
+    WAS_BATCH_ACTIVE = true;
+    const activeList = (st.running || [])
+      .map((s) => {
+        const sc = (st.running_steps || {})[s];
+        const sv = STEP_NAMES_VI[sc] || sc || "";
+        return sv ? `${s}.docx (${sv})` : `${s}.docx`;
+      })
+      .join(", ");
     setBatchProgress(
       `⏳ Đang chạy song song ${store.RUNNING_STEMS.size} luồng (${st.done_count + st.err_count}/${st.total} xong) — Đang xử lý: ${activeList || "..."}`
     );
-    if (st.done_count !== LAST_BATCH_DONE) {
+    syncRerunButtonsState();
+
+    const curUpdated = store.CURRENT_STEM ? ((st.running_updated || {})[store.CURRENT_STEM] || "") : "";
+    const isCurrentRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
+    const runningKey = (st.running || [])
+      .map((s) => `${s}:${(st.running_steps || {})[s] || ""}`)
+      .sort()
+      .join("|");
+    const countsChanged = st.done_count !== LAST_BATCH_DONE || st.err_count !== LAST_BATCH_ERR;
+    const currentStepUpdated = Boolean(curUpdated && curUpdated !== LAST_CURRENT_UPDATED);
+    const currentFinishedJustNow = wasCurrentRunning && !isCurrentRunning;
+
+    if (curUpdated) {
+      LAST_CURRENT_UPDATED = curUpdated;
+    }
+
+    if (countsChanged || currentStepUpdated || currentFinishedJustNow) {
       LAST_BATCH_DONE = st.done_count;
+      LAST_BATCH_ERR = st.err_count;
+      LAST_RUNNING_KEY = runningKey;
       await loadFileList(true);
-    } else {
+      if (store.CURRENT_STEM && (currentStepUpdated || currentFinishedJustNow)) {
+        await selectFile(store.CURRENT_STEM, {
+          silent: true,
+          onlyIfCurrent: true,
+          skipSidebarRender: true,
+        });
+      }
+    } else if (runningKey !== LAST_RUNNING_KEY) {
+      LAST_RUNNING_KEY = runningKey;
       renderFileList();
     }
     return;
   }
 
-  stopBatchTracking();
-  store.RUNNING_STEMS.clear();
+  const batchJustFinished = WAS_BATCH_ACTIVE;
+  if (batchJustFinished) {
+    WAS_BATCH_ACTIVE = false;
+  }
+  const hasServerRunning = (st.all_running || []).length > 0;
+  if (!hasServerRunning) {
+    stopBatchTracking();
+  } else if (BATCH_EVENTS) {
+    BATCH_EVENTS.close();
+    BATCH_EVENTS = null;
+  }
   setBatchProgress("");
   await loadFileList(true);
-  if (st.stopped) {
-    showToast(`Đã dừng theo yêu cầu (đã xong ${st.done_count}/${st.total} file).`);
-  } else if (st.total > 0) {
-    showToast(
-      `Hoàn tất chạy AI: thành công ${st.done_count}/${st.total} file` +
-        (st.err_count ? ` (${st.err_count} file lỗi).` : "!")
-    );
+  if (
+    store.CURRENT_STEM &&
+    (wasCurrentRunning ||
+      (batchJustFinished &&
+        ((st.stems || []).includes(store.CURRENT_STEM) ||
+          (st.completed || []).includes(store.CURRENT_STEM) ||
+          (st.cancelled || []).includes(store.CURRENT_STEM) ||
+          Boolean((st.errors || {})[store.CURRENT_STEM]))))
+  ) {
+    await selectFile(store.CURRENT_STEM, {
+      silent: true,
+      onlyIfCurrent: true,
+      skipSidebarRender: true,
+    });
+  }
+  syncRerunButtonsState();
+  if (batchJustFinished) {
+    if (st.stopped) {
+      showToast(`⏹ Đã dừng theo yêu cầu (đã xong ${st.done_count}/${st.total} file).`, "warn");
+    } else if (st.total > 0) {
+      showToast(
+        `Hoàn tất chạy AI: thành công ${st.done_count}/${st.total} file` +
+          (st.err_count ? ` (${st.err_count} file lỗi).` : "!")
+      );
+    }
+  }
+  if (hasServerRunning && !BATCH_POLL_TIMER && !BATCH_EVENTS) {
+    BATCH_POLL_TIMER = setInterval(async () => {
+      try {
+        await handleBatchStatus(await api("/api/batch/status"));
+      } catch (err) {
+        console.warn("Lỗi poll running status:", err);
+      }
+    }, 1000);
   }
 }
 
@@ -182,6 +292,9 @@ export function startBatchPollingFallback() {
 export function startBatchPolling() {
   stopBatchTracking();
   LAST_BATCH_DONE = -1;
+  LAST_BATCH_ERR = -1;
+  LAST_CURRENT_UPDATED = "";
+  LAST_RUNNING_KEY = "";
 
   if (typeof EventSource === "undefined") {
     startBatchPollingFallback();
@@ -233,11 +346,16 @@ export function startBatchPolling() {
 export async function runPendingFiles() {
   const useMock = $("chk-mock") ? $("chk-mock").checked : false;
   await loadFileList(true);
-  const todo = pendingFiles()
+  const candidates = pendingFiles()
     .filter((r) => r.status === "chua_xu_ly" || r.status === "loi" || r.status === "dang_lam_do" || r.status === "can_xu_ly_tay")
     .map((r) => r.file.replace(/\.docx$/i, ""));
-  if (!todo.length) {
+  if (!candidates.length) {
     showToast("Tất cả các file trong danh sách đều đã ở trạng thái 'đã có nháp' hoặc 'đã duyệt'!");
+    return;
+  }
+  const todo = candidates.filter((s) => !store.RUNNING_STEMS.has(s));
+  if (!todo.length) {
+    showToast("Các file chưa xử lý đều đang được AI xử lý!");
     return;
   }
   await runBatchOnServer(todo, useMock);

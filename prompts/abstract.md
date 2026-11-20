@@ -6,17 +6,10 @@ Hãy viết bản tóm tắt biên soạn (`abstract`) cho (các) văn bản g�
 - Phong cách chức năng: **{{ style }}**
 - Loại bài: **{{ "Đa văn bản (" ~ (docs | length) ~ " văn bản)" if (docs | length) > 1 else "Đơn văn bản" }}**
 - Số từ bản trích chọn (T): **{{ extract_words }} từ**
-{% if targets.direction == "shorter" %}
-- **YÊU CẦU ĐỘ DÀI (ngắn hơn bản trích chọn, B/T ≤ {{ (ratio_limit * 100) | int }}%):**
+- **YÊU CẦU ĐỘ DÀI (BẮT BUỘC ngắn hơn bản trích chọn, B/T ≤ {{ (ratio_limit * 100) | int }}%):**
   - Tối đa không được vượt quá: **{{ targets.short_max }} từ** (kể cả dòng tiêu đề nếu có).
   - **Khoảng số từ mục tiêu cần đạt: từ {{ targets.short_low }} đến {{ targets.short_high }} từ.**
   - Nếu viết xong thấy vượt quá {{ targets.short_max }} từ, hãy cắt bớt từ ngữ rườm rà và chi tiết phụ (giữ nguyên ý chính) trước khi trả lời.
-{% else %}
-- **YÊU CẦU ĐỘ DÀI (bản trích chọn ngắn nên có thể chọn 1 trong 2 hướng):**
-  - Hướng 1 (ngắn hơn trích chọn): tối đa **{{ targets.short_max }} từ** (khoảng {{ targets.short_low }} - {{ targets.short_high }} từ).
-  - Hướng 2 (dài hơn trích chọn, bổ sung chi tiết từ văn bản gốc): tối thiểu **{{ targets.long_min }} từ** (nhắm khoảng **{{ targets.long_target }} từ**).
-  - Tuyệt đối KHÔNG nằm ở khoảng giữa ({{ targets.short_max + 1 }} đến {{ targets.long_min - 1 }} từ) vì sẽ vi phạm quy tắc 70%.
-{% endif %}
 
 {{ style_guide }}
 
@@ -50,11 +43,6 @@ Bản nháp trước (để bạn sửa trực tiếp):
 """
 {{ previous_abstract }}
 """
-{% endif %}
-
-{% if user_note %}
-## GHI CHÚ CỦA NGƯỜI DUYỆT (ưu tiên tuân thủ)
-{{ user_note }}
 {% endif %}
 
 {% if learned_style_memory %}

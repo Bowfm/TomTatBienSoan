@@ -7,14 +7,16 @@ export function setText(id, val) {
   if (el) el.textContent = val;
 }
 
-export function showToast(msg, isErr = false) {
+export function showToast(msg, tone = false) {
   const t = $("toast");
   if (!t) return;
   t.textContent = msg;
-  t.style.background = isErr ? "#b91c1c" : "#0f172a";
+  const isWarn = tone === "warn";
+  const isErr = tone === true || tone === "error";
+  t.style.background = isErr ? "#b91c1c" : isWarn ? "#b45309" : "#0f172a";
   t.classList.remove("hidden");
   clearTimeout(t._timer);
-  t._timer = setTimeout(() => t.classList.add("hidden"), 3200);
+  t._timer = setTimeout(() => t.classList.add("hidden"), isWarn ? 5500 : 3200);
 }
 
 export async function api(url, opts = {}) {
@@ -24,7 +26,10 @@ export async function api(url, opts = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok && !data.need_confirm) {
-    throw new Error(data.error || `Lỗi HTTP ${res.status}`);
+    const err = new Error(data.error || `Lỗi HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }
@@ -34,11 +39,4 @@ export function escapeHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-}
-
-export function todayLabel() {
-  const now = new Date();
-  const dd = String(now.getDate()).padStart(2, "0");
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  return { slash: `${dd}/${mm}`, file: `${dd}-${mm}.zip` };
 }

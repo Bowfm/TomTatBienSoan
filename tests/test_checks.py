@@ -165,3 +165,37 @@ def test_multi_doc_abstract_cleaning_and_blank_line():
     codes_good = [i.code for i in chk_good.issues]
     assert "multi_doc_transition" not in codes_good
     assert "multi_doc_no_blank_line" not in codes_good
+
+
+def test_abstract_must_be_shorter_than_70_percent():
+    from tomtat.checks.abstract_checks import check_length
+    from tomtat.checks.core import CheckResult
+    from tomtat.units import abstract_targets
+
+    cfg = load_config()
+
+    # Dù bản trích chọn ngắn (< 80 từ) hay dài (>= 80 từ), hướng luôn là "shorter" và allow_longer=False
+    for n_ext in (40, 100):
+        t = abstract_targets(n_ext, cfg)
+        assert t["direction"] == "shorter"
+        assert t["allow_longer"] is False
+
+    # Đúng ngưỡng 70% -> hợp lệ
+    res_ok = CheckResult()
+    check_length(100, 70, cfg, res_ok)
+    assert res_ok.metrics["ratio_name"] == "B/T"
+    assert res_ok.metrics["ratio"] == 0.7
+    assert not any(e.code == "ratio" for e in res_ok.errors)
+
+    # Vượt 70% (71/100) -> lỗi ratio
+    res_over = CheckResult()
+    check_length(100, 71, cfg, res_over)
+    assert any(e.code == "ratio" for e in res_over.errors)
+
+    # Dài hơn bản trích chọn (kể cả khi trích chọn ngắn 50 từ, biên soạn 80 từ) -> bắt buộc lỗi ratio
+    res_longer = CheckResult()
+    check_length(50, 80, cfg, res_longer)
+    assert res_longer.metrics["direction"] == "shorter"
+    assert res_longer.metrics["ratio_name"] == "B/T"
+    assert res_longer.metrics["ratio"] == 1.6
+    assert any(e.code == "ratio" for e in res_longer.errors)

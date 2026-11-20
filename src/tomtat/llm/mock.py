@@ -9,7 +9,14 @@ from pathlib import Path
 
 from .. import STYLES
 from ..textutil import count_words, lines_of, split_sentences
-from .base import BaseClient, LLMResult, write_log
+from .base import (
+    BaseClient,
+    LLMCancelledError,
+    LLMResult,
+    check_not_cancelled,
+    get_active_cancel_event,
+    write_log,
+)
 
 
 class MockClient(BaseClient):
@@ -23,9 +30,41 @@ class MockClient(BaseClient):
         self.calls: list[str] = []
 
     def generate_json(self, step, system, prompt, schema, *, log_dir=None, attempt=0, context=None):
+        cancel_ev = get_active_cancel_event()
+        check_not_cancelled(cancel_ev)
         t0 = time.time()
+        record = {
+            "step": step,
+            "attempt": attempt,
+            "net_try": 1,
+            "model": "mock",
+            "key_label": "Mock",
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "started_epoch": round(t0, 3),
+            "in_progress": True,
+            "phase": "calling_api",
+            "status": "running",
+            "system": system,
+            "prompt": prompt,
+            "schema": schema,
+        }
+        log_path = write_log(log_dir, record) if self.delay_s else None
         if self.delay_s:
-            time.sleep(self.delay_s)
+            if cancel_ev is not None:
+                if cancel_ev.wait(timeout=self.delay_s):
+                    record.update(
+                        in_progress=False,
+                        phase="done",
+                        status="cancelled",
+                        action="cancelled_in_flight",
+                        duration_s=round(time.time() - t0, 3),
+                        error="Đã dừng theo yêu cầu của người dùng.",
+                    )
+                    write_log(log_dir, record, log_path=log_path)
+                    raise LLMCancelledError("Đã dừng chạy AI theo yêu cầu của người dùng.")
+            else:
+                time.sleep(self.delay_s)
+        check_not_cancelled(cancel_ev)
         ctx = context or {}
         fn = getattr(self, f"_mock_{step}")
         data = fn(ctx, attempt)
@@ -33,11 +72,16 @@ class MockClient(BaseClient):
         text = json.dumps(data, ensure_ascii=False)
         usage = {"total_input_tokens": len(prompt) // 4, "total_output_tokens": len(text) // 4,
                  "total_thought_tokens": 0}
-        write_log(log_dir, {"step": step, "attempt": attempt, "model": "mock",
-                            "started_at": datetime.now().isoformat(timespec="seconds"),
-                            "duration_s": round(time.time() - t0, 3), "system": system,
-                            "prompt": prompt, "schema": schema, "response_text": text,
-                            "usage": usage, "parsed_ok": True})
+        record.update(
+            in_progress=False,
+            phase="done",
+            status="completed",
+            duration_s=round(time.time() - t0, 3),
+            response_text=text,
+            usage=usage,
+            parsed_ok=True,
+        )
+        write_log(log_dir, record, log_path=log_path)
         return LLMResult(data=data, text=text, usage=usage, duration_s=time.time() - t0, model="mock")
 
     # --- từng bước ---

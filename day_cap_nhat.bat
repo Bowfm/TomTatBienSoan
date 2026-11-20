@@ -36,11 +36,38 @@ if errorlevel 1 (
 echo %DEFAULT_REPO%> ".github_repo_url"
 
 echo.
-echo Dang dong bo code, prompts, config.yaml va bo nho hoc tap ^(tuyet doi khong day api_keys.txt hay .env^)...
-git add config.yaml .env.example .gitignore .github_repo_url requirements.txt *.bat *.md *.txt prompts src tests docs skill_ref samples
+if exist ".venv\Scripts\python.exe" (
+    echo Dang kiem tra nhanh cu phap va Regression Guard truoc khi day...
+    ".venv\Scripts\python.exe" .agents\verify_guard.py
+    if errorlevel 1 (
+        echo [LOI] Kiem tra Regression Guard that bai. Huy day len GitHub!
+        pause
+        exit /b 1
+    )
+    if exist ".venv\Scripts\pytest.exe" (
+        echo Dang chay bo kiem thu tu dong ^(pytest^)...
+        ".venv\Scripts\pytest.exe" -q
+        if errorlevel 1 (
+            echo [LOI] Co test that bai. Huy day len GitHub de tranh anh huong may khac!
+            pause
+            exit /b 1
+        )
+    )
+)
+
+echo.
+echo Dang dong bo code, prompts, config.yaml va bo nho hoc tap ^(tuyet doi khong day api_keys.txt, .env hay config.local.yaml^)...
+git add -u
+git add pyproject.toml config.yaml .env.example .gitignore .github_repo_url requirements.txt *.bat *.md *.txt prompts src tests docs skill_ref samples
+if exist ".agents" git add .agents
 if exist "work\learned_memory.json" git add -f "work\learned_memory.json"
 
-git commit -m "Cap nhat cong cu TomTatBienSoan (%date% %time%)"
+git diff --cached --quiet
+if errorlevel 1 (
+    git commit -m "Cap nhat cong cu TomTatBienSoan (%date% %time%)"
+) else (
+    echo Khong co thay doi moi can commit, kiem tra day cac commit da co len GitHub...
+)
 git push -u origin main
 
 if errorlevel 1 (

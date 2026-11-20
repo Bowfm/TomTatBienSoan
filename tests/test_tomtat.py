@@ -1,10 +1,6 @@
 """Kiểm thử tích hợp đầu-cuối (End-to-End Integration Tests) cho tomtat."""
 from __future__ import annotations
 
-import io
-from pathlib import Path
-import zipfile
-
 from tomtat import STYLES
 from tomtat.config import load_config
 from tomtat.llm import MockClient
@@ -14,7 +10,7 @@ from tomtat.web import create_app
 
 
 def test_full_pipeline_and_services_flow(tmp_path):
-    """Kiểm thử toàn diện luồng: nạp file -> chạy AI -> duyệt -> xuất .docx -> nén ZIP."""
+    """Kiểm thử toàn diện luồng: nạp file -> chạy AI -> duyệt -> xuất .docx."""
     cfg = load_config()
     cfg["paths"] = {
         "input": str(tmp_path / "input"),
@@ -46,13 +42,7 @@ def test_full_pipeline_and_services_flow(tmp_path):
     assert appr_res["ok"] is True
     assert (tmp_path / "output" / "M54629.docx").exists()
 
-    # 3. Kiểm tra đóng gói ZIP
-    zip_name, zip_bytes = service.create_zip_export(stems=["M54629"])
-    assert zip_name.endswith(".zip")
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        assert "M54629.docx" in zf.namelist()
-
-    # 4. Kiểm tra qua Web Test Client
+    # 3. Kiểm tra qua Web Test Client
     app = create_app(cfg, mock=True)
     tc = app.test_client()
     r = tc.get("/api/files")

@@ -8,7 +8,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from .config import Config
+from .config import Config, clamp_workers, get_pool_scaling
 from .pipeline import STEPS_ORDER
 from .services import FileService, make_client
 from .textutil import configure as configure_textutil
@@ -52,6 +52,10 @@ def _print_file_summary(idx: int, total: int, res: dict) -> None:
     )
     for fl in st.get("flags") or []:
         print(f"    ! Cờ lưu ý: {fl}")
+    stale = st.get("stale_steps") or []
+    if stale:
+        reason = f"{st['stale_reason']}. " if st.get("stale_reason") else ""
+        print(f"    ! Cần chỉnh sửa lại các phần khác: {reason}{', '.join(stale)}")
     for iss in (chk.get("issues") or [])[:5]:
         if iss.get("level") in ("error", "warning"):
             print(f"    - [{iss.get('level_vi')}] {iss.get('message')}")
@@ -73,9 +77,14 @@ def cmd_process(args: argparse.Namespace, cfg: Config) -> int:
     # Nếu chỉ chạy bước inspect thì không cần API key → dùng mock client
     client = _build_client(cfg, mock=args.mock or args.only == "inspect")
 
-    workers = max(1, int(args.workers or cfg.get("workers", 2)))
+    scaling = get_pool_scaling(cfg)
+    raw_w = args.workers if args.workers is not None else cfg.get("workers")
+    is_int_w = isinstance(raw_w, int) and not isinstance(raw_w, bool)
+    workers = clamp_workers(raw_w if is_int_w else None, cfg)
+    if is_int_w and raw_w > workers and scaling.get("max_workers"):
+        print(f"[!] Yêu cầu {raw_w} luồng vượt trần max_workers={scaling['max_workers']} trong config.yaml -> dùng {workers} luồng.")
     print(
-        f"Bắt đầu xử lý {len(files)} file (luồng song song={workers}, "
+        f"Bắt đầu xử lý {len(files)} file (luồng song song={workers}, pool={scaling['key_count']} keys, "
         f"model={'mock' if args.mock else cfg['gemini']['model']}"
         f"{f', chỉ bước={args.only}' if args.only else ''})..."
     )
@@ -152,11 +161,18 @@ def _free_port_windows(port: int) -> None:
 
 def cmd_review(args: argparse.Namespace, cfg: Config) -> int:
     from .web import create_app
+    from .web.app import get_startup_update_info
 
     host = "127.0.0.1"
     port = int(args.port or cfg.get("review", {}).get("port", 8765))
     _free_port_windows(port)
     app = create_app(cfg, mock=args.mock)
+    threading.Thread(
+        target=get_startup_update_info,
+        args=(app,),
+        daemon=True,
+        name="startup-update-check",
+    ).start()
     url = f"http://{host}:{port}"
     print(f"Đang mở giao diện duyệt tại {url} (nhấn Ctrl+C để dừng)...")
     if not args.no_browser and cfg.get("review", {}).get("open_browser", True):
@@ -233,6 +249,59 @@ def cmd_report(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_versions(args: argparse.Namespace, cfg: Config) -> int:
+    service = FileService(cfg)
+    stem = Path(args.target).stem
+    try:
+        if args.save:
+            detail = service.get_file_detail(stem)
+            st = detail["state"]
+            res = service.save_draft(
+                stem=stem,
+                style=(st.get("label") or {}).get("value", ""),
+                extract=(st.get("extract") or {}).get("text", ""),
+                abstract=(st.get("abstract") or {}).get("text", ""),
+                selections=(st.get("extract") or {}).get("selections"),
+                note=args.note or "Lưu thủ công (CLI)",
+                custom_edited=bool((st.get("extract") or {}).get("custom_edited", False)),
+                create_version=True,
+            )
+            print(f"Đã lưu phiên bản v{res['version']:03d} cho {stem}.docx.")
+            return 0
+        if args.rollback is not None:
+            ver = None if args.rollback == "previous" else int(args.rollback)
+            res = service.restore_draft(stem=stem, version=ver)
+            print(
+                f"Đã rollback {stem}.docx về v{res['restored_from']:03d} "
+                f"(ghi thành phiên bản mới v{res['version']:03d})."
+            )
+            return 0
+        info = service.get_file_versions(stem)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"LỖI: {exc}", file=sys.stderr)
+        return 1
+
+    versions = info["versions"]
+    if not versions:
+        print(f"{stem}.docx: chưa có phiên bản nào được lưu.")
+        return 0
+    print(f"Lịch sử phiên bản của {stem}.docx (hiện tại: v{info['current_version']:03d}):")
+    for v in versions:
+        ver_num = int(v.get("version") or 0)
+        mark = "*" if ver_num == info["current_version"] and not info["has_unsaved_changes"] else " "
+        lb = (v.get("label") or {}).get("value") or "—"
+        ew = (v.get("extract") or {}).get("words", 0)
+        aw = (v.get("abstract") or {}).get("words", 0)
+        chk = v.get("checks_summary") or {}
+        ok_str = "Đạt" if chk.get("ok") else f"Lỗi:{chk.get('n_errors', 0)}"
+        note_str = f" — {v['note']}" if v.get("note") else ""
+        print(
+            f" {mark} v{ver_num:03d} | {v.get('saved_at', '')} | {v.get('source', '')} | "
+            f"{lb} | trích {ew}w, bsoạn {aw}w | {ok_str}{note_str}"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="tomtat",
@@ -273,6 +342,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep = sub.add_parser("report", help="Xuất lại file báo cáo baocao.xlsx và baocao.csv")
     p_rep.add_argument("--out", default=None, help="Đường dẫn file Excel đích")
     p_rep.set_defaults(func=cmd_report)
+
+    # versions
+    p_ver = sub.add_parser("versions", help="Xem, lưu và rollback phiên bản của một file")
+    p_ver.add_argument("target", help="Tên file (.docx) hoặc stem cần xem/rollback")
+    p_ver.add_argument("--save", action="store_true", help="Lưu trạng thái hiện tại thành version mới")
+    p_ver.add_argument("--note", default="", help="Ghi chú khi lưu version mới")
+    p_ver.add_argument(
+        "--rollback",
+        nargs="?",
+        const="previous",
+        default=None,
+        help="Rollback về version trước (mặc định) hoặc số version chỉ định",
+    )
+    p_ver.set_defaults(func=cmd_versions)
 
     return p
 

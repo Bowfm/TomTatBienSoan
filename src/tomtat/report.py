@@ -22,7 +22,7 @@ HEADERS = [
     "Số từ trích chọn",
     "Số từ biên soạn",
     "Compress (T/G)",
-    "Tỉ lệ B/T hoặc T/B",
+    "Tỉ lệ B/T",
     "Edit",
     "Độ bám từ ngữ",
     "Điểm G-Eval",
@@ -126,6 +126,9 @@ def collect_rows(cfg: dict, files: list[Path] | None = None, reverse: bool = Tru
             "suspicious_reasons": susp_reasons or [],
             "status": st.get("status"),
             "status_vi": STATUS_VI.get(st.get("status", ""), st.get("status", "")),
+            "updated_at": st.get("updated_at", ""),
+            "current_step": st.get("current_step") or "",
+            "current_version": int(st.get("current_version") or 0),
         })
     return rows
 

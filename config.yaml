@@ -19,15 +19,47 @@ gemini:
     - gemini-3.6-flash            # Cấp 3: Gemini 3.6 Flash (20 RPD, 5 RPM)
     - gemini-3.5-flash-lite       # Cấp 4 (Chủ lực cày số lượng): Gemini 3.5 Flash Lite (500 RPD, 15 RPM)
     - gemini-3.1-flash-lite       # Cấp 5 (Dự phòng số lượng): Gemini 3.1 Flash Lite (500 RPD, 15 RPM)
-  timeout_s: 90                   # timeout mỗi lượt gọi (giây)
+  rpd_limits:                     # Giới hạn số requests/ngày (RPD) trên mỗi API key của từng model:
+    gemini-4-hydrogen: 20
+    gemini-3.8-flash: 20
+    gemini-3.6-flash: 20
+    gemini-3.5-flash-lite: 500
+    gemini-3.1-flash-lite: 500
+  rpm_limits:                     # Giới hạn số requests/phút (RPM) trên mỗi API key của từng model:
+    gemini-4-hydrogen: 5
+    gemini-3.8-flash: 5
+    gemini-3.6-flash: 5
+    gemini-3.5-flash-lite: 15
+    gemini-3.1-flash-lite: 15
+  min_interval_s:                 # Khoảng cách tối thiểu (giây) giữa 2 lần gọi API trên cùng 1 key (tránh tràn RPM):
+    gemini-4-hydrogen: 13.0       # 5 RPM -> mỗi lần gọi trên cùng 1 key cách nhau ít nhất 13 giây
+    gemini-3.8-flash: 13.0        # 5 RPM -> mỗi lần gọi trên cùng 1 key cách nhau ít nhất 13 giây
+    gemini-3.6-flash: 13.0        # 5 RPM -> mỗi lần gọi trên cùng 1 key cách nhau ít nhất 13 giây
+    gemini-3.5-flash-lite: 4.5    # 15 RPM -> mỗi lần gọi trên cùng 1 key cách nhau ít nhất 4.5 giây
+    gemini-3.1-flash-lite: 4.5    # 15 RPM -> mỗi lần gọi trên cùng 1 key cách nhau ít nhất 4.5 giây
+  timeout_s: 300                  # Trần timeout an toàn mặc định (giây) cho model chưa khai báo riêng (đặt null để tắt hẳn read timeout)
+  timeout_s_by_model:             # Trần an toàn rất rộng theo từng model: đủ lâu để không cắt ngang mất RPD, nhưng vẫn thoát luồng nếu socket treo câm
+    gemini-4-hydrogen: 600        # Tối đa 10 phút
+    gemini-3.8-flash: 420         # Tối đa 7 phút
+    gemini-3.6-flash: 360         # Tối đa 6 phút
+    gemini-3.5-flash-lite: 180    # Tối đa 3 phút
+    gemini-3.1-flash-lite: 180    # Tối đa 3 phút
+  max_timeouts_per_model: 2       # tối đa số lần lỗi timeout mạng/server trên cùng 1 model trước khi trượt model kế tiếp (0 = không giới hạn)
   max_retries: 2
   backoff_base_s: 2
   backoff_max_s: 10
-  max_output_tokens: 16384
+  max_output_tokens: 65536        # Gồm CẢ thinking + output tokens; 65536 là trần synchronous của Gemini 3.x/4.x (16384 dễ bị cắt khi thinking dài)
   temperature: null               # null = để mặc định của model
-  max_concurrent_calls: 12        # hỗ trợ tới 12 luồng gọi song song trên pool 60 keys
+  max_concurrent_calls: auto      # "auto" = tự động tăng/giảm theo tổng số API keys trong api_keys.txt
+  # Chiến lược gọi key TUẦN TỰ: mỗi model có 1 con trỏ, gọi lần lượt key #1 -> key cuối rồi quay vòng lại #1.
+  #  - 429  -> đủ 3 lần trên cùng (key, model) mới đánh dấu hết RPD tới chu kỳ mới (15:00 VN)
+  #  - 503 / 5xx -> model đang quá tải, chuyển sang key kế tiếp, vòng sau thử lại
+  #  - Timeout -> tự nới timeout thử lại tối đa max_timeouts_per_model lần trên kết nối mới, sau đó trượt ngay sang model kế tiếp
+  #  - Chỉ khi MỌI key đều hết RPD (hoặc model lỗi/quá tải liên tiếp) -> chuyển sang model kế tiếp trong fallback_models
+  max_rounds_per_model: 3         # số vòng quét hết pool mà toàn bộ key đều lỗi 503/tạm thời trước khi tạm hạ model cho lượt gọi này (0 = quay vòng vô hạn)
 
-workers: 8                        # xử lý 8 file song song cùng lúc siêu nhanh trên pool 60 keys
+workers: 2      # xử lý 2 file song song; pacing (key, model) luôn giữ <= 60/min_interval_s RPM/key bất kể số luồng ("auto" = tự tính theo số key)
+max_workers: 2  # TRẦN CỨNG: giao diện / API / CLI không thể chạy quá số luồng này (kể cả khi workers: auto)
 
 # ---------------- Đếm từ ----------------
 word_count:
@@ -61,11 +93,11 @@ extract:
 
 # ---------------- Biên soạn ----------------
 abstract:
-  ratio_limit: 0.70           # quy tắc 70%: B/T <= 0,70 (ngắn hơn) hoặc T/B <= 0,70 (dài hơn)
-  short_target_low: 0.55      # khi viết ngắn hơn: nhắm B/T trong [0,55; 0,68]
+  ratio_limit: 0.70           # quy tắc 70%: B/T <= 0,70 (bản biên soạn bắt buộc ngắn hơn bản trích chọn)
+  short_target_low: 0.55      # nhắm B/T trong [0,55; 0,68]
   short_target_high: 0.68
-  long_target_factor: 1.55    # khi viết dài hơn: nhắm B ~ T * 1,55 (tối thiểu T / 0,70)
-  allow_longer_below_words: 80  # chỉ cho phép viết dài hơn khi bản trích chọn < 80 từ
+  long_target_factor: 1.55    # không còn dùng (giữ lại để tương thích cấu hình cũ)
+  allow_longer_below_words: 0 # 0 = luôn bắt buộc ngắn hơn bản trích chọn (B/T <= 70%)
   too_short_warn: 0.40        # B/T < 0,40 -> cảnh báo quá ngắn
   max_attempts: 3             # số lần gọi AI tối đa cho bước biên soạn
   coverage_warn: 0.35         # tỉ lệ cặp từ của bản biên soạn có trong bản gốc < 0,35 -> cảnh báo

@@ -25,11 +25,6 @@ Hãy chọn các đơn vị câu/đề mục quan trọng nhất từ (các) vă
 {{ retry_message }}
 {% endif %}
 
-{% if user_note %}
-## GHI CHÚ CỦA NGƯỜI DUYỆT (ưu tiên tuân thủ)
-{{ user_note }}
-{% endif %}
-
 ## CÂU TRUY VẤN (QUERY)
 {{ query if query else "(Không có câu truy vấn)" }}
 

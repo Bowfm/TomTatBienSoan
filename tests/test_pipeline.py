@@ -1,9 +1,7 @@
 """Kiểm thử tầng Pipeline: luồng chạy toàn diện, kế thừa thông minh, xử lý bước dở dang."""
 from __future__ import annotations
 
-from datetime import datetime
 import io
-import zipfile
 
 from tomtat import STYLES
 from tomtat.config import load_config
@@ -52,19 +50,6 @@ def test_pipeline_and_web_api_on_sample(tmp_path):
     app_json = r_app.get_json()
     assert app_json["ok"] is True
     assert (tmp_path / "output" / "M54629.docx").exists()
-
-    # Kiểm tra tải file ZIP
-    r_zip = tc.get("/api/download-zip?stems=M54629")
-    assert r_zip.status_code == 200
-    expected_zip = f"{datetime.now().strftime('%d-%m')}.zip"
-    assert expected_zip in r_zip.headers.get("Content-Disposition", "")
-    with zipfile.ZipFile(io.BytesIO(r_zip.data)) as zf:
-        assert "M54629.docx" in zf.namelist()
-    assert (tmp_path / "output" / expected_zip).exists()
-
-    # Kiểm tra tải lẻ 1 file đã xong
-    r_single = tc.get("/api/download-file/M54629")
-    assert r_single.status_code == 200
 
     # Kiểm tra tải file mới lên qua nút "+ Thêm file .docx" (/api/upload) và chạy AI ngay
     r_up = tc.post(

@@ -1,27 +1,187 @@
 // Quản lý khung soạn thảo: hiển thị văn bản, chọn câu, kiểm tra cơ học, lưu nháp, chạy lại AI, duyệt xuất
-import { loadFileList, registerSelectFileHandler, renderFileList } from "./sidebar.js";
+import {
+  isApprovedStatus,
+  loadFileList,
+  pendingFiles,
+  registerSelectFileHandler,
+  registerStopFileHandler,
+  registerSyncRerunButtonsHandler,
+  renderFileList,
+  renderRpdStatus,
+  sortFiles,
+  syncRunningProgressBar,
+} from "./sidebar.js";
 import { store } from "./state.js";
 import { $, api, escapeHtml, showToast } from "./utils.js";
 
 let checkTimer = null;
+let _previewVersionHandler = null;
+let _lastRenderedStem = null;
 
-export async function selectFile(stem) {
+export const STEP_NAMES_VI = {
+  inspect: "Đọc cấu trúc",
+  label: "Gán nhãn",
+  extract: "Trích chọn",
+  extract_abstract: "Trích chọn & Biên soạn",
+  abstract: "Biên soạn",
+  judge: "Chấm G-Eval",
+  all: "Chạy lại cả bài",
+};
+
+const STALE_PART_NAMES_VI = {
+  extract: "Bản trích chọn",
+  abstract: "Bản biên soạn",
+  judge: "Điểm G-Eval",
+};
+
+export const VERSION_SOURCE_VI = {
+  "ai:pipeline": "🤖 AI toàn bài",
+  "ai:label": "🤖 AI gán nhãn",
+  "ai:extract": "🤖 AI trích chọn",
+  "ai:extract_abstract": "🤖 AI trích chọn & biên soạn",
+  "ai:abstract": "🤖 AI biên soạn",
+  "ai:judge": "🤖 AI chấm G-Eval",
+  user: "👤 Lưu thủ công",
+  approve: "✅ Đã duyệt",
+  restore: "↩ Khôi phục",
+  "auto:before_ai": "🛡 Tự lưu trước AI",
+  "auto:before_restore": "🛡 Tự lưu trước rollback",
+};
+
+export function registerPreviewVersionHandler(fn) {
+  _previewVersionHandler = fn;
+}
+
+export function formatVersionTime(isoStr) {
+  if (!isoStr) return "";
+  const m = String(isoStr).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})/);
+  if (m) return `${m[4]} ${m[3]}/${m[2]}`;
+  return String(isoStr);
+}
+
+function formatVerTag(ver) {
+  return `v${String(Number(ver || 0)).padStart(3, "0")}`;
+}
+
+function versionSourceClass(src) {
+  const s = String(src || "");
+  if (s.startsWith("ai:")) return "ver-badge-src-ai";
+  if (s === "user") return "ver-badge-src-user";
+  if (s === "approve") return "ver-badge-src-approve";
+  if (s === "restore") return "ver-badge-src-restore";
+  if (s.startsWith("auto:")) return "ver-badge-src-auto";
+  return "";
+}
+
+function normalizeSelectionsSig(selObj) {
+  if (!selObj || typeof selObj !== "object") return "";
+  return Object.keys(selObj)
+    .sort()
+    .map((k) => {
+      const nums = Array.from(selObj[k] || [])
+        .map((x) => Number(x))
+        .filter((n) => !Number.isNaN(n))
+        .sort((a, b) => a - b);
+      return nums.length ? `${k}:${nums.join(",")}` : "";
+    })
+    .filter(Boolean)
+    .join(";");
+}
+
+function currentEditorContentSig() {
+  const styleEl = $("sel-style");
+  const extEl = $("txt-extract");
+  const absEl = $("txt-abstract");
+  const judge = store.CURRENT_STATE ? store.CURRENT_STATE.judge || null : null;
+  const selObj = {};
+  for (const [k, setObj] of Object.entries(store.SELECTIONS || {})) {
+    selObj[k] = Array.from(setObj || []);
+  }
+  return [
+    (styleEl ? styleEl.value : "").trim(),
+    normalizeSelectionsSig(selObj),
+    (extEl ? extEl.value : "").trim(),
+    (absEl ? absEl.value : "").trim(),
+    judge ? JSON.stringify(judge) : "",
+  ].join("\n§\n");
+}
+
+function snapshotContentSig(snap) {
+  if (!snap) return "";
+  const lb = (snap.label || {}).value || "";
+  const ex = snap.extract || {};
+  const ab = snap.abstract || {};
+  const judge = snap.judge || null;
+  return [
+    String(lb).trim(),
+    normalizeSelectionsSig(ex.selections || {}),
+    String(ex.text || "").trim(),
+    String(ab.text || "").trim(),
+    judge ? JSON.stringify(judge) : "",
+  ].join("\n§\n");
+}
+
+function editorHasContent() {
+  const styleVal = ($("sel-style") ? $("sel-style").value : "").trim();
+  const extVal = ($("txt-extract") ? $("txt-extract").value : "").trim();
+  const absVal = ($("txt-abstract") ? $("txt-abstract").value : "").trim();
+  const hasSel = Object.values(store.SELECTIONS || {}).some((s) => s && s.size > 0);
+  const hasJudge = Boolean(store.CURRENT_STATE && store.CURRENT_STATE.judge);
+  return Boolean(styleVal || extVal || absVal || hasSel || hasJudge);
+}
+
+export function hasUnsavedVersionChanges() {
+  if (!store.CURRENT_STEM) return false;
+  const versions = store.CURRENT_VERSIONS || [];
+  if (!versions.length) return editorHasContent();
+  return currentEditorContentSig() !== snapshotContentSig(versions[0]);
+}
+
+export function computePrevRollbackTarget() {
+  const versions = store.CURRENT_VERSIONS || [];
+  if (!versions.length) return null;
+  const curSig = currentEditorContentSig();
+  if (curSig !== snapshotContentSig(versions[0])) {
+    return versions[0];
+  }
+  const curV = Number((store.CURRENT_STATE || {}).current_version || 0);
+  let older = curV > 0 ? versions.filter((v) => Number(v.version || 0) < curV) : versions.slice(1);
+  if (!older.length) older = versions.slice(1);
+  if (!older.length) return null;
+  for (const v of older) {
+    if (snapshotContentSig(v) !== curSig) return v;
+  }
+  return older[0];
+}
+
+export async function selectFile(stem, opts = {}) {
+  if (!stem) return;
+  clearTimeout(checkTimer);
   try {
     const data = await api(`/api/file/${encodeURIComponent(stem)}`);
+    if (opts.onlyIfCurrent && store.CURRENT_STEM && store.CURRENT_STEM !== stem) {
+      return;
+    }
     store.CURRENT_STEM = stem;
     store.CURRENT_STATE = data.state;
     store.CURRENT_UNITS = data.units;
     store.CUSTOM_EDITED = Boolean((store.CURRENT_STATE.extract || {}).custom_edited);
     initSelectionsFromState();
-    renderFileList();
+    if (!opts.skipSidebarRender) {
+      renderFileList();
+    }
     renderEditor(data.versions || []);
   } catch (err) {
-    showToast(err.message, true);
+    if (!opts.silent) {
+      showToast(err.message, true);
+    }
   }
 }
 
 // Đăng ký handler với sidebar để tránh vòng lặp phụ thuộc trực tiếp
 registerSelectFileHandler(selectFile);
+registerSyncRerunButtonsHandler(syncRerunButtonsState);
+registerStopFileHandler(stopFileAI);
 
 export function initSelectionsFromState() {
   store.SELECTIONS = {};
@@ -45,6 +205,121 @@ export function initSelectionsFromState() {
       store.SELECTIONS[u.doc].add(Number(u.id));
     }
   }
+}
+
+function buildStalePromptHtml(staleSteps, staleReason, isRunning) {
+  const hasExt = staleSteps.includes("extract");
+  const hasAbs = staleSteps.includes("abstract");
+  const hasJudge = staleSteps.includes("judge");
+  const reasonPrefix = staleReason ? `${escapeHtml(staleReason)}. ` : "";
+  const disAttr = isRunning ? "disabled" : "";
+
+  let question = "";
+  const buttons = [];
+  if (hasExt && hasAbs) {
+    question = `${reasonPrefix}Bạn có muốn AI chỉnh lại luôn <strong>Bản trích chọn</strong> và <strong>Bản biên soạn</strong> không?`;
+    buttons.push(
+      `<button type="button" class="btn btn-sm btn-warn-action" data-stale-rerun="extract_abstract" ${disAttr}>🤖 Chỉnh lại Bản trích chọn &amp; Bản biên soạn</button>`
+    );
+    buttons.push(
+      `<button type="button" class="btn btn-sm" data-stale-rerun="abstract" ${disAttr}>🤖 Chỉ chỉnh lại Bản biên soạn</button>`
+    );
+  } else if (hasAbs) {
+    question = `${reasonPrefix}Bạn có muốn AI chỉnh lại luôn <strong>Bản biên soạn</strong> không?`;
+    buttons.push(
+      `<button type="button" class="btn btn-sm btn-warn-action" data-stale-rerun="abstract" ${disAttr}>🤖 Chỉnh lại Bản biên soạn</button>`
+    );
+  } else if (hasExt) {
+    question = `${reasonPrefix}Bạn có muốn AI chỉnh lại luôn <strong>Bản trích chọn</strong> không?`;
+    buttons.push(
+      `<button type="button" class="btn btn-sm btn-warn-action" data-stale-rerun="extract" ${disAttr}>🤖 Chỉnh lại Bản trích chọn</button>`
+    );
+  } else if (hasJudge) {
+    question = `${reasonPrefix}Bạn có muốn AI chấm lại <strong>G-Eval</strong> không?`;
+    buttons.push(
+      `<button type="button" class="btn btn-sm btn-warn-action" data-stale-rerun="judge" ${disAttr}>🤖 Chấm lại G-Eval</button>`
+    );
+  } else {
+    const partNames = staleSteps.map((s) => STALE_PART_NAMES_VI[s] || STEP_NAMES_VI[s] || s);
+    question = `${reasonPrefix}Cần kiểm tra/chỉnh sửa lại những phần khác: ${escapeHtml(partNames.join(", "))}.`;
+  }
+  buttons.push(
+    `<button type="button" class="btn btn-sm btn-stale-dismiss" data-stale-dismiss="1" ${disAttr}>Giữ nguyên (không sửa)</button>`
+  );
+  return `
+    <div class="stale-action-box">
+      <div>• ${question}</div>
+      <div class="stale-action-buttons">${buttons.join("")}</div>
+    </div>
+  `;
+}
+
+function bindStalePromptActions(container) {
+  if (!container) return;
+  container.querySelectorAll("button[data-stale-rerun]").forEach((btn) => {
+    btn.addEventListener("click", () => rerunStep(btn.dataset.staleRerun));
+  });
+  container.querySelectorAll("button[data-stale-dismiss]").forEach((btn) => {
+    btn.addEventListener("click", () => dismissStalePrompt());
+  });
+}
+
+export function renderFlagsAndStale() {
+  const st = store.CURRENT_STATE;
+  if (!st) return;
+  const staleSteps = Array.isArray(st.stale_steps) ? st.stale_steps : [];
+  const staleSet = new Set(staleSteps);
+  const isRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
+
+  const syncStaleCard = (cardId, badgeId, stepKey) => {
+    const card = $(cardId);
+    const badge = $(badgeId);
+    const isStale = staleSet.has(stepKey);
+    if (card) card.classList.toggle("card-stale", isStale);
+    if (badge) badge.classList.toggle("hidden", !isStale);
+  };
+  syncStaleCard("card-extract", "stale-badge-extract", "extract");
+  syncStaleCard("card-abstract", "stale-badge-abstract", "abstract");
+  syncStaleCard("judge-card", "stale-badge-judge", "judge");
+
+  const normalFlags = [...(st.flags || [])];
+  const fbox = $("flags-box");
+  if (fbox) {
+    if (normalFlags.length || staleSteps.length) {
+      fbox.classList.remove("hidden");
+      const flagsHtml = normalFlags.map((x) => `<div>• ${escapeHtml(x)}</div>`).join("");
+      const staleHtml = staleSteps.length ? buildStalePromptHtml(staleSteps, st.stale_reason, isRunning) : "";
+      fbox.innerHTML = flagsHtml + staleHtml;
+      bindStalePromptActions(fbox);
+    } else {
+      fbox.classList.add("hidden");
+      fbox.innerHTML = "";
+    }
+  }
+
+  const inlinePrompt = $("label-stale-prompt");
+  if (inlinePrompt) {
+    if (staleSet.has("extract") || staleSet.has("abstract")) {
+      inlinePrompt.classList.remove("hidden");
+      inlinePrompt.innerHTML = buildStalePromptHtml(staleSteps, st.stale_reason, isRunning);
+      bindStalePromptActions(inlinePrompt);
+    } else {
+      inlinePrompt.classList.add("hidden");
+      inlinePrompt.innerHTML = "";
+    }
+  }
+}
+
+export async function dismissStalePrompt() {
+  if (!store.CURRENT_STEM) return;
+  await autoSaveSilent({ dismissStale: true, refreshFlags: true });
+}
+
+export async function onStyleChange() {
+  clearTimeout(checkTimer);
+  syncVersionControls();
+  await runLiveCheck();
+  await autoSaveSilent({ refreshFlags: true });
 }
 
 export function renderEditor(versions) {
@@ -74,17 +349,7 @@ export function renderEditor(versions) {
   pill.className = `status-pill st-${st.status}`;
   syncRerunButtonsState();
 
-  const flags = [...(st.flags || [])];
-  if (st.stale_steps && st.stale_steps.length) {
-    flags.push(`Các bước cần chạy lại/cập nhật sau khi sửa bước trước: ${st.stale_steps.join(", ")}`);
-  }
-  const fbox = $("flags-box");
-  if (flags.length) {
-    fbox.classList.remove("hidden");
-    fbox.innerHTML = flags.map((x) => `<div>• ${escapeHtml(x)}</div>`).join("");
-  } else {
-    fbox.classList.add("hidden");
-  }
+  renderFlagsAndStale();
 
   $("query-box").textContent = u.query || "(Không có câu truy vấn)";
   $("budget-hint").textContent =
@@ -125,11 +390,16 @@ export function renderEditor(versions) {
 
   $("txt-extract").value = (st.extract || {}).text || "";
   $("txt-abstract").value = (st.abstract || {}).text || "";
+  if (_lastRenderedStem !== st.stem) {
+    if ($("version-note")) $("version-note").value = "";
+    _lastRenderedStem = st.stem;
+  }
 
   renderDocsUnits();
   renderChecks(st.checks);
   renderJudge(st.judge);
   renderVersions(versions);
+  syncRerunButtonsState();
 }
 
 export function renderDocsUnits() {
@@ -209,6 +479,7 @@ export async function assembleFromSelections() {
     $("txt-extract").value = data.extract || "";
     renderDocsUnits();
     renderChecks(data.checks);
+    syncVersionControls();
     autoSaveSilent();
   } catch (err) {
     showToast(err.message, true);
@@ -244,6 +515,7 @@ export async function runLiveCheck() {
       updateUnitHighlights();
     }
     renderChecks(data.checks);
+    syncVersionControls();
   } catch (err) {
     showToast(err.message, true);
   }
@@ -363,25 +635,162 @@ export function renderJudge(j) {
   `;
 }
 
-export function renderVersions(versions) {
+export function syncVersionControls() {
+  const versions = store.CURRENT_VERSIONS || [];
+  const curVer = Number((store.CURRENT_STATE || {}).current_version || 0);
+  const dirty = hasUnsavedVersionChanges();
+  const prevTarget = computePrevRollbackTarget();
+  const isRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
+
+  const badge = $("cur-version-badge");
+  if (badge) {
+    badge.textContent = curVer > 0 ? formatVerTag(curVer) : versions.length ? formatVerTag(versions[0].version) : "Chưa lưu";
+  }
+  const dirtyEl = $("version-dirty-badge");
+  if (dirtyEl) {
+    dirtyEl.classList.toggle("hidden", !dirty);
+  }
+  const cntEl = $("versions-count");
+  if (cntEl) cntEl.textContent = String(versions.length);
+  const cntBtnEl = $("versions-count-btn");
+  if (cntBtnEl) cntBtnEl.textContent = String(versions.length);
+
+  const btnSave = $("btn-save");
+  if (btnSave) btnSave.disabled = isRunning || !store.CURRENT_STEM;
+
+  const btnPrev = $("btn-rollback-prev");
+  if (btnPrev) {
+    if (prevTarget) {
+      const targetTag = formatVerTag(prevTarget.version);
+      btnPrev.disabled = isRunning;
+      btnPrev.textContent = `↩ Rollback về ${targetTag}`;
+      btnPrev.title = `Quay lại phiên bản ${targetTag} (${VERSION_SOURCE_VI[prevTarget.source] || prevTarget.source || ""})`;
+    } else {
+      btnPrev.disabled = true;
+      btnPrev.textContent = "↩ Rollback version trước";
+      btnPrev.title = "Chưa có phiên bản trước đó để rollback";
+    }
+  }
+
   const ul = $("versions-list");
-  if (!ul) return;
-  ul.innerHTML = "";
+  if (ul) {
+    ul.querySelectorAll("button[data-ver-restore]").forEach((btn) => {
+      const vNum = Number(btn.dataset.verRestore || 0);
+      const isExactCurrent = !dirty && curVer > 0 && vNum === curVer;
+      btn.disabled = isRunning || isExactCurrent;
+      btn.textContent = isExactCurrent ? "Đang dùng" : "↩ Rollback";
+    });
+  }
 }
 
-export async function autoSaveSilent() {
+export function renderVersions(versions) {
+  store.CURRENT_VERSIONS = Array.isArray(versions) ? versions : [];
+  const ul = $("versions-list");
+  if (!ul) {
+    syncVersionControls();
+    return;
+  }
+  ul.innerHTML = "";
+  const list = store.CURRENT_VERSIONS;
+  const curVer = Number((store.CURRENT_STATE || {}).current_version || 0);
+  const dirty = hasUnsavedVersionChanges();
+
+  if (!list.length) {
+    ul.innerHTML = `<li class="muted" style="padding:8px 4px">Chưa có version nào được lưu cho file này. Bấm <strong>💾 Lưu version</strong> hoặc chạy AI để tạo mốc đầu tiên.</li>`;
+    syncVersionControls();
+    return;
+  }
+
+  for (const v of list) {
+    const vNum = Number(v.version || 0);
+    const vTag = formatVerTag(vNum);
+    const isExactCurrent = !dirty && curVer > 0 && vNum === curVer;
+    const srcLabel = VERSION_SOURCE_VI[v.source] || v.source || "Nháp";
+    const srcCls = versionSourceClass(v.source);
+    const extraApproveBadge =
+      v.approved && v.source !== "approve"
+        ? '<span class="badge ver-badge-src ver-badge-src-approve">✅ Đã duyệt</span>'
+        : "";
+    const lbVal = (v.label || {}).value || "(chưa nhãn)";
+    const ew = (v.extract || {}).words ?? 0;
+    const aw = (v.abstract || {}).words ?? 0;
+    const chk = v.checks_summary || {};
+    const chkTxt = chk.ok === true ? "✓ Đạt" : chk.ok === false ? `✕ ${chk.n_errors || 0} lỗi` : "—";
+    const modelTxt = v.model_used || (v.abstract || {}).model_used || (v.extract || {}).model_used || "";
+    const noteTxt = v.note ? ` · "${v.note}"` : "";
+
+    const li = document.createElement("li");
+    if (isExactCurrent) li.className = "ver-active";
+    li.innerHTML = `
+      <div class="ver-item-main">
+        <div class="ver-item-head">
+          <strong>${escapeHtml(vTag)}</strong>
+          ${isExactCurrent ? '<span class="badge ver-badge-cur">Đang dùng</span>' : ""}
+          <span class="badge ver-badge-src ${srcCls}">${escapeHtml(srcLabel)}</span>
+          ${extraApproveBadge}
+          <span class="muted">${escapeHtml(formatVersionTime(v.saved_at))}</span>
+        </div>
+        <div class="ver-item-meta">
+          ${escapeHtml(lbVal)} · Trích ${ew}w · BSoạn ${aw}w · ${escapeHtml(chkTxt)}${modelTxt ? ` · 🤖 ${escapeHtml(modelTxt)}` : ""}${escapeHtml(noteTxt)}
+        </div>
+      </div>
+      <div class="ver-item-actions">
+        <button type="button" class="btn btn-sm" data-ver-preview="${vNum}" title="Xem nội dung &amp; so sánh với bản hiện tại">👁 Xem</button>
+        <button type="button" class="btn btn-sm" data-ver-restore="${vNum}" ${isExactCurrent ? "disabled" : ""}>${isExactCurrent ? "Đang dùng" : "↩ Rollback"}</button>
+      </div>
+    `;
+    const btnPrev = li.querySelector("button[data-ver-preview]");
+    if (btnPrev) {
+      btnPrev.addEventListener("click", () => {
+        if (_previewVersionHandler) _previewVersionHandler(vNum);
+      });
+    }
+    const btnRest = li.querySelector("button[data-ver-restore]");
+    if (btnRest) {
+      btnRest.addEventListener("click", () => restoreVersion(vNum));
+    }
+    ul.appendChild(li);
+  }
+  syncVersionControls();
+}
+
+export async function autoSaveSilent(opts = {}) {
   if (!store.CURRENT_STEM) return;
+  if (store.RUNNING_STEMS.has(store.CURRENT_STEM)) return;
   try {
-    await api(`/api/file/${encodeURIComponent(store.CURRENT_STEM)}/save`, {
+    const body = {
+      style: $("sel-style").value,
+      extract: $("txt-extract").value,
+      abstract: $("txt-abstract").value,
+      selections: selectionsPayload(),
+      custom_edited: store.CUSTOM_EDITED,
+      auto_save: true,
+      create_version: false,
+    };
+    if (opts.dismissStale) body.dismiss_stale = true;
+    const data = await api(`/api/file/${encodeURIComponent(store.CURRENT_STEM)}/save`, {
       method: "POST",
-      body: JSON.stringify({
-        style: $("sel-style").value,
-        extract: $("txt-extract").value,
-        abstract: $("txt-abstract").value,
-        selections: selectionsPayload(),
-        custom_edited: store.CUSTOM_EDITED,
-      }),
+      body: JSON.stringify(body),
     });
+    if (data && data.state && store.CURRENT_STATE && store.CURRENT_STATE.stem === store.CURRENT_STEM) {
+      const prevStale = JSON.stringify(store.CURRENT_STATE.stale_steps || []);
+      const prevReason = store.CURRENT_STATE.stale_reason || null;
+      store.CURRENT_STATE.updated_at = data.state.updated_at;
+      store.CURRENT_STATE.status = data.state.status;
+      store.CURRENT_STATE.status_vi = data.state.status_vi;
+      store.CURRENT_STATE.checks = data.state.checks;
+      store.CURRENT_STATE.label = data.state.label;
+      store.CURRENT_STATE.stale_steps = data.state.stale_steps || [];
+      store.CURRENT_STATE.stale_reason = data.state.stale_reason || null;
+      if (Array.isArray(data.versions)) {
+        store.CURRENT_VERSIONS = data.versions;
+      }
+      syncVersionControls();
+      const nextStale = JSON.stringify(store.CURRENT_STATE.stale_steps || []);
+      if (opts.refreshFlags || prevStale !== nextStale || prevReason !== store.CURRENT_STATE.stale_reason) {
+        renderFlagsAndStale();
+      }
+    }
   } catch (_) {
     // Lưu ngầm không làm phiền người dùng
   }
@@ -389,6 +798,13 @@ export async function autoSaveSilent() {
 
 export async function saveDraft() {
   if (!store.CURRENT_STEM) return;
+  if (store.RUNNING_STEMS.has(store.CURRENT_STEM)) {
+    showToast(`File ${store.CURRENT_STEM}.docx đang được AI xử lý, vui lòng đợi hoàn tất.`, true);
+    return;
+  }
+  clearTimeout(checkTimer);
+  const noteInput = $("version-note");
+  const noteVal = noteInput ? noteInput.value.trim() : "";
   try {
     const data = await api(`/api/file/${encodeURIComponent(store.CURRENT_STEM)}/save`, {
       method: "POST",
@@ -398,12 +814,16 @@ export async function saveDraft() {
         abstract: $("txt-abstract").value,
         selections: selectionsPayload(),
         custom_edited: store.CUSTOM_EDITED,
+        note: noteVal,
+        auto_save: false,
+        create_version: true,
       }),
     });
+    if (noteInput) noteInput.value = "";
     store.CURRENT_STATE = data.state;
     renderEditor(data.versions || []);
     await loadFileList(true);
-    showToast(`Đã lưu nháp (v${String(data.version).padStart(3, "0")}).`);
+    showToast(`✓ Đã lưu phiên bản ${formatVerTag(data.version)}.`);
   } catch (err) {
     showToast(err.message, true);
   }
@@ -411,33 +831,82 @@ export async function saveDraft() {
 
 export function syncRerunButtonsState() {
   const isRunning = Boolean(store.CURRENT_STEM && store.RUNNING_STEMS.has(store.CURRENT_STEM));
-  document.querySelectorAll("button[data-rerun]").forEach((b) => {
+  const isStopping = Boolean(store.CURRENT_STEM && isRunning && store.STOPPING_STEMS.has(store.CURRENT_STEM));
+  document.querySelectorAll("button[data-rerun], button[data-stale-rerun], button[data-stale-dismiss]").forEach((b) => {
     b.disabled = isRunning;
   });
+  const stopFileBtn = $("btn-stop-file-ai");
+  if (stopFileBtn) {
+    stopFileBtn.classList.toggle("hidden", !isRunning);
+    stopFileBtn.disabled = !isRunning || isStopping;
+    stopFileBtn.textContent = isStopping ? "⏳ Đang dừng..." : "⏹ Dừng AI";
+  }
+  syncRunningProgressBar();
+  syncVersionControls();
   const pill = $("cur-status");
-  if (pill && isRunning) {
-    pill.textContent = "⏳ Đang chạy AI...";
+  if (!pill) return;
+  if (isRunning) {
+    if (isStopping) {
+      pill.textContent = "⏳ Đang dừng...";
+    } else {
+      const curStep =
+        (store.RUNNING_STEPS && store.RUNNING_STEPS[store.CURRENT_STEM]) ||
+        (store.CURRENT_STATE && store.CURRENT_STATE.current_step) ||
+        "";
+      const stepVi = STEP_NAMES_VI[curStep] || "";
+      pill.textContent = stepVi ? `⏳ Đang chạy (${stepVi})...` : "⏳ Đang chạy AI...";
+    }
     pill.className = "status-pill st-running";
+  } else if (store.CURRENT_STATE) {
+    pill.textContent = store.CURRENT_STATE.status_vi;
+    pill.className = `status-pill st-${store.CURRENT_STATE.status}`;
+  }
+}
+
+export async function stopFileAI(targetStem = null) {
+  const stem = typeof targetStem === "string" && targetStem ? targetStem : store.CURRENT_STEM;
+  if (!stem) return;
+  if (store.STOPPING_STEMS.has(stem)) return;
+  store.STOPPING_STEMS.add(stem);
+  renderFileList();
+  syncRerunButtonsState();
+  try {
+    const res = await api(`/api/file/${encodeURIComponent(stem)}/stop`, { method: "POST" });
+    if (res && res.stopped) {
+      showToast(res.message || `Đã gửi yêu cầu dừng chạy AI cho ${stem}.docx.`, "warn");
+    } else {
+      store.STOPPING_STEMS.delete(stem);
+      store.LOCAL_RERUN_STEMS.delete(stem);
+      store.RUNNING_STEMS.delete(stem);
+      delete store.RUNNING_STEPS[stem];
+      await loadFileList(true);
+      if (store.CURRENT_STEM === stem) {
+        await selectFile(stem, { silent: true });
+      }
+      showToast((res && res.message) || `File ${stem}.docx hiện không còn chạy AI.`);
+    }
+  } catch (err) {
+    store.STOPPING_STEMS.delete(stem);
+    showToast(err.message, true);
+  } finally {
+    renderFileList();
+    syncRerunButtonsState();
   }
 }
 
 export async function rerunStep(step) {
   if (!store.CURRENT_STEM) return;
   const stem = store.CURRENT_STEM;
-  if (store.RUNNING_STEMS.has(stem)) return;
-  const stepNames = {
-    label: "Gán nhãn",
-    extract: "Trích chọn",
-    abstract: "Biên soạn",
-    judge: "Chấm G-Eval",
-    all: "Chạy lại cả bài",
-  };
-  const labelVi = stepNames[step] || step;
+  if (store.RUNNING_STEMS.has(stem) || store.LOCAL_RERUN_STEMS.has(stem)) {
+    showToast(`File ${stem}.docx đang được AI xử lý, vui lòng đợi hoàn tất.`, true);
+    return;
+  }
+  const labelVi = STEP_NAMES_VI[step] || step;
 
   const chkMock = $("chk-mock");
   const reqPayload = {
     step,
-    note: $("ai-note").value,
+    restart: step === "all",
     mock: chkMock ? chkMock.checked : false,
     style: $("sel-style").value,
     extract: $("txt-extract").value,
@@ -445,35 +914,102 @@ export async function rerunStep(step) {
     ignore_mismatch: true,
   };
 
+  store.STOPPING_STEMS.delete(stem);
+  store.LOCAL_RERUN_STEMS.add(stem);
   store.RUNNING_STEMS.add(stem);
+  store.RUNNING_STEPS[stem] = step === "all" ? "inspect" : step === "extract_abstract" ? "extract" : step;
   renderFileList();
   syncRerunButtonsState();
-  const pill = $("cur-status");
-  if (pill && store.CURRENT_STEM === stem) {
-    pill.textContent = `⏳ Đang chạy (${labelVi})...`;
-    pill.className = "status-pill st-running";
-  }
   showToast(`⏳ Đang chạy '${labelVi}' cho ${stem}.docx...`);
+
+  // Poll nhẹ tiến độ bước trong lúc chờ request rerun (đặc biệt khi chạy lại cả bài)
+  let rerunPollTimer = setInterval(async () => {
+    if (!store.RUNNING_STEMS.has(stem)) return;
+    try {
+      const snap = await api(`/api/file/${encodeURIComponent(stem)}`);
+      if (snap && snap.rpd_status) {
+        renderRpdStatus(snap.rpd_status);
+      }
+      if (snap && snap.state) {
+        if (snap.state.current_step) {
+          store.RUNNING_STEPS[stem] = snap.state.current_step;
+        }
+        if (store.CURRENT_STEM === stem && snap.state.updated_at !== (store.CURRENT_STATE || {}).updated_at) {
+          store.CURRENT_STATE = snap.state;
+          store.CURRENT_UNITS = snap.units || store.CURRENT_UNITS;
+          initSelectionsFromState();
+          renderEditor(snap.versions || []);
+        }
+        renderFileList();
+        syncRerunButtonsState();
+      }
+    } catch (_) {
+      // Bỏ qua lỗi poll tạm thời
+    }
+  }, 1000);
 
   try {
     const data = await api(`/api/file/${encodeURIComponent(stem)}/rerun`, {
       method: "POST",
       body: JSON.stringify(reqPayload),
     });
+    clearInterval(rerunPollTimer);
+    rerunPollTimer = null;
+    if (data.rpd_status) {
+      renderRpdStatus(data.rpd_status);
+    }
+    store.STOPPING_STEMS.delete(stem);
+    store.LOCAL_RERUN_STEMS.delete(stem);
     store.RUNNING_STEMS.delete(stem);
+    delete store.RUNNING_STEPS[stem];
     if (store.CURRENT_STEM === stem) {
       store.CURRENT_STATE = data.state;
       store.CURRENT_UNITS = data.units || store.CURRENT_UNITS;
+      store.CUSTOM_EDITED = Boolean((store.CURRENT_STATE.extract || {}).custom_edited);
       initSelectionsFromState();
       renderEditor(data.versions || []);
     }
     await loadFileList(true);
-    showToast(`✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`);
+    if (data.cancelled) {
+      showToast(`⏹ Đã dừng '${labelVi}' cho ${stem}.docx.`, "warn");
+    } else if (step === "label") {
+      const stale = (data.state && data.state.stale_steps) || [];
+      if (data.label_changed && stale.length) {
+        const partNames = stale.map((s) => STALE_PART_NAMES_VI[s] || STEP_NAMES_VI[s] || s);
+        const prevLb = data.previous_label || "(trống)";
+        const newLb = data.new_label || ((data.state && data.state.label && data.state.label.value) || "");
+        showToast(
+          `⚠️ Nhãn đổi từ '${prevLb}' sang '${newLb}' — cần chỉnh sửa lại: ${partNames.join(", ")}!`,
+          "warn"
+        );
+      } else if (!data.label_changed) {
+        const curLb = data.new_label || ((data.state && data.state.label && data.state.label.value) || "");
+        showToast(
+          curLb
+            ? `✓ Đã chạy xong 'Gán nhãn' cho ${stem}.docx (nhãn không đổi: '${curLb}').`
+            : `✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`
+        );
+      } else {
+        showToast(`✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`);
+      }
+    } else {
+      showToast(`✓ Đã chạy xong '${labelVi}' cho ${stem}.docx!`);
+    }
   } catch (err) {
-    store.RUNNING_STEMS.delete(stem);
+    if (rerunPollTimer) {
+      clearInterval(rerunPollTimer);
+      rerunPollTimer = null;
+    }
+    store.STOPPING_STEMS.delete(stem);
+    store.LOCAL_RERUN_STEMS.delete(stem);
+    const alreadyRunning = err && (err.status === 409 || (err.data && err.data.already_running));
+    if (!alreadyRunning) {
+      store.RUNNING_STEMS.delete(stem);
+      delete store.RUNNING_STEPS[stem];
+    }
     await loadFileList(true);
     if (store.CURRENT_STEM === stem) {
-      await selectFile(stem);
+      await selectFile(stem, { silent: true });
     }
     showToast(err.message, true);
   } finally {
@@ -481,27 +1017,56 @@ export async function rerunStep(step) {
   }
 }
 
-export async function restoreVersion(ver) {
-  if (!store.CURRENT_STEM) return;
+export async function restoreVersion(ver = null) {
+  if (!store.CURRENT_STEM) return false;
+  if (store.RUNNING_STEMS.has(store.CURRENT_STEM)) {
+    showToast(`File ${store.CURRENT_STEM}.docx đang được AI xử lý, vui lòng đợi hoàn tất.`, true);
+    return false;
+  }
+  clearTimeout(checkTimer);
+  const payload = { version: ver };
+  if (hasUnsavedVersionChanges()) {
+    payload.style = $("sel-style").value;
+    payload.extract = $("txt-extract").value;
+    payload.abstract = $("txt-abstract").value;
+    payload.selections = selectionsPayload();
+    payload.custom_edited = store.CUSTOM_EDITED;
+  }
   try {
     const data = await api(`/api/file/${encodeURIComponent(store.CURRENT_STEM)}/restore`, {
       method: "POST",
-      body: JSON.stringify({ version: ver }),
+      body: JSON.stringify(payload),
     });
     store.CURRENT_STATE = data.state;
+    store.CUSTOM_EDITED = Boolean((store.CURRENT_STATE.extract || {}).custom_edited);
     initSelectionsFromState();
     renderEditor(data.versions || []);
     await loadFileList(true);
-    showToast(`Đã khôi phục phiên bản v${String(ver).padStart(3, "0")}.`);
+    const restoredTag = formatVerTag(data.restored_from || ver);
+    const newTag = formatVerTag(data.version);
+    showToast(`✓ Đã rollback về ${restoredTag} (ghi thành ${newTag}).`);
+    return true;
   } catch (err) {
     showToast(err.message, true);
+    return false;
   }
+}
+
+export async function rollbackPreviousVersion() {
+  if (!store.CURRENT_STEM) return false;
+  const target = computePrevRollbackTarget();
+  return await restoreVersion(target ? target.version : null);
 }
 
 export async function approveAndExport(confirmWarnings = false) {
   if (!store.CURRENT_STEM) return;
+  clearTimeout(checkTimer);
+  const approvedStem = store.CURRENT_STEM;
+  const prevPendingStems = pendingFiles().map((r) => r.file.replace(/\.docx$/i, ""));
+  const prevIdx = prevPendingStems.indexOf(approvedStem);
+
   try {
-    const data = await api(`/api/file/${encodeURIComponent(store.CURRENT_STEM)}/approve`, {
+    const data = await api(`/api/file/${encodeURIComponent(approvedStem)}/approve`, {
       method: "POST",
       body: JSON.stringify({
         style: $("sel-style").value,
@@ -518,9 +1083,42 @@ export async function approveAndExport(confirmWarnings = false) {
       return;
     }
     store.CURRENT_STATE = data.state;
-    renderEditor(data.versions || []);
     await loadFileList(true);
-    showToast(`Đã duyệt và ghi: ${data.fill.output}`);
+
+    // Tự động chuyển sang file tiếp theo cần duyệt trong danh sách Chờ duyệt
+    const nextPendingStems = pendingFiles()
+      .map((r) => r.file.replace(/\.docx$/i, ""))
+      .filter((s) => s !== approvedStem);
+
+    let nextStem = null;
+    if (nextPendingStems.length > 0) {
+      const targetIdx = prevIdx >= 0 ? Math.min(prevIdx, nextPendingStems.length - 1) : 0;
+      nextStem = nextPendingStems[targetIdx];
+    } else {
+      // Nếu bộ lọc trạng thái hiện tại hết file nhưng vẫn còn file chờ duyệt ở trạng thái khác
+      const allUnapproved = sortFiles(store.FILES.filter((r) => !isApprovedStatus(r.status)))
+        .map((r) => r.file.replace(/\.docx$/i, ""))
+        .filter((s) => s !== approvedStem);
+      if (allUnapproved.length > 0) {
+        if ($("filter-status") && $("filter-status").value) {
+          $("filter-status").value = "";
+          renderFileList();
+        }
+        nextStem = allUnapproved[0];
+      }
+    }
+
+    if (nextStem) {
+      await selectFile(nextStem);
+      const activeItem = document.querySelector("#file-list .file-item.active");
+      if (activeItem) {
+        activeItem.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+      showToast(`Đã duyệt ${approvedStem}.docx → Chuyển sang ${nextStem}.docx`);
+    } else {
+      renderEditor(data.versions || []);
+      showToast(`Đã duyệt và ghi: ${data.fill.output} (Đã hết file chờ duyệt!)`);
+    }
   } catch (err) {
     showToast(err.message, true);
   }

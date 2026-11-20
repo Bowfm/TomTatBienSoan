@@ -32,11 +32,6 @@ Hãy đọc kỹ (các) văn bản gốc dưới đây và xác định phong c�
 - Nếu một văn bản không thật rõ ràng, hãy gán phong cách **gần nhất**, không bỏ trống.
 - Đánh giá mức độ chắc chắn (`confidence`): `cao` (rõ ràng), `trung_binh` (hơi giao thoa giữa 2 phong cách), hoặc `thap` (rất mơ hồ, cần người duyệt kiểm tra kỹ).
 
-{% if user_note %}
-## GHI CHÚ CỦA NGƯỜI DUYỆT (ưu tiên tuân thủ)
-{{ user_note }}
-{% endif %}
-
 {% if learned_label_memory %}
 {{ learned_label_memory }}
 {% endif %}

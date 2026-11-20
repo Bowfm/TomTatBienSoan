@@ -17,16 +17,17 @@ powershell -NoProfile -Command ^
   "$tmp = Join-Path $env:TEMP ('TomTatBienSoan_pack_' + [guid]::NewGuid().ToString('N')); " ^
   "$stage = Join-Path $tmp 'TomTatBienSoan'; " ^
   "New-Item -ItemType Directory -Force -Path $stage | Out-Null; " ^
-  "try { $head = (git rev-parse HEAD 2>$null).Trim(); if ($head) { @{ commit = $head; updated_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') } | ConvertTo-Json | Set-Content (Join-Path $root 'version.json') -Encoding UTF8 } } catch {}; " ^
-  "$items = @('HUONG_DAN_CAI_DAT_NHANH.txt','README.md','config.yaml','version.json','api_keys.example.txt','.env.example','.gitignore','.github_repo_url','requirements.txt','setup.bat','tomtat.bat','khoi_dong.bat','tat_server.bat','cap_nhat.bat','day_cap_nhat.bat','dong_goi_chia_se.bat','prompts','src','tests','docs','skill_ref','samples'); " ^
+  "$items = @('HUONG_DAN_CAI_DAT_NHANH.txt','README.md','pyproject.toml','config.yaml','version.json','api_keys.example.txt','.env.example','.gitignore','.github_repo_url','requirements.txt','setup.bat','tomtat.bat','khoi_dong.bat','tat_server.bat','cap_nhat.bat','day_cap_nhat.bat','dong_goi_chia_se.bat','prompts','src','tests','docs','skill_ref','samples'); " ^
   "foreach ($it in $items) { " ^
   "  $src = Join-Path $root $it; " ^
   "  if (Test-Path $src) { Copy-Item -Path $src -Destination (Join-Path $stage $it) -Recurse -Force } " ^
   "}; " ^
+  "try { $head = (git rev-parse HEAD 2>$null).Trim(); if ($head) { $vj = @{ commit = $head; updated_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') } | ConvertTo-Json; [System.IO.File]::WriteAllText((Join-Path $stage 'version.json'), $vj, (New-Object System.Text.UTF8Encoding($false))) } } catch {}; " ^
   "foreach ($d in @('input','output','work')) { New-Item -ItemType Directory -Force -Path (Join-Path $stage $d) | Out-Null }; " ^
   "$mem = Join-Path $root 'work\learned_memory.json'; " ^
   "if (Test-Path $mem) { Copy-Item -Path $mem -Destination (Join-Path $stage 'work\learned_memory.json') -Force }; " ^
   "Get-ChildItem -Path $stage -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; " ^
+  "try { $mfiles = Get-ChildItem -Path $stage -Recurse -File | ForEach-Object { $_.FullName.Substring($stage.Length + 1).Replace('\','/') } | Where-Object { $_ -notmatch '^(input|output|work)/' -and $_ -notin @('.env','api_keys.txt','config.local.yaml') }; $mf = @{ commit = [string]$head; files = @($mfiles | Sort-Object) } | ConvertTo-Json; [System.IO.File]::WriteAllText((Join-Path $stage 'work\.updater_manifest.json'), $mf, (New-Object System.Text.UTF8Encoding($false))) } catch {}; " ^
   "Compress-Archive -Path $stage -DestinationPath $outZip -Force; " ^
   "Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue;"
 

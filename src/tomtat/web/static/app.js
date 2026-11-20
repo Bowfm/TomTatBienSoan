@@ -1,15 +1,29 @@
 // Điểm khởi chạy giao diện duyệt bài (ES Module Entry Point)
-import { runPendingFiles, startBatchPolling, stopBatch, uploadFiles } from "./modules/batch.js";
-import { approveAndExport, assembleFromSelections, rerunStep, saveDraft, scheduleCheck } from "./modules/editor.js";
-import { initUpdateChecker, openLogsModal, openPreviewModal } from "./modules/modals.js";
+import { runPendingFiles, startBatchPolling, startBatchPollingFallback, stopBatch, uploadFiles } from "./modules/batch.js";
+import {
+  approveAndExport,
+  assembleFromSelections,
+  onStyleChange,
+  rerunStep,
+  rollbackPreviousVersion,
+  saveDraft,
+  scheduleCheck,
+  stopFileAI,
+  syncVersionControls,
+} from "./modules/editor.js";
+import {
+  closePreviewModal,
+  initUpdateChecker,
+  openLogsModal,
+  openPreviewModal,
+  openVersionsModal,
+} from "./modules/modals.js";
 import {
   approvedFiles,
   deleteFiles,
-  downloadDoneZip,
   isApprovedStatus,
   loadFileList,
   moveFile,
-  renderDoneList,
   renderFileList,
 } from "./modules/sidebar.js";
 import { store } from "./modules/state.js";
@@ -44,25 +58,16 @@ window.addEventListener("DOMContentLoaded", () => {
       deleteFiles(
         "approved",
         [],
-        `Bạn có chắc muốn xóa tất cả ${n} file trong cột Đã duyệt (hãy đảm bảo bạn đã tải file ZIP về máy)?`
+        `Bạn có chắc muốn xóa tất cả ${n} file trong cột Đã duyệt (lưu ý: sẽ xóa cả file trong thư mục output/)?`
       );
     });
   }
   if ($("btn-stop-batch")) {
     $("btn-stop-batch").addEventListener("click", stopBatch);
   }
-  $("btn-download-zip").addEventListener("click", downloadDoneZip);
-  $("chk-done-all").addEventListener("change", (e) => {
-    const doneStems = store.FILES
-      .filter((r) => r.status === "da_xuat" || r.status === "da_duyet")
-      .map((r) => r.file.replace(/\.docx$/i, ""));
-    if (e.target.checked) {
-      doneStems.forEach((s) => store.DONE_SELECTED.add(s));
-    } else {
-      doneStems.forEach((s) => store.DONE_SELECTED.delete(s));
-    }
-    renderDoneList();
-  });
+  if ($("btn-stop-file-ai")) {
+    $("btn-stop-file-ai").addEventListener("click", () => stopFileAI());
+  }
   $("filter-status").addEventListener("change", renderFileList);
   const btnSort = $("btn-toggle-sort");
   if (btnSort) {
@@ -75,21 +80,35 @@ window.addEventListener("DOMContentLoaded", () => {
       renderFileList();
     });
   }
-  $("sel-style").addEventListener("change", scheduleCheck);
+  $("sel-style").addEventListener("change", onStyleChange);
   $("txt-extract").addEventListener("input", () => {
     store.CUSTOM_EDITED = true;
+    syncVersionControls();
     scheduleCheck();
   });
-  $("txt-abstract").addEventListener("input", scheduleCheck);
+  $("txt-abstract").addEventListener("input", () => {
+    syncVersionControls();
+    scheduleCheck();
+  });
   $("btn-rebuild-extract").addEventListener("click", assembleFromSelections);
   if ($("btn-save")) $("btn-save").addEventListener("click", saveDraft);
+  if ($("btn-rollback-prev")) $("btn-rollback-prev").addEventListener("click", rollbackPreviousVersion);
+  if ($("btn-versions-modal")) $("btn-versions-modal").addEventListener("click", () => openVersionsModal(null));
+  if ($("version-note")) {
+    $("version-note").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        saveDraft();
+      }
+    });
+  }
   $("btn-approve").addEventListener("click", () => approveAndExport(false));
-  if ($("btn-logs")) $("btn-logs").addEventListener("click", openLogsModal);
+  if ($("btn-logs")) $("btn-logs").addEventListener("click", () => openLogsModal());
 
   initUpdateChecker();
   $("btn-preview").addEventListener("click", openPreviewModal);
-  $("btn-close-preview").addEventListener("click", () => $("preview-modal").classList.add("hidden"));
-  $("preview-close-bg").addEventListener("click", () => $("preview-modal").classList.add("hidden"));
+  $("btn-close-preview").addEventListener("click", closePreviewModal);
+  $("preview-close-bg").addEventListener("click", closePreviewModal);
 
   document.querySelectorAll("button[data-rerun]").forEach((btn) => {
     btn.addEventListener("click", () => rerunStep(btn.dataset.rerun));
@@ -108,7 +127,11 @@ window.addEventListener("DOMContentLoaded", () => {
   loadFileList(false);
   api("/api/batch/status")
     .then((st) => {
-      if (st && st.active) startBatchPolling();
+      if (st && st.active) {
+        startBatchPolling();
+      } else if (st && Array.isArray(st.all_running) && st.all_running.length > 0) {
+        startBatchPollingFallback();
+      }
     })
     .catch(() => {});
 });

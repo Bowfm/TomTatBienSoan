@@ -1,8 +1,7 @@
-"""Blueprint: system — cập nhật hệ thống, tải file đơn/ZIP, xóa file."""
+"""Blueprint: system — cập nhật hệ thống, xóa file."""
 from __future__ import annotations
 
-import io
-from flask import Blueprint, current_app, jsonify, request, send_file
+from flask import Blueprint, current_app, jsonify, request
 
 from ...services.file_service import FileService
 
@@ -15,47 +14,6 @@ def _cfg():
 
 def _service() -> FileService:
     return FileService(_cfg())
-
-
-@bp.get("/api/download-file/<stem>")
-def api_download_single(stem: str):
-    """Tải lẻ một file .docx đã hoàn thành về trình duyệt."""
-    cfg = _cfg()
-    out_path = cfg.output_dir / f"{stem}.docx"
-    if not out_path.exists():
-        return jsonify({"error": f"Chưa có file xuất '{out_path.name}' trong output\\."}), 404
-    return send_file(
-        str(out_path),
-        as_attachment=True,
-        download_name=out_path.name,
-        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
-
-
-@bp.route("/api/download-zip", methods=["GET", "POST"])
-def api_download_zip():
-    """Đóng gói các file .docx đã xong thành file ZIP tên theo ngày hôm nay (VD: 17-11.zip)."""
-    stems_req: list[str] = []
-    if request.method == "POST":
-        payload = request.get_json(silent=True) or {}
-        stems_req = [str(s).replace(".docx", "") for s in (payload.get("stems") or [])]
-    else:
-        raw = request.args.get("stems", "").strip()
-        if raw:
-            stems_req = [s.strip().replace(".docx", "") for s in raw.split(",") if s.strip()]
-
-    svc = _service()
-    try:
-        zip_name, zip_bytes = svc.create_zip_export(stems=stems_req or None)
-        buf = io.BytesIO(zip_bytes)
-        return send_file(
-            buf,
-            as_attachment=True,
-            download_name=zip_name,
-            mimetype="application/zip",
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
 
 
 @bp.post("/api/delete-files")
@@ -76,22 +34,88 @@ def api_delete_files():
 
 @bp.get("/api/check-update")
 def api_check_update():
-    """Kiểm tra xem có bản cập nhật mới trên GitHub hay không."""
-    from ...updater import check_update
+    """Trả về thông tin cập nhật của phiên khởi động hiện tại (hoặc kiểm tra trực tiếp nếu `?live=1`)."""
+    from ..app import get_startup_update_info
 
-    cfg = _cfg()
-    info = check_update(cfg.root)
+    live = request.args.get("live", "").strip().lower() in ("1", "true", "yes")
+    info = get_startup_update_info(current_app, live=live)
     return jsonify(info)
 
 
 @bp.post("/api/self-update")
 def api_self_update():
     """Kéo bản cập nhật code/prompt mới nhất từ GitHub."""
-    from ...updater import run_update
+    import os
+    import threading
+    from ... import updater as updater_mod
+
+    mgr = current_app.config.get("TOMTAT_BATCH_MGR")
+    if mgr is not None:
+        st = mgr.status()
+        if st.get("active") or st.get("running") or st.get("all_running") or st.get("rerun_running"):
+            return jsonify({
+                "ok": False,
+                "output": "Đang có tiến trình AI chạy. Vui lòng đợi chạy xong hoặc bấm Dừng AI trước khi cập nhật.",
+            }), 409
 
     cfg = _cfg()
-    ok, msg = run_update(cfg.root)
+    if getattr(updater_mod.run_update, "__module__", "") != updater_mod.__name__:
+        ok_raw, msg_raw = updater_mod.run_update(cfg.root)
+        details = {
+            "ok": bool(ok_raw),
+            "message": str(msg_raw),
+            "updated": bool(ok_raw),
+            "changed_python": False,
+            "current_commit": updater_mod.get_current_commit(cfg.root) if ok_raw else "",
+        }
+    else:
+        details = updater_mod.run_update_detailed(cfg.root)
+
+    ok = bool(details.get("ok"))
+    msg = str(details.get("message") or "")
+    cur_short = ""
+    restarting = False
+    restart_required = False
+    if ok:
+        cfg.reload()
+        cur = str(details.get("current_commit") or updater_mod.get_current_commit(cfg.root) or "")
+        cur_short = cur[:7] if cur else ""
+        new_info = {
+            "has_update": False,
+            "status": "up_to_date",
+            "current_commit": cur_short,
+            "latest_commit": cur_short,
+            "message": (
+                f"Đã là phiên bản mới nhất ({cur_short})."
+                if cur_short
+                else "Đã là phiên bản mới nhất."
+            ),
+        }
+        lock = current_app.config.get("TOMTAT_STARTUP_UPDATE_LOCK")
+        if lock is not None:
+            with lock:
+                current_app.config["TOMTAT_STARTUP_UPDATE_INFO"] = new_info
+        else:
+            current_app.config["TOMTAT_STARTUP_UPDATE_INFO"] = new_info
+
+        changed_py = bool(details.get("changed_python"))
+        can_auto_restart = (
+            os.environ.get("TOMTAT_RESTART_ON_EXIT") == "1"
+            and not current_app.testing
+        )
+        if changed_py and can_auto_restart:
+            restarting = True
+            t = threading.Timer(0.4, os._exit, args=(42,))
+            t.daemon = True
+            t.start()
+        elif changed_py:
+            restart_required = True
+
     return jsonify({
         "ok": ok,
         "output": msg.strip(),
+        "current_commit": cur_short,
+        "changed_python": bool(details.get("changed_python")),
+        "restarting": restarting,
+        "restart_required": restart_required,
     })

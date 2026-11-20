@@ -2,18 +2,28 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 from . import STYLES
 from .checks import estimate_rouge2, needs_retry, quality_key, retry_feedback, run_checks
 from .docx_io import DocxError
-from .llm import BaseClient, LLMError
+from .llm import (
+    BaseClient,
+    LLMCancelledError,
+    LLMError,
+    bind_cancel_event,
+    check_not_cancelled,
+    get_active_cancel_event,
+)
 from .memory import format_label_memory, format_style_memory
 from .models import AbstractStep, ExtractStep, FileState, JudgeStep, LabelStep, UnitsData
 from .prompts import ABSTRACT_SCHEMA, EXTRACT_SCHEMA, JUDGE_SCHEMA, LABEL_SCHEMA, PromptRenderer
 from .state import (
     DONE_STATUSES,
+    STATUS_APPROVED,
     STATUS_DRAFT,
     STATUS_ERROR,
+    STATUS_EXPORTED,
     STATUS_MANUAL,
     STATUS_PARTIAL,
     STATUS_PENDING,
@@ -56,22 +66,43 @@ def _remove_flag(st: dict, flag: str) -> None:
         flags.remove(flag)
 
 
-def _mark_stale_after(st: dict, step: str) -> None:
+def _step_has_content(st: dict, step: str) -> bool:
+    if step == "extract":
+        ext = st.get("extract") or {}
+        return bool(nfc(str(ext.get("text") or "")).strip() or ext.get("selections"))
+    if step == "abstract":
+        ab = st.get("abstract") or {}
+        return bool(nfc(str(ab.get("text") or "")).strip())
+    if step == "judge":
+        return bool(st.get("judge"))
+    return False
+
+
+def _mark_stale_after(st: dict, step: str, *, reason: str | None = None) -> list[str]:
     if step not in STEPS_ORDER:
-        return
+        return []
     idx = STEPS_ORDER.index(step)
     stale = set(st.get("stale_steps") or [])
+    newly_marked: list[str] = []
     for s in STEPS_ORDER[idx + 1:]:
-        stale.add(s)
+        if _step_has_content(st, s):
+            stale.add(s)
+            newly_marked.append(s)
     stale.discard(step)
-    st["stale_steps"] = [s for s in STEPS_ORDER if s in stale]
+    ordered = [s for s in STEPS_ORDER if s in stale]
+    st["stale_steps"] = ordered
+    if not ordered:
+        st["stale_reason"] = None
+    elif newly_marked and reason:
+        st["stale_reason"] = reason
+    return newly_marked
 
 
 def _clear_stale(st: dict, step: str) -> None:
-    stale = st.get("stale_steps") or []
-    if step in stale:
-        stale.remove(step)
+    stale = [s for s in (st.get("stale_steps") or []) if s != step]
     st["stale_steps"] = stale
+    if not stale:
+        st["stale_reason"] = None
 
 
 # ------------------------------------------------------------------ Bước 0: inspect
@@ -104,13 +135,11 @@ def step_inspect(ws: FileWorkspace, cfg: dict, st: FileState) -> UnitsData:
 # ------------------------------------------------------------------ Bước 1: label
 
 def step_label(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
-               renderer: PromptRenderer, cfg: dict, st: FileState,
-               user_note: str = "") -> None:
+               renderer: PromptRenderer, cfg: dict, st: FileState) -> None:
     prompt = renderer.render(
         "label.md",
         docs=units_data["docs"],
         source_text=source_text(units_data),
-        user_note=user_note,
         learned_label_memory=format_label_memory(ws.dir.parent),
     )
     res = client.generate_json(
@@ -170,8 +199,7 @@ def step_label(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
 # ------------------------------------------------------------------ Bước 2: extract
 
 def step_extract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
-                 renderer: PromptRenderer, cfg: dict, st: FileState,
-                 user_note: str = "") -> None:
+                 renderer: PromptRenderer, cfg: dict, st: FileState) -> None:
     ext_cfg = cfg["extract"]
     g_cfg = cfg["grading"]
     max_attempts = int(ext_cfg.get("max_attempts", 3))
@@ -185,6 +213,7 @@ def step_extract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
     best_dist = float("inf")
 
     for attempt in range(1, max_attempts + 1):
+        check_not_cancelled()
         prompt = renderer.render(
             "extract.md",
             docs=units_data["docs"],
@@ -193,7 +222,6 @@ def step_extract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
             ai_extract=units_data.get("ai_extract", ""),
             units_listing=units_listing(units_data, with_words=True),
             retry_message=retry_msg,
-            user_note=user_note,
         )
         res = client.generate_json(
             "extract",
@@ -283,7 +311,7 @@ def step_extract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
 
 def _generate_abstract_loop(ws: FileWorkspace, units_data: dict, client: BaseClient,
                             renderer: PromptRenderer, cfg: dict, st: dict,
-                            user_note: str = "", extra_errors: list[str] | None = None,
+                            extra_errors: list[str] | None = None,
                             max_attempts: int | None = None) -> None:
     abs_cfg = cfg["abstract"]
     style = st["label"]["value"] or STYLES[0]
@@ -304,6 +332,7 @@ def _generate_abstract_loop(ws: FileWorkspace, units_data: dict, client: BaseCli
     best_key = (999, 999, 999999.0)
 
     for attempt in range(1, limit_attempts + 1):
+        check_not_cancelled()
         prompt = renderer.render(
             "abstract.md",
             style=style,
@@ -315,7 +344,6 @@ def _generate_abstract_loop(ws: FileWorkspace, units_data: dict, client: BaseCli
             style_guide=renderer.style_guide(style),
             retry_errors=retry_errs,
             previous_abstract=prev_abstract,
-            user_note=user_note,
             learned_style_memory=format_style_memory(ws.dir.parent, style),
             query=units_data.get("query", ""),
             ai_abstract=units_data.get("ai_abstract", ""),
@@ -362,10 +390,9 @@ def _generate_abstract_loop(ws: FileWorkspace, units_data: dict, client: BaseCli
 
 
 def step_abstract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
-                  renderer: PromptRenderer, cfg: dict, st: FileState,
-                  user_note: str = "") -> None:
+                  renderer: PromptRenderer, cfg: dict, st: FileState) -> None:
     st.setdefault("abstract", {})["attempts"] = 0
-    _generate_abstract_loop(ws, units_data, client, renderer, cfg, st, user_note=user_note)
+    _generate_abstract_loop(ws, units_data, client, renderer, cfg, st)
 
 
 # ------------------------------------------------------------------ Bước 4: judge (tùy chọn)
@@ -373,6 +400,7 @@ def step_abstract(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
 def step_judge(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
                renderer: PromptRenderer, cfg: dict, st: FileState,
                allow_rewrite: bool = True) -> None:
+    check_not_cancelled()
     j_cfg = cfg.get("judge", {})
     style = st["label"]["value"] or STYLES[0]
     extract_text = st["extract"]["text"]
@@ -480,9 +508,9 @@ class Pipeline:
         *,
         force: bool = False,
         only_step: str | None = None,
-        user_note: str = "",
         ignore_mismatch: bool = False,
         restart: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Xử lý một file .docx qua pipeline."""
         return process_file(
@@ -491,10 +519,10 @@ class Pipeline:
             self.client,
             force=force,
             only_step=only_step,
-            user_note=user_note,
             ignore_mismatch=ignore_mismatch,
             restart=restart,
             renderer=self.renderer,
+            cancel_event=cancel_event,
         )
 
     async def process_async(
@@ -503,9 +531,9 @@ class Pipeline:
         *,
         force: bool = False,
         only_step: str | None = None,
-        user_note: str = "",
         ignore_mismatch: bool = False,
         restart: bool = False,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Xử lý bất đồng bộ (asyncio) một file .docx qua pipeline."""
         import asyncio
@@ -515,9 +543,9 @@ class Pipeline:
             docx_path,
             force=force,
             only_step=only_step,
-            user_note=user_note,
             ignore_mismatch=ignore_mismatch,
             restart=restart,
+            cancel_event=cancel_event,
         )
 
     async def process_batch_async(
@@ -544,13 +572,19 @@ class Pipeline:
 
 def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
                  force: bool = False, only_step: str | None = None,
-                 user_note: str = "", ignore_mismatch: bool = False,
-                 restart: bool = False, renderer: PromptRenderer | None = None) -> dict:
+                 ignore_mismatch: bool = False, restart: bool = False,
+                 renderer: PromptRenderer | None = None,
+                 cancel_event: threading.Event | None = None) -> dict:
     """Xử lý một file .docx (toàn bộ pipeline hoặc chỉ một bước)."""
     ws = FileWorkspace(cfg.work_dir, docx_path)
     st = ws.load_state()
     if not force and not only_step and st["status"] in DONE_STATUSES:
         return {"skipped": True, "state": st}
+
+    eff_cancel = cancel_event if cancel_event is not None else get_active_cancel_event()
+    prev_status = st.get("status")
+    had_local_edits = ws.differs_from_latest_version(st)
+    mutated_by_ai = False
 
     if renderer is None:
         renderer = PromptRenderer(cfg.prompts_dir)
@@ -560,134 +594,298 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
         f for f in (st.get("flags") or [])
         if f != old_err
         and not f.startswith("Gọi Gemini thất bại")
+        and not f.startswith("Bỏ qua bước tự chấm G-Eval")
         and "UndefinedError" not in f
         and "APITimeoutError" not in f
+        and "TimeoutError" not in f
+        and "ReadTimeout" not in f
+        and "ConnectTimeout" not in f
         and "InternalServerError" not in f
         and "RateLimitError" not in f
+        and "Error:" not in f
+        and "Exception:" not in f
     ]
     st["error_message"] = None
+    if st.get("status") == STATUS_ERROR:
+        st["status"] = STATUS_PENDING
+    st["current_step"] = only_step or "inspect"
+    ws.save_state(st)
+    pre_ai_backed_up = False
+
+    def _backup_before_ai(step_label: str) -> None:
+        nonlocal pre_ai_backed_up
+        if pre_ai_backed_up:
+            return
+        pre_ai_backed_up = True
+        if ws.differs_from_latest_version(st):
+            ws.save_draft_version(
+                st,
+                source="auto:before_ai",
+                note=f"Tự động lưu trước khi AI chạy lại ({step_label})",
+            )
+
     try:
-        if only_step:
-            if only_step not in STEPS_ORDER:
-                raise ValueError(f"Bước không hợp lệ: {only_step}. Chọn: {STEPS_ORDER}")
-            units_data = ws.load_units()
-            if only_step == "inspect" or units_data is None:
-                units_data = step_inspect(ws, cfg, st)
-            if only_step == "label":
-                step_label(ws, units_data, client, renderer, cfg, st, user_note=user_note)
-            elif only_step == "extract":
-                step_extract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
-            elif only_step == "abstract":
-                if not st["label"]["value"]:
+        with bind_cancel_event(eff_cancel):
+            check_not_cancelled(eff_cancel)
+            if only_step:
+                valid_only_steps = (*STEPS_ORDER, "extract_abstract")
+                if only_step not in valid_only_steps:
+                    raise ValueError(f"Bước không hợp lệ: {only_step}. Chọn: {valid_only_steps}")
+                units_data = ws.load_units()
+                if only_step == "inspect" or units_data is None:
+                    check_not_cancelled(eff_cancel)
+                    st["current_step"] = "inspect"
+                    ws.save_state(st)
+                    units_data = step_inspect(ws, cfg, st)
+                if only_step != "inspect":
+                    check_not_cancelled(eff_cancel)
+                    _backup_before_ai(only_step)
+                prev_label = nfc(str((st.get("label") or {}).get("value") or "")).strip()
+                label_changed = False
+                new_label = prev_label
+                if only_step == "label":
+                    check_not_cancelled(eff_cancel)
+                    st["current_step"] = "label"
+                    ws.save_state(st)
                     step_label(ws, units_data, client, renderer, cfg, st)
-                if not st["extract"]["text"]:
+                    mutated_by_ai = True
+                    new_label = nfc(str((st.get("label") or {}).get("value") or "")).strip()
+                    differs = new_label != prev_label
+                    newly_marked: list[str] = []
+                    if differs:
+                        reason = (
+                            f"Nhãn phong cách đã thay đổi từ '{prev_label}' sang '{new_label}'"
+                            if prev_label
+                            else f"Đã gán nhãn phong cách '{new_label}'"
+                        )
+                        newly_marked = _mark_stale_after(st, "label", reason=reason)
+                    label_changed = bool(differs and (prev_label or newly_marked))
+                elif only_step == "extract":
+                    check_not_cancelled(eff_cancel)
+                    st["current_step"] = "extract"
+                    ws.save_state(st)
                     step_extract(ws, units_data, client, renderer, cfg, st)
-                step_abstract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
-            elif only_step == "judge":
-                step_judge(ws, units_data, client, renderer, cfg, st)
-            _mark_stale_after(st, only_step)
-            if (st.get("extract") or {}).get("text") and (st.get("abstract") or {}).get("text"):
-                finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch)
-            ws.save_draft_version(st, source=f"ai:{only_step}", note=user_note)
-            ws.save_state(st)
-            return {"skipped": False, "state": st}
+                    mutated_by_ai = True
+                    _mark_stale_after(st, "extract", reason="Bản trích chọn vừa được AI tạo lại")
+                elif only_step == "extract_abstract":
+                    if not (st.get("label") or {}).get("value"):
+                        check_not_cancelled(eff_cancel)
+                        st["current_step"] = "label"
+                        ws.save_state(st)
+                        step_label(ws, units_data, client, renderer, cfg, st)
+                        mutated_by_ai = True
+                    check_not_cancelled(eff_cancel)
+                    st["current_step"] = "extract"
+                    ws.save_state(st)
+                    step_extract(ws, units_data, client, renderer, cfg, st)
+                    mutated_by_ai = True
+                    check_not_cancelled(eff_cancel)
+                    st["current_step"] = "abstract"
+                    ws.save_state(st)
+                    step_abstract(ws, units_data, client, renderer, cfg, st)
+                    _mark_stale_after(st, "abstract", reason="Bản trích chọn và Bản biên soạn vừa được AI tạo lại")
+                elif only_step == "abstract":
+                    if not st["label"]["value"]:
+                        check_not_cancelled(eff_cancel)
+                        st["current_step"] = "label"
+                        ws.save_state(st)
+                        step_label(ws, units_data, client, renderer, cfg, st)
+                        mutated_by_ai = True
+                    if not st["extract"]["text"]:
+                        check_not_cancelled(eff_cancel)
+                        st["current_step"] = "extract"
+                        ws.save_state(st)
+                        step_extract(ws, units_data, client, renderer, cfg, st)
+                        mutated_by_ai = True
+                    check_not_cancelled(eff_cancel)
+                    st["current_step"] = "abstract"
+                    ws.save_state(st)
+                    step_abstract(ws, units_data, client, renderer, cfg, st)
+                    mutated_by_ai = True
+                    _mark_stale_after(st, "abstract", reason="Bản biên soạn vừa được AI viết lại")
+                elif only_step == "judge":
+                    check_not_cancelled(eff_cancel)
+                    st["current_step"] = "judge"
+                    ws.save_state(st)
+                    step_judge(ws, units_data, client, renderer, cfg, st)
+                    mutated_by_ai = True
+                    _mark_stale_after(st, "judge")
+                else:
+                    _mark_stale_after(st, only_step)
+                if (st.get("extract") or {}).get("text") and (st.get("abstract") or {}).get("text"):
+                    finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch)
+                st["current_step"] = None
+                if only_step != "inspect":
+                    ws.save_draft_version(st, source=f"ai:{only_step}")
+                ws.save_state(st)
+                res_out: dict = {"skipped": False, "state": st}
+                if only_step == "label":
+                    res_out.update({
+                        "label_changed": label_changed,
+                        "previous_label": prev_label,
+                        "new_label": new_label,
+                    })
+                return res_out
 
-        # Chạy toàn bộ pipeline: tự động kế thừa thông minh những bước đã làm xong đạt chuẩn,
-        # chỉ gọi AI cho những bước còn thiếu hoặc cần sửa, trừ khi có yêu cầu restart từ đầu.
-        if restart:
-            st["label"] = {}
-            st["extract"] = {}
-            st["abstract"] = {}
-            st["judge"] = None
-            st["checks"] = {}
-            st["flags"] = []
+            # Chạy toàn bộ pipeline: tự động kế thừa thông minh những bước đã làm xong đạt chuẩn,
+            # chỉ gọi AI cho những bước còn thiếu hoặc cần sửa, trừ khi có yêu cầu restart từ đầu.
+            if restart:
+                _backup_before_ai("cả bài")
+                mutated_by_ai = True
+                defaults = ws.default_state()
+                st["status"] = STATUS_PENDING
+                st["label"] = defaults["label"]
+                st["extract"] = defaults["extract"]
+                st["abstract"] = defaults["abstract"]
+                st["judge"] = None
+                st["checks"] = None
+                st["flags"] = []
+                st["stale_steps"] = []
+                st["stale_reason"] = None
+                st["model_used"] = ""
+                ws.save_state(st)
 
-        # Tải units_data đã tách câu (nếu chưa có thì gọi step_inspect)
-        units_data = ws.load_units()
-        if units_data is None:
-            units_data = step_inspect(ws, cfg, st)
+            # Tải units_data đã tách câu (nếu chưa có hoặc đang restart từ đầu thì gọi step_inspect)
+            units_data = None if (restart and ws.docx_path.exists()) else ws.load_units()
+            if units_data is None:
+                check_not_cancelled(eff_cancel)
+                st["current_step"] = "inspect"
+                ws.save_state(st)
+                units_data = step_inspect(ws, cfg, st)
 
-        if (
-            units_data.get("filename_mismatch")
-            and cfg.get("layout", {}).get("on_mismatch", "stop") == "stop"
-            and not ignore_mismatch
-        ):
-            st["status"] = STATUS_PENDING
-            ws.save_state(st)
-            return {"skipped": False, "state": st}
+            if (
+                units_data.get("filename_mismatch")
+                and cfg.get("layout", {}).get("on_mismatch", "stop") == "stop"
+                and not ignore_mismatch
+            ):
+                st["status"] = STATUS_PENDING
+                st["current_step"] = None
+                ws.save_state(st)
+                return {"skipped": False, "state": st}
 
-        # Bước 1: Gán nhãn phong cách chức năng (label)
-        has_valid_label = bool(
-            (st.get("label") or {}).get("value") in STYLES
-            and (st.get("label") or {}).get("confidence")
-        )
-        if restart or not has_valid_label or (user_note and "nhãn" in user_note.lower()):
-            st["label"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
-            step_label(ws, units_data, client, renderer, cfg, st, user_note=user_note)
+            ran_ai = False
+
+            # Bước 1: Gán nhãn phong cách chức năng (label)
             has_valid_label = bool(
                 (st.get("label") or {}).get("value") in STYLES
                 and (st.get("label") or {}).get("confidence")
             )
+            if restart or not has_valid_label:
+                check_not_cancelled(eff_cancel)
+                _backup_before_ai("label")
+                st["label"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
+                mutated_by_ai = True
+                st["current_step"] = "label"
+                ws.save_state(st)
+                step_label(ws, units_data, client, renderer, cfg, st)
+                ran_ai = True
+                has_valid_label = bool(
+                    (st.get("label") or {}).get("value") in STYLES
+                    and (st.get("label") or {}).get("confidence")
+                )
 
-        # Bước 2: Trích chọn câu (extract)
-        # 100% hoàn thành nghĩa là: có text, selections hợp lệ, words > 0, và không có lỗi error
-        prev_ext_text = (st.get("extract") or {}).get("text", "")
-        prev_ext_sels = (st.get("extract") or {}).get("selections") or {}
-        prev_ext_words = (st.get("extract") or {}).get("words", 0)
-        has_valid_extract = False
-        if prev_ext_text and prev_ext_sels and prev_ext_words > 0 and has_valid_label:
-            chk_prev = run_checks(units_data, st["label"]["value"], prev_ext_text, "ok.", cfg)
-            has_valid_extract = len(chk_prev.of(level="error", target="extract")) == 0
-
-        if restart or not has_valid_extract or (user_note and "trích" in user_note.lower()):
-            st["extract"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
-            step_extract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
+            # Bước 2: Trích chọn câu (extract)
+            # 100% hoàn thành nghĩa là: có text, selections hợp lệ, words > 0, và không có lỗi error
             prev_ext_text = (st.get("extract") or {}).get("text", "")
             prev_ext_sels = (st.get("extract") or {}).get("selections") or {}
             prev_ext_words = (st.get("extract") or {}).get("words", 0)
-            has_valid_extract = bool(prev_ext_text and prev_ext_sels and prev_ext_words > 0)
+            has_valid_extract = False
+            if prev_ext_text and prev_ext_sels and prev_ext_words > 0 and has_valid_label:
+                chk_prev = run_checks(units_data, st["label"]["value"], prev_ext_text, "ok.", cfg)
+                has_valid_extract = len(chk_prev.of(level="error", target="extract")) == 0
 
-        # Bước 3: Biên soạn tóm tắt (abstract)
-        # 100% hoàn thành nghĩa là: có text, words > 0, và chk_abs.ok
-        prev_abs_text = (st.get("abstract") or {}).get("text", "")
-        prev_abs_words = (st.get("abstract") or {}).get("words", 0)
-        has_valid_abstract = False
-        if prev_abs_text and prev_abs_words > 0 and has_valid_label and has_valid_extract:
-            chk_abs = run_checks(units_data, st["label"]["value"], st["extract"]["text"], prev_abs_text, cfg)
-            has_valid_abstract = chk_abs.ok
-            if not has_valid_abstract:
-                # Nếu abstract cũ có lỗi cơ học, gửi lỗi cũ để AI sửa
-                fb = retry_feedback(chk_abs, cfg, target="abstract")
-                err_list = fb or [i.message for i in chk_abs.errors]
-                _generate_abstract_loop(
-                    ws, units_data, client, renderer, cfg, st,
-                    user_note=user_note, extra_errors=err_list,
-                )
+            if restart or not has_valid_extract:
+                check_not_cancelled(eff_cancel)
+                _backup_before_ai("extract")
+                st["extract"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
+                mutated_by_ai = True
+                st["current_step"] = "extract"
+                ws.save_state(st)
+                step_extract(ws, units_data, client, renderer, cfg, st)
+                ran_ai = True
+                prev_ext_text = (st.get("extract") or {}).get("text", "")
+                prev_ext_sels = (st.get("extract") or {}).get("selections") or {}
+                prev_ext_words = (st.get("extract") or {}).get("words", 0)
+                has_valid_extract = bool(prev_ext_text and prev_ext_sels and prev_ext_words > 0)
+
+            # Bước 3: Biên soạn tóm tắt (abstract)
+            # 100% hoàn thành nghĩa là: có text, words > 0, và chk_abs.ok
+            prev_abs_text = (st.get("abstract") or {}).get("text", "")
+            prev_abs_words = (st.get("abstract") or {}).get("words", 0)
+            has_valid_abstract = False
+            if prev_abs_text and prev_abs_words > 0 and has_valid_label and has_valid_extract:
+                chk_abs = run_checks(units_data, st["label"]["value"], st["extract"]["text"], prev_abs_text, cfg)
+                has_valid_abstract = chk_abs.ok
+                if not has_valid_abstract:
+                    # Nếu abstract cũ có lỗi cơ học, gửi lỗi cũ để AI sửa
+                    check_not_cancelled(eff_cancel)
+                    _backup_before_ai("abstract")
+                    st["current_step"] = "abstract"
+                    ws.save_state(st)
+                    fb = retry_feedback(chk_abs, cfg, target="abstract")
+                    err_list = fb or [i.message for i in chk_abs.errors]
+                    _generate_abstract_loop(
+                        ws, units_data, client, renderer, cfg, st,
+                        extra_errors=err_list,
+                    )
+                    mutated_by_ai = True
+                    ran_ai = True
+                else:
+                    st["checks"] = chk_abs.to_dict()
             else:
-                st["checks"] = chk_abs.to_dict()
+                check_not_cancelled(eff_cancel)
+                _backup_before_ai("abstract")
+                st["abstract"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
+                mutated_by_ai = True
+                st["current_step"] = "abstract"
+                ws.save_state(st)
+                step_abstract(ws, units_data, client, renderer, cfg, st)
+                ran_ai = True
+
+            # Bước 4: Tự chấm G-Eval (nếu được bật và chưa có điểm)
+            if cfg.get("judge", {}).get("enabled", False) and (restart or not st.get("judge")):
+                try:
+                    check_not_cancelled(eff_cancel)
+                    _backup_before_ai("judge")
+                    st["current_step"] = "judge"
+                    ws.save_state(st)
+                    step_judge(ws, units_data, client, renderer, cfg, st)
+                    mutated_by_ai = True
+                    ran_ai = True
+                except LLMError as judge_exc:
+                    _add_flag(st, f"Bỏ qua bước tự chấm G-Eval do quá thời gian chờ ({judge_exc}).")
+
+            finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch)
+            st["current_step"] = None
+            if ran_ai or ws.differs_from_latest_version(st):
+                ws.save_draft_version(st, source="ai:pipeline")
+            ws.save_state(st)
+            return {"skipped": False, "state": st}
+    except LLMCancelledError:
+        st["current_step"] = None
+        st["error_message"] = None
+        if not mutated_by_ai and not had_local_edits and prev_status in (STATUS_APPROVED, STATUS_EXPORTED):
+            st["status"] = prev_status
+        elif (st.get("extract") or {}).get("text") and (st.get("abstract") or {}).get("text"):
+            u_cur = ws.load_units()
+            if u_cur:
+                finalize_status(u_cur, st, cfg, ignore_mismatch=ignore_mismatch)
+            else:
+                st["status"] = STATUS_PENDING
         else:
-            st["abstract"] = {}  # Nếu bước trước làm dở/chưa xong 100%, hủy bỏ và làm lại từ đầu bước này
-            step_abstract(ws, units_data, client, renderer, cfg, st, user_note=user_note)
-
-        # Bước 4: Tự chấm G-Eval (nếu được bật và chưa có điểm)
-        if cfg.get("judge", {}).get("enabled", False) and (restart or not st.get("judge")):
-            try:
-                step_judge(ws, units_data, client, renderer, cfg, st)
-            except LLMError as judge_exc:
-                _add_flag(st, f"Bỏ qua bước tự chấm G-Eval do quá thời gian chờ ({judge_exc}).")
-
-        finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch)
-        ws.save_draft_version(st, source="ai:pipeline", note=user_note)
+            st["status"] = STATUS_PENDING
         ws.save_state(st)
-        return {"skipped": False, "state": st}
+        return {"skipped": False, "cancelled": True, "state": st}
     except (DocxError, LLMError) as exc:
         st["status"] = STATUS_PENDING if isinstance(exc, DocxError) else STATUS_ERROR
+        st["current_step"] = None
         st["error_message"] = str(exc)
         _add_flag(st, str(exc))
         ws.save_state(st)
         return {"skipped": False, "state": st, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         st["status"] = STATUS_ERROR
+        st["current_step"] = None
         st["error_message"] = f"{type(exc).__name__}: {exc}"
         _add_flag(st, st["error_message"])
         ws.save_state(st)

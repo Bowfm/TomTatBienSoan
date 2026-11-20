@@ -42,20 +42,16 @@ def compute_budget(total: int, cfg: dict) -> DocumentBudget:
 
 
 def abstract_targets(n_extract: int, cfg: dict) -> dict:
-    """Khoảng số từ mục tiêu cho bản biên soạn, tính từ số từ bản trích chọn."""
+    """Khoảng số từ mục tiêu cho bản biên soạn, tính từ số từ bản trích chọn (luôn B/T <= ratio_limit)."""
     a = cfg["abstract"]
     lim = a["ratio_limit"]
-    short_max = math.floor(n_extract * lim)
-    long_min = math.ceil(n_extract / lim) if n_extract else 0
-    allow_longer = n_extract < a["allow_longer_below_words"]
+    short_max = math.floor(n_extract * lim + 1e-9)
     return {
-        "direction": "longer" if allow_longer else "shorter",
-        "allow_longer": allow_longer,
+        "direction": "shorter",
+        "allow_longer": False,
         "short_max": short_max,
         "short_low": round(n_extract * a["short_target_low"]),
         "short_high": min(short_max, round(n_extract * a["short_target_high"])),
-        "long_min": long_min,
-        "long_target": max(long_min, round(n_extract * a["long_target_factor"])),
     }
 
 

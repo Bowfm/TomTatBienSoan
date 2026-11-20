@@ -1,11 +1,83 @@
-// Quản lý cột bên trái: danh sách Chờ duyệt & Đã duyệt, lọc, sắp xếp, tải ZIP, xóa file
+// Quản lý cột bên trái: danh sách Chờ duyệt & Đã duyệt, lọc, sắp xếp, xóa file
 import { store } from "./state.js";
-import { $, api, escapeHtml, setText, showToast, todayLabel } from "./utils.js";
+import { $, api, escapeHtml, setText, showToast } from "./utils.js";
 
 let _selectFileHandler = null;
+let _syncRerunButtonsHandler = null;
+let _stopFileHandler = null;
+
+export const STEP_SHORT_VI = {
+  inspect: "Đọc cấu trúc",
+  label: "Gán nhãn",
+  extract: "Trích chọn",
+  extract_abstract: "Trích & Biên soạn",
+  abstract: "Biên soạn",
+  judge: "Chấm G-Eval",
+  all: "Chạy lại cả bài",
+};
 
 export function registerSelectFileHandler(fn) {
   _selectFileHandler = fn;
+}
+
+export function registerSyncRerunButtonsHandler(fn) {
+  _syncRerunButtonsHandler = fn;
+}
+
+export function registerStopFileHandler(fn) {
+  _stopFileHandler = fn;
+}
+
+export function syncRunningProgressBar(batchProgressText = null) {
+  if (batchProgressText !== null) {
+    store.BATCH_PROGRESS_TEXT = batchProgressText || "";
+  }
+  const box = $("batch-progress");
+  const stopBtn = $("btn-stop-batch");
+  const runBtn = $("btn-run-pending");
+  if (!box) return;
+
+  if (store.BATCH_ACTIVE && store.BATCH_PROGRESS_TEXT) {
+    box.textContent = store.BATCH_PROGRESS_TEXT;
+    box.classList.remove("hidden");
+    if (stopBtn) {
+      stopBtn.classList.remove("hidden");
+      stopBtn.disabled = Boolean(store.BATCH_STOPPED);
+      stopBtn.textContent = store.BATCH_STOPPED ? "⏳ Đang dừng..." : "⏹ Dừng";
+      stopBtn.title = "Dừng toàn bộ tiến trình AI đang chạy";
+    }
+    if (runBtn) runBtn.disabled = true;
+    return;
+  }
+
+  if (store.RUNNING_STEMS.size > 0) {
+    const runningList = Array.from(store.RUNNING_STEMS).map((s) => {
+      const sc = (store.RUNNING_STEPS || {})[s] || "";
+      const sv = STEP_SHORT_VI[sc] || sc || "";
+      return sv ? `${s}.docx (${sv})` : `${s}.docx`;
+    });
+    const allStopping = Array.from(store.RUNNING_STEMS).every((s) => store.STOPPING_STEMS.has(s));
+    box.textContent = allStopping
+      ? `⏳ Đang dừng AI: ${runningList.join(", ")}...`
+      : `⏳ Đang chạy AI (${runningList.length} file): ${runningList.join(", ")}`;
+    box.classList.remove("hidden");
+    if (stopBtn) {
+      stopBtn.classList.remove("hidden");
+      stopBtn.disabled = allStopping;
+      stopBtn.textContent = allStopping ? "⏳ Đang dừng..." : "⏹ Dừng";
+      stopBtn.title = "Dừng tiến trình AI đang chạy";
+    }
+    if (runBtn) runBtn.disabled = false;
+    return;
+  }
+
+  box.classList.add("hidden");
+  if (stopBtn) {
+    stopBtn.classList.add("hidden");
+    stopBtn.disabled = false;
+    stopBtn.textContent = "⏹ Dừng";
+  }
+  if (runBtn) runBtn.disabled = false;
 }
 
 export function sortFiles(list) {
@@ -35,9 +107,117 @@ export function filteredFiles() {
   return [...pendingFiles(), ...approvedFiles()];
 }
 
+export function renderRpdStatus(rpdList) {
+  const container = $("rpd-models-list");
+  if (!container || !Array.isArray(rpdList)) return;
+  store.RPD_STATUS = rpdList;
+  container.innerHTML = "";
+  for (const item of rpdList) {
+    const model = item.model || "";
+    const used = Number(item.used ?? 0);
+    const limit = Number(item.limit ?? 0);
+    const perKey = Number(item.rpd_per_key ?? limit);
+    const keyCount = Number(item.key_count ?? 1);
+    const exhKeys = Number(item.exhausted_keys ?? 0);
+    const text = `${model}: ${used}/${limit}`;
+
+    let stateCls = "rpd-ok";
+    if ((limit > 0 && used >= limit) || (keyCount > 0 && exhKeys >= keyCount)) {
+      stateCls = "rpd-exhausted";
+    } else if (limit > 0 && used / limit >= 0.8) {
+      stateCls = "rpd-warn";
+    } else if (used > 0) {
+      stateCls = "rpd-active";
+    }
+
+    const span = document.createElement("span");
+    span.className = `rpd-pill ${stateCls}`;
+    span.dataset.model = model;
+    span.textContent = text;
+    span.title = `${model}: Đã sử dụng ${used}/${limit} requests trong ngày (${perKey} RPD/key × ${keyCount} key${exhKeys ? ` · ${exhKeys} key đã chạm hạn mức` : ""} · Reset lúc 15:00 giờ VN)`;
+    container.appendChild(span);
+  }
+}
+
+export function syncPoolScalingUI(scaling) {
+  if (!scaling) return;
+  const sel = $("sel-concurrency");
+  if (sel) {
+    const rec = Number(scaling.recommended_workers || 4);
+    const kCount = Number(scaling.key_count || 0);
+    const autoOpt = sel.querySelector('option[value="auto"]');
+    if (autoOpt) {
+      autoOpt.textContent = kCount > 0 ? `Tự động: ${rec} luồng (${kCount} keys)` : `Tự động (${rec} luồng)`;
+    }
+    // Bổ sung các mức luồng được gợi ý vào dropdown nếu chưa có
+    const opts = Array.isArray(scaling.concurrency_options) ? scaling.concurrency_options : [];
+    const cap = Number(scaling.max_workers || 0);
+    // Trần cứng max_workers: gỡ mọi mức luồng vượt trần (server cũng tự kẹp lại)
+    if (cap > 0) {
+      for (const o of Array.from(sel.options)) {
+        if (o.value !== "auto" && Number(o.value) > cap) {
+          if (o.selected) sel.value = "auto";
+          o.remove();
+        }
+      }
+    }
+    const existingVals = new Set(Array.from(sel.options).map((o) => o.value));
+    for (const val of opts) {
+      const sVal = String(val);
+      if (cap > 0 && Number(val) > cap) continue;
+      if (!existingVals.has(sVal)) {
+        const opt = document.createElement("option");
+        opt.value = sVal;
+        opt.textContent = `${val} luồng`;
+        sel.appendChild(opt);
+        existingVals.add(sVal);
+      }
+    }
+  }
+}
+
 export async function loadFileList(keepCurrent = true) {
   const data = await api("/api/files");
   store.FILES = data.files || [];
+  if (Array.isArray(data.running_stems)) {
+    const srvSteps = data.running_steps || {};
+    store.RUNNING_STEMS = new Set([...data.running_stems, ...store.LOCAL_RERUN_STEMS]);
+    const srvStopping = new Set(data.stopping_stems || []);
+    for (const s of Array.from(store.STOPPING_STEMS)) {
+      if (!store.RUNNING_STEMS.has(s)) store.STOPPING_STEMS.delete(s);
+    }
+    for (const s of srvStopping) {
+      if (store.RUNNING_STEMS.has(s)) store.STOPPING_STEMS.add(s);
+    }
+    const nextSteps = {};
+    for (const s of store.RUNNING_STEMS) {
+      nextSteps[s] = srvSteps[s] || store.RUNNING_STEPS[s] || "";
+    }
+    store.RUNNING_STEPS = nextSteps;
+  }
+  if (data.pool_scaling) {
+    syncPoolScalingUI(data.pool_scaling);
+  }
+  if (Array.isArray(data.rpd_status) && data.rpd_status.length > 0) {
+    renderRpdStatus(data.rpd_status);
+  } else {
+    const primary = data.primary_model || "gemini-4-hydrogen";
+    const fallbacks = (data.fallback_models || []).filter((m) => m && m !== primary);
+    const chain = [primary, ...fallbacks];
+    const kCount = Math.max(1, Number(data.api_key_count || 1));
+    const fallbackRpd = chain.map((m) => {
+      const perKey = m.toLowerCase().includes("lite") ? 500 : 20;
+      return {
+        model: m,
+        used: 0,
+        limit: perKey * kCount,
+        rpd_per_key: perKey,
+        key_count: kCount,
+        exhausted_keys: 0,
+      };
+    });
+    renderRpdStatus(fallbackRpd);
+  }
   const badge = $("mode-badge");
   if (badge) {
     if (data.mock || !data.has_api_key) {
@@ -52,9 +232,41 @@ export async function loadFileList(keepCurrent = true) {
     }
   }
   renderFileList();
+  syncRunningProgressBar();
+  if (_syncRerunButtonsHandler) {
+    _syncRerunButtonsHandler();
+  }
   if (!keepCurrent || !store.CURRENT_STEM) {
     if (store.FILES.length > 0 && _selectFileHandler) {
       await _selectFileHandler(store.FILES[0].file.replace(/\.docx$/i, ""));
+    }
+  } else if (store.CURRENT_STEM && _selectFileHandler) {
+    const curRow = store.FILES.find((r) => r.file.replace(/\.docx$/i, "") === store.CURRENT_STEM);
+    const st = store.CURRENT_STATE;
+    if (curRow && st) {
+      const serverChanged =
+        (curRow.updated_at && st.updated_at && curRow.updated_at !== st.updated_at) ||
+        curRow.status !== st.status ||
+        curRow.abstract_words !== ((st.abstract || {}).words || 0) ||
+        curRow.extract_words !== ((st.extract || {}).words || 0) ||
+        curRow.label !== ((st.label || {}).value || "") ||
+        curRow.n_errors !== ((st.checks || {}).n_errors || 0) ||
+        curRow.n_warnings !== ((st.checks || {}).n_warnings || 0) ||
+        Number(curRow.current_version || 0) !== Number(st.current_version || 0);
+      const activeId = document.activeElement ? document.activeElement.id : "";
+      const isActivelyEditing =
+        !store.RUNNING_STEMS.has(store.CURRENT_STEM) &&
+        (activeId === "txt-extract" ||
+          activeId === "txt-abstract" ||
+          activeId === "sel-style" ||
+          activeId === "version-note");
+      if (serverChanged && !isActivelyEditing) {
+        await _selectFileHandler(store.CURRENT_STEM, {
+          silent: true,
+          onlyIfCurrent: true,
+          skipSidebarRender: true,
+        });
+      }
     }
   }
 }
@@ -62,12 +274,24 @@ export async function loadFileList(keepCurrent = true) {
 export function renderFileList() {
   const allPending = store.FILES.filter((r) => !isApprovedStatus(r.status));
   const allApproved = approvedFiles();
+  const draftCount = allPending.filter((r) => r.status === "da_co_nhap").length;
+  const unprocessedCount = allPending.filter(
+    (r) => r.status === "chua_xu_ly" || r.status === "dang_lam_do" || r.status === "can_xu_ly_tay"
+  ).length;
+  const errorCount = allPending.filter((r) => r.status === "loi").length;
 
   setText("cnt-total", store.FILES.length);
-  setText("cnt-pending", allPending.length);
+  setText("cnt-draft", draftCount);
+  setText("cnt-unprocessed", unprocessedCount);
   setText("cnt-approved", allApproved.length);
   setText("badge-pending", allPending.length);
   setText("done-count", allApproved.length);
+  const unprocWrap = $("cnt-unprocessed-wrap");
+  if (unprocWrap) {
+    unprocWrap.title = errorCount > 0
+      ? `Số file chưa xử lý (ngoài ra còn ${errorCount} file lỗi)`
+      : "Số file chưa xử lý";
+  }
   if ($("btn-clear-pending")) $("btn-clear-pending").disabled = allPending.length === 0;
   if ($("btn-clear-approved")) $("btn-clear-approved").disabled = allApproved.length === 0;
 
@@ -81,11 +305,19 @@ export function renderFileList() {
     for (const r of list) {
       const stem = r.file.replace(/\.docx$/i, "");
       const isRunning = store.RUNNING_STEMS.has(stem);
+      const isStopping = isRunning && store.STOPPING_STEMS.has(stem);
       const li = document.createElement("li");
       li.className = "file-item" + (stem === store.CURRENT_STEM ? " active" : "");
       li.dataset.stem = stem;
       const pillClass = isRunning ? "st-running" : `st-${r.status}`;
-      const pillText = isRunning ? "⏳ Đang chạy AI..." : r.status_vi;
+      const stepCode = (store.RUNNING_STEPS && store.RUNNING_STEPS[stem]) || r.current_step || "";
+      const stepVi = STEP_SHORT_VI[stepCode] || "";
+      const pillText = isRunning
+        ? (isStopping ? "⏳ Đang dừng..." : (stepVi ? `⏳ Đang chạy (${stepVi})...` : "⏳ Đang chạy AI..."))
+        : r.status_vi;
+      const stopItemHtml = isRunning
+        ? `<button type="button" class="btn-stop-item" data-stop-stem="${escapeHtml(stem)}" title="${isStopping ? "Đang dừng..." : `Dừng chạy AI cho ${escapeHtml(r.file)}`}" ${isStopping ? "disabled" : ""}>${isStopping ? "⏳" : "⏹"}</button>`
+        : "";
       const suspBadge = r.is_suspicious
         ? `<span class="badge-suspicious" title="${escapeHtml((r.suspicious_reasons || []).join("; ") || "File có dấu hiệu lỗi cần hủy")}">⚠️ Nghi hủy</span>`
         : "";
@@ -94,7 +326,8 @@ export function renderFileList() {
           <span style="display:inline-flex;align-items:center;gap:6px">${escapeHtml(r.file)} ${suspBadge}</span>
           <span style="display:flex;align-items:center;gap:4px">
             <span class="status-pill ${pillClass}">${escapeHtml(pillText)}</span>
-            <button class="btn-del-item" data-del-stem="${stem}" title="Xóa file ${escapeHtml(r.file)}">✕</button>
+            ${stopItemHtml}
+            <button class="btn-del-item" data-del-stem="${stem}" title="${isRunning ? "Hãy dừng AI trước khi xóa file" : `Xóa file ${escapeHtml(r.file)}`}" ${isRunning ? "disabled" : ""}>✕</button>
           </span>
         </div>
         <div class="file-item-sub">
@@ -102,8 +335,16 @@ export function renderFileList() {
           <span>${r.n_errors ? `Lỗi: ${r.n_errors}` : `CB: ${r.n_warnings || 0}`}</span>
         </div>
       `;
+      const stopBtn = li.querySelector(".btn-stop-item");
+      if (stopBtn) {
+        stopBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (_stopFileHandler) _stopFileHandler(stem);
+        });
+      }
       li.querySelector(".btn-del-item").addEventListener("click", (e) => {
         e.stopPropagation();
+        if (store.RUNNING_STEMS.has(stem)) return;
         deleteFiles("selected", [stem], `Bạn có chắc muốn xóa file '${r.file}'?`);
       });
       li.addEventListener("click", () => {
@@ -120,22 +361,23 @@ export function renderDoneList() {
   if (!doneUl) return;
   const doneFiles = approvedFiles();
 
-  if (!store.DONE_SELECTED._initializedStems) store.DONE_SELECTED._initializedStems = new Set();
-  for (const r of doneFiles) {
-    const stem = r.file.replace(/\.docx$/i, "");
-    if (!store.DONE_SELECTED._initializedStems.has(stem)) {
-      store.DONE_SELECTED.add(stem);
-      store.DONE_SELECTED._initializedStems.add(stem);
-    }
-  }
-
   doneUl.innerHTML = "";
   if (!doneFiles.length) {
     doneUl.innerHTML = `<li class="muted" style="padding:10px 12px">Chưa có file nào đã duyệt.</li>`;
   } else {
     for (const r of doneFiles) {
       const stem = r.file.replace(/\.docx$/i, "");
-      const checked = store.DONE_SELECTED.has(stem);
+      const isRunning = store.RUNNING_STEMS.has(stem);
+      const isStopping = isRunning && store.STOPPING_STEMS.has(stem);
+      const stepCode = (store.RUNNING_STEPS && store.RUNNING_STEPS[stem]) || r.current_step || "";
+      const stepVi = STEP_SHORT_VI[stepCode] || "";
+      const pillClass = isRunning ? "st-running" : `st-${r.status}`;
+      const pillText = isRunning
+        ? (isStopping ? "⏳ Đang dừng..." : (stepVi ? `⏳ Đang chạy (${stepVi})...` : "⏳ Đang chạy AI..."))
+        : "Đã duyệt";
+      const stopItemHtml = isRunning
+        ? `<button type="button" class="btn-stop-item" data-stop-stem="${escapeHtml(stem)}" title="${isStopping ? "Đang dừng..." : `Dừng chạy AI cho ${escapeHtml(r.file)}`}" ${isStopping ? "disabled" : ""}>${isStopping ? "⏳" : "⏹"}</button>`
+        : "";
       const suspBadge = r.is_suspicious
         ? `<span class="badge-suspicious" title="${escapeHtml((r.suspicious_reasons || []).join("; ") || "File có dấu hiệu lỗi cần hủy")}">⚠️ Nghi hủy</span>`
         : "";
@@ -144,31 +386,31 @@ export function renderDoneList() {
       li.dataset.stem = stem;
       li.innerHTML = `
         <div class="file-item-top">
-          <label class="chk-inline" title="Tick để đưa vào file ZIP" onclick="event.stopPropagation()">
-            <input type="checkbox" data-done-stem="${stem}" ${checked ? "checked" : ""}>
+          <span style="display:inline-flex;align-items:center;gap:6px">
             <strong>${escapeHtml(r.file)}</strong>
             ${suspBadge}
-          </label>
+          </span>
           <span style="display:flex;align-items:center;gap:4px">
-            <span class="status-pill st-${r.status}">Đã duyệt</span>
-            <button class="btn-del-item" data-del-stem="${stem}" title="Xóa file ${escapeHtml(r.file)}">✕</button>
+            <span class="status-pill ${pillClass}">${escapeHtml(pillText)}</span>
+            ${stopItemHtml}
+            <button class="btn-del-item" data-del-stem="${stem}" title="${isRunning ? "Hãy dừng AI trước khi xóa file" : `Xóa file ${escapeHtml(r.file)}`}" ${isRunning ? "disabled" : ""}>✕</button>
           </span>
         </div>
         <div class="done-item-actions">
           <span class="muted">${escapeHtml(r.label || "")}</span>
-          <a href="/api/download-file/${encodeURIComponent(stem)}" onclick="event.stopPropagation()" title="Tải lẻ file .docx này">⬇ Tải lẻ</a>
         </div>
       `;
+      const stopBtn = li.querySelector(".btn-stop-item");
+      if (stopBtn) {
+        stopBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (_stopFileHandler) _stopFileHandler(stem);
+        });
+      }
       li.querySelector(".btn-del-item").addEventListener("click", (e) => {
         e.stopPropagation();
+        if (store.RUNNING_STEMS.has(stem)) return;
         deleteFiles("selected", [stem], `Bạn có chắc muốn xóa file '${r.file}'?`);
-      });
-      const cb = li.querySelector("input");
-      cb.addEventListener("change", (e) => {
-        e.stopPropagation();
-        if (cb.checked) store.DONE_SELECTED.add(stem);
-        else store.DONE_SELECTED.delete(stem);
-        updateZipButtonState(doneFiles.length);
       });
       li.addEventListener("click", () => {
         if (_selectFileHandler) _selectFileHandler(stem);
@@ -176,33 +418,6 @@ export function renderDoneList() {
       doneUl.appendChild(li);
     }
   }
-  updateZipButtonState(doneFiles.length);
-}
-
-export function updateZipButtonState(totalDone) {
-  const btn = $("btn-download-zip");
-  if (!btn) return;
-  const t = todayLabel();
-  const count = Array.from(store.DONE_SELECTED).filter((s) =>
-    store.FILES.some((r) => (r.status === "da_xuat" || r.status === "da_duyet") && r.file.replace(/\.docx$/i, "") === s)
-  ).length;
-  btn.textContent = `⬇ Tải ZIP ngày ${t.slash} (${count} file)`;
-  btn.disabled = count === 0;
-  const chkAll = $("chk-done-all");
-  if (chkAll) chkAll.checked = totalDone > 0 && count === totalDone;
-}
-
-export function downloadDoneZip() {
-  const activeStems = store.FILES
-    .filter((r) => r.status === "da_xuat" || r.status === "da_duyet")
-    .map((r) => r.file.replace(/\.docx$/i, ""))
-    .filter((s) => store.DONE_SELECTED.has(s));
-  if (!activeStems.length) {
-    showToast("Hãy tick chọn ít nhất 1 file đã xong để tải ZIP.", true);
-    return;
-  }
-  const url = `/api/download-zip?stems=${encodeURIComponent(activeStems.join(","))}`;
-  window.location.href = url;
 }
 
 export function moveFile(delta) {
@@ -223,7 +438,6 @@ export async function deleteFiles(mode, stems = [], confirmMsg = "") {
     });
     for (const f of data.deleted || []) {
       const st = f.replace(/\.docx$/i, "");
-      store.DONE_SELECTED.delete(st);
       if (store.CURRENT_STEM === st) {
         store.CURRENT_STEM = null;
         store.CURRENT_STATE = null;

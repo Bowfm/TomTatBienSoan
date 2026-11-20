@@ -56,35 +56,19 @@ def check_length(n_ext: int, n_abs: int, cfg: dict, res: CheckResult) -> None:
     res.metrics["abstract_targets"] = t
     if not (n_ext and n_abs):
         return
-    if n_abs < n_ext:
-        r = n_abs / n_ext
-        res.metrics.update(direction="shorter", ratio=round(r, 4), ratio_name="B/T", edit=round(1 - r, 4))
-        if r > lim:
-            if t["allow_longer"]:
-                hint = (f"cần cắt ít nhất {n_abs - t['short_max']} từ (tối đa {t['short_max']} từ) "
-                        f"hoặc viết dài hơn, tối thiểu {t['long_min']} từ")
-            else:
-                hint = (f"cần cắt ít nhất {n_abs - t['short_max']} từ (tối đa {t['short_max']} từ, "
-                        f"nên {t['short_low']}-{t['short_high']} từ)")
-            res.add(ERROR, "ratio",
-                    f"Bản biên soạn {n_abs} từ = {r:.1%} bản trích chọn ({n_ext} từ), vượt "
-                    f"{lim:.0%}: {hint}.")
-        if r < a["too_short_warn"]:
-            res.add(WARNING, "too_short",
-                    f"Bản biên soạn chỉ bằng {r:.0%} bản trích chọn - quá ngắn, dễ mất ý chính "
-                    f"(nên {t['short_low']}-{t['short_high']} từ).")
-    else:
-        r = n_ext / n_abs
-        res.metrics.update(direction="longer", ratio=round(r, 4), ratio_name="T/B", edit=round(1 - r, 4))
-        if r > lim:
-            res.add(ERROR, "ratio",
-                    f"Bản biên soạn {n_abs} từ, không ngắn hơn bản trích chọn ({n_ext} từ) đủ nhiều: "
-                    f"cần cắt xuống tối đa {t['short_max']} từ (cắt ít nhất {n_abs - t['short_max']} từ)"
-                    + (f" hoặc viết dài tối thiểu {t['long_min']} từ." if t["allow_longer"] else "."))
-        elif not t["allow_longer"]:
-            res.add(WARNING, "longer_not_preferred",
-                    f"Bản biên soạn dài hơn bản trích chọn (T/B = {r:.2f}); hợp lệ theo quy tắc 70% "
-                    f"nhưng cấu hình ưu tiên viết ngắn hơn ({t['short_low']}-{t['short_high']} từ).")
+    r = n_abs / n_ext
+    edit = 1 - (n_abs / n_ext if n_abs < n_ext else n_ext / n_abs)
+    res.metrics.update(direction="shorter", ratio=round(r, 4), ratio_name="B/T", edit=round(edit, 4))
+    if r > lim:
+        hint = (f"cần cắt ít nhất {n_abs - t['short_max']} từ (tối đa {t['short_max']} từ, "
+                f"nên {t['short_low']}-{t['short_high']} từ)")
+        res.add(ERROR, "ratio",
+                f"Bản biên soạn {n_abs} từ = {r:.1%} bản trích chọn ({n_ext} từ), vượt "
+                f"{lim:.0%}: {hint}.")
+    if r < a["too_short_warn"]:
+        res.add(WARNING, "too_short",
+                f"Bản biên soạn chỉ bằng {r:.0%} bản trích chọn - quá ngắn, dễ mất ý chính "
+                f"(nên {t['short_low']}-{t['short_high']} từ).")
     if res.metrics.get("edit", 1) < g["edit_min"]:
         res.add(ERROR, "edit", f"Edit = {res.metrics['edit']:.3f} < {g['edit_min']}.")
 
