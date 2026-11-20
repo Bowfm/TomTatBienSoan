@@ -51,6 +51,11 @@ def check_config() -> list[str]:
 
         g = cfg.get("gemini") or {}
         chain = [g.get("model")] + list(g.get("fallback_models") or [])
+        for m in (g.get("model_by_step") or {}).values():
+            chain.append(m)
+        for fb_list in (g.get("fallback_models_by_step") or {}).values():
+            if isinstance(fb_list, (list, tuple)):
+                chain.extend(fb_list)
         banned_prefixes = ("gemini-2.5", "gemini-3.7", "gemini-3.5-pro")
         for m in chain:
             if not m:

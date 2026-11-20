@@ -362,6 +362,14 @@ def get_rpd_status(cfg: dict, api_keys: list[str] | None = None) -> list[dict]:
     primary = g.get("model") or "gemini-4-hydrogen"
     fallbacks = g.get("fallback_models") or []
     models_chain = [primary] + [m for m in fallbacks if m and m != primary]
+    for m_step in (g.get("model_by_step") or {}).values():
+        if isinstance(m_step, str) and m_step.strip() and m_step.strip() not in models_chain:
+            models_chain.append(m_step.strip())
+    for fb_list in (g.get("fallback_models_by_step") or {}).values():
+        if isinstance(fb_list, (list, tuple)):
+            for m_fb in fb_list:
+                if isinstance(m_fb, str) and m_fb.strip() and m_fb.strip() not in models_chain:
+                    models_chain.append(m_fb.strip())
 
     work_path = cfg.work_dir if hasattr(cfg, "work_dir") else Path((cfg.get("paths") or {}).get("work", "work"))
     quota_file = Path(work_path) / "quota_exhausted.json"

@@ -86,18 +86,30 @@ ABSTRACT_SCHEMA = {
 JUDGE_SCHEMA = {
     "type": "object",
     "properties": {
-        "relevance": {"type": "number", "description": "Điểm mức độ phù hợp (1-5)."},
-        "coherence": {"type": "number", "description": "Điểm mức độ liền mạch (1-5)."},
-        "consistency": {"type": "number", "description": "Điểm tính nhất quán/trung thực (1-5)."},
-        "fluency": {"type": "number", "description": "Điểm độ trôi chảy (1-5)."},
         "issues": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Danh sách vấn đề cụ thể phát hiện được (rỗng nếu không có).",
+            "description": (
+                "Phải phân tích và liệt kê TRƯỚC mọi vấn đề cụ thể phát hiện được "
+                "(bịa ý/suy diễn, sai hoặc làm tròn số liệu, đổi dấu phẩy thập phân, "
+                "đổi lập trường, lẫn phát ngôn với sự kiện, bỏ sót ý chính/query, "
+                "lỗi mạch văn hoặc sai quy tắc phong cách). Mỗi mục ghi rõ `[Tiêu chí] chỗ sai -> cách sửa ngắn gọn`; "
+                "trả về [] nếu hoàn hảo."
+            ),
         },
-        "summary": {"type": "string", "description": "Nhận xét tổng quát ngắn gọn."},
+        "summary": {
+            "type": "string",
+            "description": (
+                "Nhận xét đối chiếu tổng quát ngắn gọn theo đủ 4 tiêu chí "
+                "(Phù hợp / Liền mạch / Trung thực / Trôi chảy) trước khi chốt điểm."
+            ),
+        },
+        "relevance": {"type": "number", "description": "Điểm mức độ phù hợp (1.0-5.0, bước 0.5), chốt sau khi đã liệt kê issues/summary."},
+        "coherence": {"type": "number", "description": "Điểm mức độ liền mạch (1.0-5.0, bước 0.5), chốt sau khi đã liệt kê issues/summary."},
+        "consistency": {"type": "number", "description": "Điểm tính nhất quán/trung thực (1.0-5.0, bước 0.5), chốt sau khi đã liệt kê issues/summary."},
+        "fluency": {"type": "number", "description": "Điểm độ trôi chảy & chuẩn phong cách (1.0-5.0, bước 0.5), chốt sau khi đã liệt kê issues/summary."},
     },
-    "required": ["relevance", "coherence", "consistency", "fluency", "issues", "summary"],
+    "required": ["issues", "summary", "relevance", "coherence", "consistency", "fluency"],
 }
 
 

@@ -99,9 +99,16 @@ class GeminiClient(BaseClient):
 
     @staticmethod
     def _snapshot_gemini_cfg(g: dict) -> dict:
+        raw_mbs = g.get("model_by_step")
+        raw_fbs = g.get("fallback_models_by_step")
         return {
             "model": g.get("model"),
             "fallback_models": list(g.get("fallback_models") or []),
+            "model_by_step": dict(raw_mbs) if isinstance(raw_mbs, dict) else {},
+            "fallback_models_by_step": (
+                {k: list(v) if isinstance(v, (list, tuple)) else v for k, v in raw_fbs.items()}
+                if isinstance(raw_fbs, dict) else {}
+            ),
             "timeout_s": g.get("timeout_s"),
             "timeout_s_by_model": dict(g.get("timeout_s_by_model") or {}) if isinstance(g.get("timeout_s_by_model"), dict) else g.get("timeout_s_by_model"),
             "max_retries": g.get("max_retries"),
@@ -116,10 +123,64 @@ class GeminiClient(BaseClient):
             "qps_global_cooldown_s": g.get("qps_global_cooldown_s"),
         }
 
+    @staticmethod
+    def _normalize_step_model_maps(g: dict, base_chain: list[str]) -> tuple[dict[str, str], dict[str, list[str]]]:
+        raw_m = g.get("model_by_step")
+        model_by_step: dict[str, str] = {}
+        if isinstance(raw_m, dict):
+            for s_name, m_name in raw_m.items():
+                if s_name and isinstance(m_name, str) and m_name.strip():
+                    model_by_step[str(s_name).strip()] = m_name.strip()
+
+        raw_fb = g.get("fallback_models_by_step")
+        fb_by_step: dict[str, list[str]] = {}
+        if isinstance(raw_fb, dict):
+            for s_name, fb_list in raw_fb.items():
+                if not s_name or not isinstance(fb_list, (list, tuple)):
+                    continue
+                fb_by_step[str(s_name).strip()] = [
+                    str(x).strip() for x in fb_list if isinstance(x, str) and x.strip()
+                ]
+
+        chains_by_step: dict[str, list[str]] = {}
+        for step_name in set(model_by_step) | set(fb_by_step):
+            step_primary = model_by_step.get(step_name) or (base_chain[0] if base_chain else "")
+            if step_name in fb_by_step:
+                step_fbs = fb_by_step[step_name]
+            elif step_primary in base_chain:
+                idx = base_chain.index(step_primary)
+                step_fbs = base_chain[idx + 1:]
+            else:
+                step_fbs = base_chain
+            chain: list[str] = []
+            if step_primary:
+                chain.append(step_primary)
+            for m in step_fbs:
+                if m and m not in chain:
+                    chain.append(m)
+            if chain:
+                chains_by_step[step_name] = chain
+        return model_by_step, chains_by_step
+
+    def models_chain_for_step(self, step: str | None = None) -> list[str]:
+        """Trả về chuỗi model ưu tiên áp dụng cho một bước cụ thể (hoặc chuỗi mặc định)."""
+        if step and step in self.models_chain_by_step:
+            return list(self.models_chain_by_step[step])
+        return list(self.models_chain)
+
+    def _all_configured_models(self) -> list[str]:
+        out = list(self.models_chain)
+        for chain in self.models_chain_by_step.values():
+            for m in chain:
+                if m not in out:
+                    out.append(m)
+        return out
+
     def _apply_gemini_config(self, g: dict) -> None:
         self.model = g["model"]
         fallbacks = g.get("fallback_models") or []
         self.models_chain = [self.model] + [m for m in fallbacks if m and m != self.model]
+        self.model_by_step, self.models_chain_by_step = self._normalize_step_model_maps(g, self.models_chain)
         if "timeout_s" in g:
             raw_t = g.get("timeout_s")
             if isinstance(raw_t, dict):
@@ -728,9 +789,12 @@ class GeminiClient(BaseClient):
                         self._global_qps_next_ts = g_target
         return qps_backoff
 
-    def _has_non_outage_fallback_unlocked(self, cur_model: str, now: float) -> bool:
+    def _has_non_outage_fallback_unlocked(
+        self, cur_model: str, now: float, models_chain: list[str] | None = None
+    ) -> bool:
         """Kiểm tra có model dự phòng nào còn key khả dụng và không đang hạ nhiệt bão 503 không (gọi trong _key_lock)."""
-        for m in self.models_chain:
+        chain = models_chain if models_chain is not None else self.models_chain
+        for m in chain:
             if m == cur_model:
                 continue
             if self._model_outage_until.get(m, 0.0) > now:
@@ -739,18 +803,19 @@ class GeminiClient(BaseClient):
                 return True
         return False
 
-    def _ordered_models_for_call(self) -> list[str]:
+    def _ordered_models_for_call(self, step: str | None = None) -> list[str]:
         """Ưu tiên các model không đang trong giai đoạn hạ nhiệt bão 503; model đang hạ nhiệt dồn xuống cuối làm phương án cuối."""
+        chain = self.models_chain_for_step(step)
         with self._key_lock:
             if self.backoff_max <= 0.5 or not self._model_outage_until:
-                return list(self.models_chain)
+                return chain
             now = time.time()
             self._model_outage_until = {m: ts for m, ts in self._model_outage_until.items() if ts > now}
             if not self._model_outage_until:
-                return list(self.models_chain)
-            healthy = [m for m in self.models_chain if m not in self._model_outage_until]
+                return chain
+            healthy = [m for m in chain if m not in self._model_outage_until]
             cooling = sorted(
-                (m for m in self.models_chain if m in self._model_outage_until),
+                (m for m in chain if m in self._model_outage_until),
                 key=lambda m: self._model_outage_until[m],
             )
             return healthy + cooling
@@ -874,8 +939,9 @@ class GeminiClient(BaseClient):
         payload_sig = hashlib.sha256(
             f"{step}\0{system or ''}\0{prompt or ''}".encode("utf-8", errors="replace")
         ).hexdigest()[:24]
+        step_chain = self.models_chain_for_step(step)
 
-        for cur_model in self._ordered_models_for_call():
+        for cur_model in self._ordered_models_for_call(step):
             check_not_cancelled(cancel_ev)
             if not self._has_available_key(cur_model):
                 continue  # toàn bộ key đã hết RPD cho model này -> model kế tiếp
@@ -961,7 +1027,7 @@ class GeminiClient(BaseClient):
                             self.backoff_max > 0.5
                             and cur_outage > outage_before_wait
                             and cur_outage > now_after_wait
-                            and self._has_non_outage_fallback_unlocked(cur_model, now_after_wait)
+                            and self._has_non_outage_fallback_unlocked(cur_model, now_after_wait, models_chain=step_chain)
                         )
                         became_unusable = (
                             (cur_key, cur_model) in self._exhausted
@@ -1136,8 +1202,8 @@ class GeminiClient(BaseClient):
                         continue
                     qps_streak = 0
                     if st_code in (401, 403) or "unauthenticated" in err_lower or "not valid" in err_lower:
-                        # Key lỗi xác thực -> loại khỏi mọi model
-                        for m in self.models_chain:
+                        # Key lỗi xác thực -> loại khỏi mọi model (cả chain chung lẫn model theo bước)
+                        for m in self._all_configured_models():
                             self._mark_exhausted(cur_key, m)
                         record["action"] = "invalid_key"
                         write_log(log_dir, record, self._api_keys, log_path=log_path)
@@ -1180,11 +1246,11 @@ class GeminiClient(BaseClient):
                                     if self.model_outage_cooldown_s > 0.0:
                                         self._model_outage_until[cur_model] = now_tr + self.model_outage_cooldown_s
                                     self._model_503_streak[cur_model] = 0
-                                    if self._has_non_outage_fallback_unlocked(cur_model, now_tr):
+                                    if self._has_non_outage_fallback_unlocked(cur_model, now_tr, models_chain=step_chain):
                                         hit_outage_breaker = True
                                 elif (
                                     self._model_outage_until.get(cur_model, 0.0) > now_tr
-                                    and self._has_non_outage_fallback_unlocked(cur_model, now_tr)
+                                    and self._has_non_outage_fallback_unlocked(cur_model, now_tr, models_chain=step_chain)
                                 ):
                                     hit_outage_breaker = True
                         if hit_outage_breaker:
@@ -1208,7 +1274,7 @@ class GeminiClient(BaseClient):
         if last_exc is None:
             raise LLMError(
                 f"Gọi Gemini thất bại ở bước {step}: Tất cả {len(self._api_keys)} API key đều đã hết RPD (429) hoặc liên tục quá tải (503) "
-                f"trên mọi model ({', '.join(self.models_chain)}). Vui lòng thử lại sau hoặc chờ tới 15:00 giờ VN (reset hạn mức)."
+                f"trên mọi model ({', '.join(step_chain)}). Vui lòng thử lại sau hoặc chờ tới 15:00 giờ VN (reset hạn mức)."
             )
         msg = _redact(f"{type(last_exc).__name__}: {last_exc}", self._api_keys)
         st = _status_of(last_exc)
@@ -1218,7 +1284,8 @@ class GeminiClient(BaseClient):
         elif st == 402:
             hint = " (Hết số dư tiền nạp trước trên Google AI Studio; vui lòng nạp thêm tiền tại https://ai.studio/projects hoặc https://ai.google.dev/gemini-api/docs/billing#prepay)"
         elif st == 404:
-            hint = f" (model '{self.model}' không tồn tại hoặc tài khoản chưa được dùng; đổi gemini.model trong config.yaml)"
+            step_primary = step_chain[0] if step_chain else self.model
+            hint = f" (model '{step_primary}' không tồn tại hoặc tài khoản chưa được dùng; đổi gemini.model trong config.yaml)"
         elif st == 429:
             if _is_payload_qps_429(msg.lower()):
                 hint = " (Google đang giới hạn QPS do nội dung prompt giống nhau được gửi liên tiếp; hãy đợi vài giây rồi thử lại — RPD các key KHÔNG bị khóa)"

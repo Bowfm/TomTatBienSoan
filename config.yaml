@@ -19,6 +19,11 @@ gemini:
     - gemini-3.6-flash            # Cấp 3: Gemini 3.6 Flash (20 RPD, 5 RPM)
     - gemini-3.5-flash-lite       # Cấp 4 (Chủ lực cày số lượng): Gemini 3.5 Flash Lite (500 RPD, 15 RPM)
     - gemini-3.1-flash-lite       # Cấp 5 (Dự phòng số lượng): Gemini 3.1 Flash Lite (500 RPD, 15 RPM)
+  model_by_step:                  # Cho phép tách model riêng theo bước (judge dùng Flash-Lite 500 RPD/key để giữ quota 20 RPD cho biên soạn)
+    judge: gemini-3.5-flash-lite
+  fallback_models_by_step:        # Chuỗi dự phòng riêng theo bước (nếu không khai báo sẽ tự cắt từ chuỗi chính)
+    judge:
+      - gemini-3.1-flash-lite
   rpd_limits:                     # Giới hạn số requests/ngày (RPD) trên mỗi API key của từng model:
     gemini-4-hydrogen: 20
     gemini-3.8-flash: 20
@@ -115,7 +120,8 @@ label:
 
 # ---------------- Chấm G-Eval tự động ----------------
 judge:
-  enabled: false               # Tắt trên Free Tier để tiết kiệm lượt gọi API (vẫn có điểm ước lượng cơ học trên giao diện)
+  enabled: true               # Tắt mặc định trên Free Tier (bật true để tự chấm bằng model_by_step.judge, vẫn có điểm ước lượng cơ học)
+  only_if_checks_ok: true      # Chỉ gọi API chấm G-Eval khi bài đã vượt qua toàn bộ kiểm tra cơ học (tránh lãng phí lượt gọi)
   min_average: 4.25
   rewrite_once_if_below: false
 

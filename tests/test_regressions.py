@@ -3994,6 +3994,433 @@ def test_bug_031_reserve_gateway_wait_jitter_never_collides_with_existing_slots(
             assert next_s - prev_s >= 0.08 - 1e-9
 
 
+def test_bug_032_judge_step_model_routing_and_config_contract(tmp_path, monkeypatch):
+    """BUG-032: judge có thể tách model riêng (model_by_step) sang Flash-Lite 500 RPD/key mà không ăn quota model chính."""
+    from tomtat.llm import get_rpd_status
+
+    cfg = load_config()
+    cfg.validate(raise_on_error=True)
+    g = cfg["gemini"]
+    assert g["model_by_step"]["judge"] == "gemini-3.5-flash-lite"
+    assert g["fallback_models_by_step"]["judge"] == ["gemini-3.1-flash-lite"]
+    assert cfg["judge"]["only_if_checks_ok"] is True
+
+    for m in [g["model_by_step"]["judge"], *g["fallback_models_by_step"]["judge"]]:
+        assert m in g["rpd_limits"]
+        assert m in g["rpm_limits"]
+        assert m in g["min_interval_s"]
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys = ["bad_key", "good_key"]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["min_interval_s"] = 0.0
+    cfg["gemini"]["backoff_base_s"] = 0.0
+    cfg["gemini"]["backoff_max_s"] = 0.0
+
+    client = GeminiClient(cfg, keys)
+    assert client.models_chain_for_step("judge") == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+    assert client.models_chain_for_step("abstract")[0] == "gemini-4-hydrogen"
+
+    # Trường hợp chỉ đặt model_by_step mà không đặt fallback_models_by_step -> tự cắt từ chuỗi chính, không nhảy ngược lên model đắt
+    m_only, chains_only = GeminiClient._normalize_step_model_maps(
+        {"model_by_step": {"judge": "gemini-3.5-flash-lite"}},
+        ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
+    )
+    assert m_only == {"judge": "gemini-3.5-flash-lite"}
+    assert chains_only["judge"] == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+
+    client_map: dict[str, object] = {}
+    called_models: list[tuple[str, str]] = []
+
+    class Err401(Exception):
+        status_code = 401
+
+    class Err404(Exception):
+        status_code = 404
+
+    def fake_get(k: str):
+        return client_map.setdefault(k, object())
+
+    def fake_call_once(model_name, step, system, prompt, schema, client=None):
+        k = next(key for key, obj in client_map.items() if obj is client)
+        called_models.append((k, model_name))
+        if k == "bad_key":
+            raise Err401("API key not valid")
+        if step == "judge" and model_name == "gemini-3.5-flash-lite":
+            raise Err404("Temporary unavailable")
+        return '{"issues": [], "summary": "OK", "relevance": 4.5, "coherence": 4.5, "consistency": 5.0, "fluency": 4.5}', {}, "completed"
+
+    monkeypatch.setattr(client, "_get_or_create_client", fake_get)
+    monkeypatch.setattr(client, "_call_once", fake_call_once)
+
+    res = client.generate_json(step="judge", system="", prompt="p", schema={})
+    assert res.model == "gemini-3.1-flash-lite"
+    # judge tuyệt đối không gọi gemini-4-hydrogen / 3.8 / 3.6
+    assert all(m in ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite") for _, m in called_models)
+    # bad_key gặp 401 phải bị khóa trên toàn bộ model đã cấu hình
+    for m in client._all_configured_models():
+        assert ("bad_key", m) in client._exhausted
+
+    # sync_config cập nhật nóng model_by_step & get_rpd_status hiển thị thêm model riêng nếu khác chuỗi chung
+    cfg["gemini"]["model_by_step"]["judge"] = "gemini-3.1-flash-lite"
+    cfg["gemini"]["fallback_models_by_step"]["judge"] = []
+    client.sync_config(cfg)
+    assert client.models_chain_for_step("judge") == ["gemini-3.1-flash-lite"]
+
+    cfg_extra = load_config()
+    cfg_extra["paths"] = {"work": str(tmp_path / "work2")}
+    cfg_extra["gemini"]["model_by_step"] = {"judge": "gemini-3.6-flash"}
+    cfg_extra["gemini"]["fallback_models"] = ["gemini-3.5-flash-lite"]
+    rpd_models = [row["model"] for row in get_rpd_status(cfg_extra, api_keys=["k1"])]
+    assert "gemini-3.6-flash" in rpd_models
+
+
+def test_bug_032_judge_schema_reasoning_before_score_and_prompt_context():
+    """BUG-032: JUDGE_SCHEMA phải đặt issues/summary trước 4 điểm số và judge.md hỗ trợ đủ rubric, query, đa văn bản."""
+    from tomtat.prompts import JUDGE_SCHEMA, PromptRenderer
+
+    prop_keys = list(JUDGE_SCHEMA["properties"].keys())
+    req_keys = list(JUDGE_SCHEMA["required"])
+    score_keys = ("relevance", "coherence", "consistency", "fluency")
+    for list_keys in (prop_keys, req_keys):
+        assert list_keys.index("issues") < min(list_keys.index(k) for k in score_keys)
+        assert list_keys.index("summary") < min(list_keys.index(k) for k in score_keys)
+
+    cfg = load_config()
+    renderer = PromptRenderer(cfg.prompts_dir)
+    rendered_multi = renderer.render(
+        "judge.md",
+        style="báo chí - công luận",
+        style_guide=renderer.style_guide("báo chí - công luận"),
+        docs=[{"n": 1}, {"n": 2}],
+        query="Tác động của chính sách thuế mới là gì?",
+        extract="Trích chọn mẫu.",
+        abstract="Đoạn 1.\n\nĐoạn 2.",
+        abstract_words=4,
+        source_text="Văn bản gốc mẫu.",
+    )
+    assert "CÂU TRUY VẤN (QUERY)" in rendered_multi
+    assert "Tác động của chính sách thuế mới là gì?" in rendered_multi
+    assert "ĐA VĂN BẢN (2 văn bản độc lập)" in rendered_multi
+    assert "KHÔNG được trừ điểm `coherence`" in rendered_multi
+    assert "THANG ĐIỂM NEO RÕ" in rendered_multi
+
+    rendered_single = renderer.render(
+        "judge.md",
+        style="khoa học",
+        style_guide=renderer.style_guide("khoa học"),
+        docs=[{"n": 1}],
+        query="",
+        extract="Trích chọn.",
+        abstract="Biên soạn.",
+        abstract_words=2,
+        source_text="Nguồn.",
+    )
+    assert "Đơn văn bản" in rendered_single
+    assert "CÂU TRUY VẤN (QUERY)" not in rendered_single
+    assert "QUY TẮC RIÊNG CHO ĐA VĂN BẢN" not in rendered_single
+
+
+def test_bug_032_step_judge_passes_query_docs_and_respects_checks_gate(tmp_path):
+    """BUG-032: step_judge truyền query/docs, lưu model_used, làm sạch cờ cũ và process_file tôn trọng only_if_checks_ok."""
+    from tomtat.llm.base import BaseClient, LLMResult
+    from tomtat.pipeline import process_file, step_judge
+    from tomtat.prompts import PromptRenderer
+    from tomtat.state import FileWorkspace
+
+    cfg = load_config()
+    cfg["paths"] = {
+        "input": str(tmp_path / "input"),
+        "output": str(tmp_path / "output"),
+        "work": str(tmp_path / "work"),
+        "prompts": str(cfg.prompts_dir),
+        "report": str(tmp_path / "output" / "baocao.xlsx"),
+    }
+    cfg["judge"]["enabled"] = True
+    cfg["judge"]["only_if_checks_ok"] = True
+    cfg["judge"]["rewrite_once_if_below"] = False
+
+    sample = cfg.root / "samples" / "M54629.docx"
+    inp = tmp_path / "input" / "M54629.docx"
+    inp.parent.mkdir(parents=True, exist_ok=True)
+    inp.write_bytes(sample.read_bytes())
+
+    class SpyJudgeClient(BaseClient):
+        def __init__(self, fail_abstract: bool = False):
+            self.fail_abstract = fail_abstract
+            self.calls: list[str] = []
+            self.judge_prompts: list[str] = []
+            self.next_judge_scores = {
+                "issues": ["[Tính nhất quán] Suy diễn nhẹ -> Bám sát gốc"],
+                "summary": "Nhất quán còn vướng 1 chi tiết.",
+                "relevance": 6.0,      # cố tình vượt biên để kiểm tra clamp 5.0
+                "coherence": 4.0,
+                "consistency": 3.0,
+                "fluency": 4.0,
+            }
+
+        def generate_json(self, step, system, prompt, schema, *, log_dir=None, attempt=0, context=None):
+            self.calls.append(step)
+            if step == "label":
+                return LLMResult(
+                    data={"label": "báo chí - công luận", "per_doc": [], "confidence": "cao", "reason": "ok"},
+                    text="{}",
+                    model="gemini-4-hydrogen",
+                )
+            if step == "extract":
+                data = context["data"]
+                sels = [{"doc": d["n"], "ids": [u["id"] for u in d["units"][:2]]} for d in data["docs"]]
+                return LLMResult(data={"selections": sels, "note": "ok"}, text="{}", model="gemini-4-hydrogen")
+            if step == "abstract":
+                if self.fail_abstract:
+                    # Viết dài quá tỷ lệ 70% để checks.ok == False
+                    long_txt = " ".join(["từ"] * 500)
+                    return LLMResult(data={"abstract": long_txt, "note": "too long"}, text="{}", model="gemini-4-hydrogen")
+                return LLMResult(data={"abstract": "Tóm tắt ngắn gọn.", "note": "ok"}, text="{}", model="gemini-4-hydrogen")
+            if step == "judge":
+                self.judge_prompts.append(prompt)
+                return LLMResult(
+                    data=dict(self.next_judge_scores),
+                    text="{}",
+                    model="gemini-3.5-flash-lite",
+                )
+            raise AssertionError(step)
+
+    # 1. Nếu bản biên soạn không đạt checks.ok -> process_file KHÔNG gọi judge lãng phí RPD
+    bad_client = SpyJudgeClient(fail_abstract=True)
+    out_bad = process_file(inp, cfg, bad_client, force=True, restart=True)
+    assert out_bad["state"]["checks"]["ok"] is False
+    assert out_bad["state"]["judge"] is None
+    assert "judge" not in bad_client.calls
+
+    # 2. Nhưng bấm chạy riêng AI: Chấm G-Eval (only_step="judge") vẫn phải chạy được và lưu model_used
+    out_manual = process_file(inp, cfg, bad_client, only_step="judge")
+    st_j = out_manual["state"]["judge"]
+    assert st_j is not None
+    assert st_j["model_used"] == "gemini-3.5-flash-lite"
+    assert st_j["relevance"] == 5.0  # clamped từ 6.0 -> 5.0
+    assert st_j["average"] == 4.0
+    assert any(f.startswith("Điểm G-Eval tự chấm (4.0)") for f in out_manual["state"]["flags"])
+
+    # 3. Khi chạy lại step_judge đạt >= 4.25 -> cờ điểm thấp cũ (4.0) phải bị dọn sạch, query & đa văn bản được truyền vào prompt
+    ws = FileWorkspace(cfg.work_dir, inp)
+    units_data = ws.load_units()
+    units_data["query"] = "Câu hỏi kiểm thử đặc thù 2026"
+    st_cur = ws.load_state()
+    st_cur["flags"].append("Bỏ qua bước tự chấm G-Eval do lỗi trước đó.")
+    bad_client.next_judge_scores = {
+        "issues": [],
+        "summary": "Tốt toàn diện.",
+        "relevance": 4.5,
+        "coherence": 4.5,
+        "consistency": 5.0,
+        "fluency": 4.5,
+    }
+    step_judge(ws, units_data, bad_client, PromptRenderer(cfg.prompts_dir), cfg, st_cur)
+    assert st_cur["judge"]["average"] == 4.62
+    assert st_cur["judge"]["model_used"] == "gemini-3.5-flash-lite"
+    assert not any("G-Eval" in f for f in st_cur["flags"])
+    assert "Câu hỏi kiểm thử đặc thù 2026" in bad_client.judge_prompts[-1]
+
+    # 4. Kiểm tra hợp đồng hiển thị model_badge_judge trên giao diện
+    html = (PROJECT_ROOT / "src" / "tomtat" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    editor_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "editor.js").read_text(encoding="utf-8")
+    assert 'id="model-badge-judge"' in html
+    assert 'setStepBadge("model-badge-judge"' in editor_js
+    assert "G-Eval: ${mJudge}" in editor_js
+
+
+# ---------------------------------------------------------------------------
+# BUG-033: day_cap_nhat.bat đẩy GitHub 1-click an toàn, đồng bộ & chặn lộ bí mật
+# ---------------------------------------------------------------------------
+
+def test_bug_033_push_helper_staged_safety_and_commit_message(tmp_path):
+    """BUG-033: push_helper.py phải chặn mọi file bí mật/dữ liệu cá nhân đang stage
+    và tự động tạo commit message ASCII rõ ràng từ thay đổi thực tế."""
+    import importlib.util
+    import json
+    import subprocess
+
+    helper_path = PROJECT_ROOT / ".agents" / "push_helper.py"
+    spec = importlib.util.spec_from_file_location("push_helper", helper_path)
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+
+    # 1. Kiểm tra bộ lọc đường dẫn nhạy cảm
+    for forbidden in (
+        "api_keys.txt",
+        ".env",
+        "config.local.yaml",
+        "work/quota_exhausted.json",
+        "work/S89769/state.json",
+        "input/S89769.docx",
+        "output/S89769.docx",
+        "TomTatBienSoan_ChiaSe.zip",
+        "docs/~$HUONG_DAN.docx",
+    ):
+        assert helper.is_forbidden_staged_path(forbidden) is not None, f"Phải chặn {forbidden}"
+
+    for allowed in (
+        "src/tomtat/pipeline.py",
+        "config.yaml",
+        "day_cap_nhat.bat",
+        ".agents/push_helper.py",
+        "work/learned_memory.json",
+        "work/.gitkeep",
+        "input/.gitkeep",
+        "samples/M54629.docx",
+        "docs/KNOWN_BUGS.md",
+    ):
+        assert helper.is_forbidden_staged_path(allowed) is None, f"Không được chặn nhầm {allowed}"
+
+    # 2. Kiểm tra sinh commit message trên repo git thật trong tmp_path
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True)
+
+    (repo / "docs").mkdir()
+    (repo / "work").mkdir()
+    (repo / "docs" / "KNOWN_BUGS.md").write_text("### BUG-001: Cu\n", encoding="utf-8")
+    (repo / "work" / "learned_memory.json").write_text(json.dumps({"total_approved_learned": 97}), encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
+
+    # Trường hợp A: chỉ cập nhật learned_memory.json
+    (repo / "work" / "learned_memory.json").write_text(json.dumps({"total_approved_learned": 98}), encoding="utf-8")
+    subprocess.run(["git", "add", "work/learned_memory.json"], cwd=str(repo), check=True)
+    ok_mem, bad_mem = helper.check_staged(repo)
+    assert ok_mem is True and bad_mem == []
+    msg_mem = helper.build_commit_message(repo)
+    assert "bo nho hoc tap" in msg_mem
+    assert "98 bai" in msg_mem
+
+    # Trường hợp B: thêm mục BUG mới vào docs/KNOWN_BUGS.md
+    (repo / "docs" / "KNOWN_BUGS.md").write_text(
+        "### BUG-001: Cu\n### BUG-033: Nang cap day cap nhat GitHub\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "docs/KNOWN_BUGS.md"], cwd=str(repo), check=True)
+    msg_bug = helper.build_commit_message(repo)
+    assert "BUG-033" in msg_bug
+    assert "learned_memory" in msg_bug
+    assert msg_bug.isascii()
+
+    # Trường hợp C: lỡ stage file nhạy cảm -> check_staged phải chặn
+    (repo / "api_keys.txt").write_text("AIzaSySECRET", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", "api_keys.txt"], cwd=str(repo), check=True)
+    ok_bad, bad_list = helper.check_staged(repo)
+    assert ok_bad is False
+    assert any(p == "api_keys.txt" for p, _ in bad_list)
+
+
+def test_bug_033_day_cap_nhat_bat_contract_and_e2e(tmp_path, monkeypatch):
+    """BUG-033: day_cap_nhat.bat phải giữ đúng hợp đồng tĩnh (CRLF, thuần ASCII, không *.txt,
+    chạy verify_guard/pytest, đồng bộ nhánh main) và đẩy thành công kể cả khi remote có commit mới."""
+    import os
+    import shutil
+    import subprocess
+
+    bat_path = PROJECT_ROOT / "day_cap_nhat.bat"
+    raw = bat_path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+    assert all(b < 128 for b in raw), "day_cap_nhat.bat phải thuần ASCII"
+
+    bat_text = raw.decode("ascii")
+    for required in (
+        "verify_guard.py",
+        "pytest.exe",
+        "pyproject.toml",
+        "push_helper.py",
+        "work\\learned_memory.json",
+        "git fetch origin main",
+        "git pull --rebase",
+        "--no-pause",
+    ):
+        assert required in bat_text
+    assert "*.txt" not in bat_text
+
+    # Mô phỏng chạy thật bằng cmd.exe với bare remote cục bộ
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(bare), str(seed)], check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-B", "main"], cwd=str(seed), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Seed"], cwd=str(seed), check=True)
+    subprocess.run(["git", "config", "user.email", "seed@example.com"], cwd=str(seed), check=True)
+    (seed / "src").mkdir()
+    (seed / "src" / "app.py").write_text("v = 1\n", encoding="utf-8")
+    (seed / "work").mkdir()
+    (seed / "work" / "learned_memory.json").write_text('{"total_approved_learned": 1}\n', encoding="utf-8")
+    (seed / ".github_repo_url").write_text(f"{bare}\n", encoding="utf-8")
+    (seed / ".gitignore").write_text(".env\napi_keys.txt\nconfig.local.yaml\nwork/\ninput/*.docx\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", "work/learned_memory.json"], cwd=str(seed), check=True)
+    subprocess.run(["git", "add", "."], cwd=str(seed), check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=str(seed), check=True, capture_output=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=str(seed), check=True, capture_output=True)
+
+    # Clone bản làm việc từ bare remote
+    local_repo = tmp_path / "local_repo"
+    subprocess.run(["git", "clone", "-b", "main", str(bare), str(local_repo)], check=True, capture_output=True)
+    shutil.copy2(bat_path, local_repo / "day_cap_nhat.bat")
+    (local_repo / ".agents").mkdir(exist_ok=True)
+    shutil.copy2(PROJECT_ROOT / ".agents" / "push_helper.py", local_repo / ".agents" / "push_helper.py")
+
+    # Tạo commit mới trên bare remote (giả lập máy khác vừa push trước)
+    (seed / "README.md").write_text("# Remote newer commit\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(seed), check=True)
+    subprocess.run(["git", "commit", "-m", "remote commit"], cwd=str(seed), check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(seed), check=True, capture_output=True)
+
+    # Ở máy local: sửa code + learned_memory + đặt file bí mật (tuyệt đối không được đẩy)
+    (local_repo / "src" / "app.py").write_text("v = 2\n", encoding="utf-8")
+    (local_repo / "work" / "learned_memory.json").write_text('{"total_approved_learned": 2}\n', encoding="utf-8")
+    (local_repo / "api_keys.txt").write_text("AIzaSyDO_NOT_PUSH\n", encoding="utf-8")
+    (local_repo / ".env").write_text("GEMINI_API_KEY=SECRET\n", encoding="utf-8")
+    (local_repo / "config.local.yaml").write_text("workers: 1\n", encoding="utf-8")
+    (local_repo / "input").mkdir(exist_ok=True)
+    (local_repo / "input" / "doc.docx").write_bytes(b"secret")
+
+    url_before = (local_repo / ".github_repo_url").read_bytes()
+    env = os.environ.copy()
+    env["TOMTAT_PUSH_REPO"] = str(bare)
+    res = subprocess.run(
+        ["cmd.exe", "/c", "day_cap_nhat.bat", "--no-pause"],
+        cwd=str(local_repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert res.returncode == 0, f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    assert "[THANH CONG]" in res.stdout
+    assert (local_repo / ".github_repo_url").read_bytes() == url_before
+
+    # Kiểm tra nội dung đã lên bare remote
+    ls_remote = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "refs/heads/main"],
+        cwd=str(bare),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert "src/app.py" in ls_remote
+    assert "work/learned_memory.json" in ls_remote
+    assert "README.md" in ls_remote
+    for secret in ("api_keys.txt", ".env", "config.local.yaml", "input/doc.docx"):
+        assert secret not in ls_remote
+
+
+
+
 
 
 

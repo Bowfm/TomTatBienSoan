@@ -38,6 +38,8 @@
 | BUG-028 | 2026-11-20 | `textutil.py`, `checks/abstract_checks.py`, `pipeline.py`, `prompts.py`, `prompts/abstract.md` | Bản biên soạn xuất hiện ký tự `\n` viết thô (`S89777`) do LLM double-escape trong JSON; thêm làm sạch ở cả đơn/đa văn bản và lỗi cơ học `literal_escape` | `tests/test_regressions.py::test_bug_028_*` |
 | BUG-030 | 2026-11-20 | `web/static/{app.css,modules/{utils,sidebar,editor}.js}`, `web/templates/index.html` | Ấn chọn file ở cột bên trái làm danh sách tự cuộn xuống dưới ngay lập tức (nhất là khi zoom trình duyệt `< 100%`) | `tests/test_regressions.py::test_bug_030_sidebar_click_preserves_scroll_contract_and_behavior` |
 | BUG-031 | 2026-11-20 | `llm/gemini.py` | Jitter trong `_reserve_gateway_wait` cộng sau vòng lặp `slots` làm slot mới có thể nhảy đè lên slot đã đặt kế tiếp (`test_bug_027_anti_qps_stagger...` fail ngẫu nhiên) | `tests/test_regressions.py::test_bug_031_reserve_gateway_wait_jitter_never_collides_with_existing_slots` |
+| BUG-032 | 2026-11-20 | `config.yaml`, `llm/{base,gemini}.py`, `prompts.py`, `prompts/judge.md`, `pipeline.py`, `web/` | Chuẩn hóa G-Eval (`JUDGE_SCHEMA` lý do trước điểm, rubric + query + đa văn bản) và tách model riêng theo bước (`model_by_step.judge` dùng Flash-Lite 500 RPD/key) kèm gatekeeper `only_if_checks_ok` | `tests/test_regressions.py::test_bug_032_*` |
+| BUG-033 | 2026-11-20 | `day_cap_nhat.bat`, `.agents/push_helper.py`, `.gitignore` | Nâng cấp script đẩy GitHub 1-click: tránh wildcard `*.txt`, không làm bẩn `.github_repo_url`, kiểm tra nhánh `main`/rebase trước khi push, chặn bí mật stage và tự sinh commit message | `tests/test_regressions.py::test_bug_033_*` |
 
 ---
 
@@ -354,6 +356,31 @@
   - Jitter phải được cộng **ngay trong bước trượt slot** (`t_cand = s + dispatch_gap + random.uniform(jitter_min, jitter_cap)`) khi phát hiện va chạm, để mọi vòng lặp tiếp theo tiếp tục kiểm tra và đảm bảo `|t_new - s| >= global_min_dispatch_interval_s` với **toàn bộ** các slot đang hiệu lực.
   - `jitter_cap` không vượt quá `0.25s` và tỉ lệ hợp lý theo `dispatch_gap` (`min(0.25, max(0.02, dispatch_gap * 0.5))`).
 - **Regression Test**: `tests/test_regressions.py::test_bug_031_reserve_gateway_wait_jitter_never_collides_with_existing_slots`
+
+### BUG-032: Tách model riêng cho `judge` (`model_by_step`) và chuẩn hóa G-Eval (`JUDGE_SCHEMA`, `judge.md`, `step_judge`)
+- **Commit / Nguồn**: Sửa đổi ngày 2026-11-20 trong `config.yaml`, `src/tomtat/{llm/{base,gemini}.py,prompts.py,pipeline.py,web/templates/index.html,web/static/modules/editor.js}`, `prompts/judge.md`, `.agents/verify_guard.py`
+- **File / Symbol**: `config.yaml` (`gemini.model_by_step`, `gemini.fallback_models_by_step`, `judge.only_if_checks_ok`), `src/tomtat/llm/gemini.py` (`GeminiClient._normalize_step_model_maps`, `models_chain_for_step`, `_all_configured_models`, `generate_json`), `src/tomtat/llm/base.py` (`get_rpd_status`), `src/tomtat/prompts.py` (`JUDGE_SCHEMA`), `prompts/judge.md`, `src/tomtat/pipeline.py` (`step_judge`, `process_file`), `src/tomtat/web/templates/index.html` (`#model-badge-judge`), `src/tomtat/web/static/modules/editor.js` (`renderJudge`, `renderSummaryMeta`)
+- **Triệu chứng**:
+  1. `step_judge` dùng chung chuỗi model chính bắt đầu từ `gemini-4-hydrogen` (chỉ 20 RPD/key) nên bật `judge.enabled` làm hao quota quý giá của bước biên soạn/trích chọn.
+  2. `JUDGE_SCHEMA` đặt 4 điểm số *trước* `issues`/`summary`, `judge.md` thiếu thang neo điểm 1–5 chi tiết và quy tắc đa văn bản độc lập, đồng thời `step_judge` không truyền `query`/`docs`, không lưu `model_used` lên `st["judge"]`, không dọn cờ điểm thấp cũ khi chạy lại, và vẫn đốt API gọi `judge` trong batch kể cả khi bản nháp còn lỗi cơ học (`checks.ok == False`).
+- **Nguyên nhân gốc**: Thiếu cơ chế định tuyến chuỗi model theo bước trong `GeminiClient`, schema JSON chưa tuân theo thứ tự suy luận trước điểm số của G-Eval, và `step_judge` chưa đồng bộ tham số ngữ cảnh với `abstract.md`.
+- **Bất biến cần bảo vệ**:
+  - `model_by_step.judge` (`gemini-3.5-flash-lite`) và `fallback_models_by_step.judge` (`["gemini-3.1-flash-lite"]`) dùng riêng pool 500 RPD/key cho bước `judge` và không nhảy ngược lên `gemini-4-hydrogen`; khi gặp `401/403`, key lỗi vẫn bị loại khỏi toàn bộ `_all_configured_models()`.
+  - `JUDGE_SCHEMA` luôn đặt `issues` và `summary` **trước** 4 trường điểm số (`relevance`, `coherence`, `consistency`, `fluency`).
+  - `step_judge` truyền đủ `docs` và `query` vào `judge.md`, kẹp điểm trong `[1.0, 5.0]`, lưu `st["judge"]["model_used"]`, và dọn sạch cờ điểm thấp/bỏ qua G-Eval cũ; ở chế độ batch (`process_file`), khi `judge.only_if_checks_ok=True` không gọi G-Eval cho bản nháp chưa đạt `checks.ok` (nhưng chạy riêng `only_step="judge"` vẫn hoạt động theo yêu cầu).
+- **Regression Test**: `tests/test_regressions.py::test_bug_032_judge_step_model_routing_and_config_contract`, `test_bug_032_judge_schema_reasoning_before_score_and_prompt_context`, `test_bug_032_step_judge_passes_query_docs_saves_model_and_respects_checks_gate`
+
+### BUG-033: Nâng cấp `day_cap_nhat.bat` đẩy lên GitHub 1-click an toàn và đồng bộ cho mọi máy cập nhật
+- **Commit / Nguồn**: Sửa đổi ngày 2026-11-20 trong `day_cap_nhat.bat`, `.agents/push_helper.py`, `.gitignore`
+- **File / Symbol**: `day_cap_nhat.bat`, `.agents/push_helper.py` (`is_forbidden_staged_path`, `check_staged`, `build_commit_message`), `.gitignore`
+- **Triệu chứng**:
+  1. `day_cap_nhat.bat` dùng wildcard `*.txt` khi `git add` (dễ dính file ghi chú tạm hoặc đụng `api_keys.txt`), mỗi lần chạy lại ghi đè `.github_repo_url` gây diff giả, bỏ qua `version.json` / `.gitkeep` nếu mới tạo, và dùng commit message cố định không phản ánh thay đổi trên banner cập nhật web.
+  2. Thiếu kiểm tra nhánh `main` / detached HEAD, thiếu đồng bộ `git fetch` + `pull --rebase` khi `origin/main` có commit mới, thiếu kiểm tra lỗi `git commit` và thiếu khóa kiểm tra bí mật đang stage trước khi push.
+- **Nguyên nhân gốc**: Script batch chỉ dừng ở mức `git add ... && git commit && git push` tuần tự, chưa phòng vệ trạng thái Git, xung đột remote, hoặc file nhạy cảm.
+- **Bất biến cần bảo vệ**:
+  - `day_cap_nhat.bat` phải chạy thuần ASCII + CRLF, giữ nguyên kiểm tra `verify_guard.py`, `pytest.exe` và `pyproject.toml` (`BUG-024`), không dùng `*.txt` wildcard và không dùng khối `if (...)` chứa biến đường dẫn (`BUG-007`).
+  - Chỉ ghi `.github_repo_url` khi thiếu hoặc khác `DEFAULT_REPO`; luôn đảm bảo đứng trên nhánh `main`, kiểm tra bí mật qua `push_helper.py check-staged` (cấm `api_keys.txt`, `.env`, `config.local.yaml`, `input/*.docx`, `output/*`, `work/*` trừ `work/learned_memory.json` và `.gitkeep`), tự động sinh commit message từ thay đổi (`BUG-XXX` / vùng sửa), và `git fetch` + `pull --rebase` trước khi `git push -u origin main`.
+- **Regression Test**: `tests/test_regressions.py::test_bug_033_push_helper_staged_safety_and_commit_message`, `test_bug_033_day_cap_nhat_bat_contract_and_e2e`
 
 ---
 

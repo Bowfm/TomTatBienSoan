@@ -1,7 +1,14 @@
 {
-  "total_approved_learned": 96,
-  "updated_at": "2026-11-20T17:47:21",
+  "total_approved_learned": 97,
+  "updated_at": "2026-11-20T19:02:47",
   "label_corrections": [
+    {
+      "stem": "S89769",
+      "ai_guessed": "khoa học",
+      "human_approved": "khoa học",
+      "snippet": "[VB1] Thứ Hai, 21 tháng 9, 2020 Bài 39 tôi đã giới thiệu về bệnh gan và những bài thuốc chữa. Bài này.",
+      "learned_at": "2026-11-20T19:02:47"
+    },
     {
       "stem": "S89782",
       "ai_guessed": "khoa học",
@@ -99,13 +106,6 @@
       "human_approved": "báo chí - công luận",
       "snippet": "[VB1] Doanh nghiệp phải hủy hoá đơn giấy trước ngày 01/11/2020? Thời điểm phải áp dụng hóa đơn điện tử chưa được hiểu thống nhất vì có sự “khác nhau” giữa Luật Quản lý thuế 2019, Nghị định 119/2018/NĐ-CP và Thông tư 68/2019/TT-BTC dẫn đến vướng mắc là có phải hủy hoá đơn giấy trước ngày 01/11/2020 hay không? Từ ngày 01/11/2020, doanh nghiệp, hộ gia đình, cá nhân kinh doanh phải thực hiện đăng ký áp dụng hóa đơn điện tử theo Nghị định 119/2018/NĐ-CP và Thông tư 68/2019/TT-BTC. [VB2] Thầy Nào Trò Nấy Ba tuần lễ trước khi cuộc bầu cử Tổng Thống củ",
       "learned_at": "2026-11-19T10:27:10"
-    },
-    {
-      "stem": "M51189",
-      "ai_guessed": "sinh hoạt hằng ngày",
-      "human_approved": "sinh hoạt hằng ngày",
-      "snippet": "[VB1] Bạn Hiếu Nguyễn hỏi: Làm việc giao dịch tiền điện tử hay còn gọi là tiền ảo tiền kỷ thuật số .thượng tôn pháp luật rõ ràng như thế này, có gọi là đa cấp,mua bán lừa đảo,.không ạ? Câu hỏi này thực ra là 2 câu hỏi. Một là có hợp pháp không, hai là có được coi là đa cấp, lừa đảo không? [VB2] KIỂM TOÁN NHÀ NƯỚC KẾT LUẬN THẾ NÀO VỀ ĐƯỜNG VEN BIỂN DUNG QUẤT SA HUỲNH VÀ CẢNG BẾN ĐÌNH Giang hồ thấy anh Tám ký quyết định số 97/UBND-CNXD yêu cầu sở GT và .Ban GT nghiêm túc thực hiện các yêu cầu của KTNN tại văn bản 777/KTNN-TH, thế là đổ xô đi tìm ",
-      "learned_at": "2026-11-19T10:26:18"
     }
   ],
   "style_examples": {
@@ -159,6 +159,17 @@
     ],
     "khoa học": [
       {
+        "stem": "S89769",
+        "style": "khoa học",
+        "n_docs": 1,
+        "compress": 0.431,
+        "ratio_bt": 0.652,
+        "extract_sample": "Xin giới thiệu cùng các bạn 7 loại thực phẩm bổ gan , thanh lọc cơ thể, đồng thời cũng giới thiệu 7 thực phẩm là 'sát thủ' hại gan khủng khiếp, người Việt vô tư ăn mỗi ngày\nCác dưỡng chất trong atiso giúp giải độc gan, ngăn ngừa độc tố xâm nhập, gây hại cho các tế bào gan.\nSữa chua là loại men vi sinh nuôi dưỡng các vi khuẩn có lợi trong đường ruột. Chế phẩm sinh học này có tác dụng làm giảm tổn thương gan, giảm mỡ gan và điều chỉnh chất béo trong cơ thể.\nCác loại rau họ cải như: Bắp cải, súp lơ, bông cải xanh và mầm brussels chứa các hợp chất sinh học quercetin giúp bảo vệ gan, thanh lọc cơ thể.\nĐậu là thực phẩm cải thiện sức khỏe của gan.\nCác nghiên cứu chỉ ra uống cà phê mỗi ngày tốt cho ",
+        "abstract_sample": "7 thực phẩm bổ gan, thanh lọc cơ thể gồm: atiso chứa dưỡng chất giúp giải độc gan, ngăn ngừa độc tố gây hại tế bào gan; sữa chua là men vi sinh nuôi dưỡng vi khuẩn có lợi đường ruột, giúp giảm tổn thương gan, giảm mỡ gan và điều chỉnh chất béo trong cơ thể; rau họ cải (bắp cải, súp lơ, bông cải xanh, mầm brussels) chứa hợp chất sinh học quercetin bảo vệ gan, thanh lọc cơ thể; đậu cải thiện sức khỏe gan. Ngoài ra, các nghiên cứu chỉ ra uống cà phê mỗi ngày tốt cho gan, giảm nguy cơ xơ gan hoặc tổn thương gan ở người bệnh gan mạn tính; chất béo lành mạnh trong các loại hạt và cá béo giữ gan khỏe mạnh; quả mọng (nam việt quất, việt quất, mâm xôi) chứa chất oxy hóa polyphenol bảo vệ tế bào gan khỏi stress oxy hóa.\nNgược lại, 7 thực phẩm không nên ăn nhiều vì rất hại gan gồm: măng tươi (theo chuyên gia dinh dưỡng) chứa hàm lượng cyanide cao, có nguy cơ chuyển hóa thành cyanhydrit dưới tác độn",
+        "edits_note": "",
+        "learned_at": "2026-11-20T19:02:47"
+      },
+      {
         "stem": "S89777",
         "style": "khoa học",
         "n_docs": 1,
@@ -168,17 +179,6 @@
         "abstract_sample": "Bệnh tăng huyết áp (cao huyết áp) là bệnh lý phổ biến khi áp lực máu lên thành động mạch tăng cao kéo dài, dẫn đến đột quỵ, suy tim, đôi khi tử vong. Theo ước tính của Tổ chức Y tế Thế giới (WHO), khoảng 1,13 tỷ người mắc bệnh, thậm chí nhiều hơn nếu tính cả người chưa được chẩn đoán; ít hơn 20% được kiểm soát đúng cách. Tăng huyết áp là yếu tố thúc đẩy chính gây bệnh tim và đột quỵ – thủ phạm gây tử vong đứng thứ nhất và thứ ba thế giới. Chẩn đoán và điều trị sớm, đúng cách giúp cải thiện đáng kể tỷ lệ tử vong do bệnh tim mạch.\nTheo khuyến cáo của Hội Tim mạch học châu Âu và Hội Tim mạch học Việt Nam, bác sĩ chẩn đoán tăng huyết áp khi huyết áp tâm thu trên 140 mmHg và/hoặc tâm trương trên 90 mmHg trong cả hai lần đo tại hai thời điểm khác nhau, điều kiện nghỉ ngơi hoàn toàn, trước đó không dùng rượu bia, chất kích thích.\nTăng huyết áp gồm 2 nhóm chính: thứ phát (có nguyên nhân) và tiên",
         "edits_note": "",
         "learned_at": "2026-11-20T17:45:51"
-      },
-      {
-        "stem": "S89782",
-        "style": "khoa học",
-        "n_docs": 1,
-        "compress": 0.386,
-        "ratio_bt": 0.669,
-        "extract_sample": "Nếu nhà bạn có người cao tuổi, nhắc họ tuyệt đối không làm 8 việc hại sức khoẻ này\nHạn chế dùng sức rặn khi đi đại tiện là một trong những điều cần lưu ý đối với người cao tuổi. Bởi hành động này sẽ khiến ổ bụng chịu áp lực lớn, huyết áp lên nhanh và làm tăng nguy cơ xuất huyết não.\nKhi vừa thức dậy, những người tuổi tác đã cao nên hạn chế việc xuống giường ngay lập tức để tránh nguy cơ xuất huyết não, thậm chí đứt mạch máu não.\nĐối với những người cao tuổi mắc huyết áp cao hoặc có tiền sử xuất huyết não, thói quen ăn quá nhanh được ví như \"hung thần\" sức khỏe của họ.\nDo đó, ăn quá nhanh sẽ không có lợi cho hệ tiêu hóa của nhóm người này, thậm chí còn dễ bị nghẹn, gây tổn thương thực quản và",
-        "abstract_sample": "Người cao tuổi cần tránh 8 việc hại sức khỏe. Hạn chế dùng sức rặn khi đi đại tiện vì khiến ổ bụng chịu áp lực lớn, huyết áp lên nhanh, tăng nguy cơ xuất huyết não. Khi vừa thức dậy, hạn chế xuống giường ngay để tránh nguy cơ xuất huyết não, thậm chí đứt mạch máu não.\nNgười mắc huyết áp cao hoặc có tiền sử xuất huyết não không nên ăn quá nhanh vì không có lợi cho hệ tiêu hóa, dễ nghẹn, gây tổn thương thực quản và tăng áp lực lên tim. Khả năng giữ thăng bằng ở người cao tuổi rất kém nên đứng co một chân mặc quần dễ khiến họ bị ngã và có nguy cơ gãy xương. Các chuyên gia y tế khuyến cáo người mắc bệnh tim hoặc có vấn đề về hệ tiêu hóa hạn chế nói nhanh, nói nhiều, nói to vì đều khiến nhịp tim và huyết áp tăng nhanh đột ngột.\nKhi bước lên cầu thang, nếu hệ thống thần kinh điều khiển bị chậm lại không theo kịp hành động cơ thể thì nguy cơ bị ngã rất cao, nên cần vịn tay vào tường hoặc lan ca",
-        "edits_note": "",
-        "learned_at": "2026-11-20T17:31:57"
       }
     ],
     "báo chí - công luận": [

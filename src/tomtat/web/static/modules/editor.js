@@ -352,11 +352,13 @@ export function renderSummaryMeta(st, u) {
   const mLabel = isManualLabel ? "" : lb.model_used;
   const mExt = (st.extract || {}).model_used;
   const mAbs = (st.abstract || {}).model_used;
+  const mJudge = (st.judge || {}).model_used;
   const modelParts = [];
   if (mLabel) modelParts.push(`Nhãn: ${mLabel}`);
   else if (isManualLabel && (mExt || mAbs)) modelParts.push("Nhãn: thủ công");
   if (mExt) modelParts.push(`Trích: ${mExt}`);
   if (mAbs) modelParts.push(`Biên soạn: ${mAbs}`);
+  if (mJudge) modelParts.push(`G-Eval: ${mJudge}`);
   const modelSummary = modelParts.length
     ? ` · 🤖 Model đã chạy: ${modelParts.join(" | ")}`
     : st.model_used
@@ -666,6 +668,7 @@ export function renderChecks(chk) {
 export function renderJudge(j) {
   const card = $("judge-card");
   const box = $("judge-content");
+  setStepBadge("model-badge-judge", j && j.model_used);
   if (!j || j.average === undefined) {
     card.classList.add("hidden");
     return;

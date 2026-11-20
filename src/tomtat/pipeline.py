@@ -536,6 +536,8 @@ def step_judge(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
         "judge.md",
         style=style,
         style_guide=renderer.style_guide(style),
+        docs=units_data.get("docs") or [],
+        query=(units_data.get("query") or "").strip(),
         extract=extract_text,
         abstract=abstract_text,
         abstract_words=count_words(abstract_text),
@@ -551,7 +553,10 @@ def step_judge(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
         context={"data": units_data},
     )
     d = res.data
-    scores = [float(d.get(k, 0)) for k in ("relevance", "coherence", "consistency", "fluency")]
+    scores = [
+        round(max(1.0, min(5.0, float(d.get(k, 1.0)))), 2)
+        for k in ("relevance", "coherence", "consistency", "fluency")
+    ]
     avg = round(sum(scores) / 4.0, 2)
     issues = [nfc(x).strip() for x in (d.get("issues") or []) if str(x).strip()]
     st["judge"] = {
@@ -563,6 +568,7 @@ def step_judge(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
         "issues": issues,
         "summary": nfc(d.get("summary", "")).strip(),
         "rewritten": False,
+        "model_used": res.model,
     }
     min_avg = float(j_cfg.get("min_average", 4.25))
     if allow_rewrite and j_cfg.get("rewrite_once_if_below", True) and avg < min_avg:
@@ -585,10 +591,13 @@ def step_judge(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
             st["judge"]["rewritten"] = True
             return
 
+    st["flags"] = [
+        f for f in st.get("flags", [])
+        if not str(f).startswith("Điểm G-Eval tự chấm (")
+        and not str(f).startswith("Bỏ qua bước tự chấm G-Eval")
+    ]
     if st["judge"]["average"] < min_avg:
         _add_flag(st, f"Điểm G-Eval tự chấm ({st['judge']['average']}) thấp hơn ngưỡng {min_avg}.")
-    else:
-        _remove_flag(st, f"Điểm G-Eval tự chấm ({st['judge']['average']}) thấp hơn ngưỡng {min_avg}.")
     _clear_stale(st, "judge")
     ws.save_state(st)
 
@@ -974,18 +983,26 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
                 step_abstract(ws, units_data, client, renderer, cfg, st)
                 ran_ai = True
 
-            # Bước 4: Tự chấm G-Eval (nếu được bật và chưa có điểm)
-            if cfg.get("judge", {}).get("enabled", False) and (restart or not st.get("judge")):
-                try:
-                    check_not_cancelled(eff_cancel)
-                    _backup_before_ai("judge")
-                    st["current_step"] = "judge"
-                    ws.save_state(st)
-                    step_judge(ws, units_data, client, renderer, cfg, st)
-                    mutated_by_ai = True
-                    ran_ai = True
-                except LLMError as judge_exc:
-                    _add_flag(st, f"Bỏ qua bước tự chấm G-Eval do quá thời gian chờ ({judge_exc}).")
+            # Bước 4: Tự chấm G-Eval (nếu được bật, chưa có điểm và đạt ngưỡng kiểm tra cơ học khi bật gatekeeper)
+            j_cfg = cfg.get("judge", {})
+            if j_cfg.get("enabled", False) and (restart or not st.get("judge")):
+                chk_cur = st.get("checks")
+                if chk_cur is None:
+                    chk_cur = finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch).get("checks")
+                checks_passed = bool((chk_cur or {}).get("ok"))
+                if j_cfg.get("only_if_checks_ok", True) and not checks_passed:
+                    pass  # Không đốt lượt gọi G-Eval cho bản nháp vẫn còn lỗi cơ học
+                else:
+                    try:
+                        check_not_cancelled(eff_cancel)
+                        _backup_before_ai("judge")
+                        st["current_step"] = "judge"
+                        ws.save_state(st)
+                        step_judge(ws, units_data, client, renderer, cfg, st)
+                        mutated_by_ai = True
+                        ran_ai = True
+                    except LLMError as judge_exc:
+                        _add_flag(st, f"Bỏ qua bước tự chấm G-Eval ({judge_exc}).")
 
             finalize_status(units_data, st, cfg, ignore_mismatch=ignore_mismatch)
             st["current_step"] = None
