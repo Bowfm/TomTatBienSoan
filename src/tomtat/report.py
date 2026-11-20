@@ -36,16 +36,22 @@ HEADERS = [
 def infer_step_models_from_logs(ws: FileWorkspace, st: dict) -> dict[str, str]:
     """Trả về tên model đã chạy của từng bước {'label': ..., 'extract': ..., 'abstract': ..., 'judge': ...}."""
     out: dict[str, str] = {}
+    manual_label = isinstance(st.get("label"), dict) and bool(st["label"].get("manual_edited"))
     for step in ("label", "extract", "abstract", "judge"):
+        if step == "label" and manual_label:
+            continue
         sec = st.get(step)
         if isinstance(sec, dict) and sec.get("model_used"):
             out[step] = str(sec["model_used"])
-    if ws.logs_dir.exists() and len(out) < 4:
+    needed = 3 if manual_label else 4
+    if ws.logs_dir.exists() and len(out) < needed:
         import json
         for lp in sorted(ws.logs_dir.glob("*.json"), reverse=True)[:30]:
             try:
                 d = json.loads(lp.read_text(encoding="utf-8"))
                 step = d.get("step", "")
+                if step == "label" and manual_label:
+                    continue
                 if step in ("label", "extract", "abstract", "judge") and step not in out:
                     if d.get("parsed_ok") and d.get("model"):
                         out[step] = str(d["model"])

@@ -12,7 +12,7 @@ from ..docx_io import DocxError, fill_docx
 from ..llm import DEFAULT_TIMEOUT_S, get_model_timeout_s
 from ..memory import load_memory, record_approved_sample
 from ..models import FileState, UnitsData
-from ..pipeline import Pipeline, _mark_stale_after, finalize_status, process_file, step_inspect
+from ..pipeline import Pipeline, _mark_stale_after, finalize_status, process_file, step_inspect, sync_manual_label_metadata
 from ..report import _infer_model_from_logs, collect_rows, infer_step_models_from_logs, write_reports
 from ..state import (
     STATUS_APPROVED,
@@ -120,11 +120,12 @@ class FileService:
         abstract: str,
         selections: dict | None = None,
         custom_edited: bool | None = None,
+        cfg: dict | None = None,
     ) -> None:
         style = nfc(style).strip()
         extract = nfc(extract)
         abstract = nfc(abstract)
-        st.setdefault("label", {})["value"] = style
+        sync_manual_label_metadata(st, style, cfg)
         ext = st.setdefault("extract", {})
         if selections is not None:
             ext["selections"] = selections
@@ -181,6 +182,7 @@ class FileService:
             abstract,
             selections=selections,
             custom_edited=custom_edited,
+            cfg=self.cfg,
         )
         chk = run_checks(
             units_data,
@@ -284,6 +286,7 @@ class FileService:
                 abstract=str(current_draft.get("abstract", (st.get("abstract") or {}).get("text", ""))),
                 selections=current_draft.get("selections"),
                 custom_edited=current_draft.get("custom_edited"),
+                cfg=self.cfg,
             )
 
         if version is None:
@@ -344,6 +347,7 @@ class FileService:
         st["stale_reason"] = None
         st["error_message"] = None
         st["current_step"] = None
+        sync_manual_label_metadata(st, (st.get("label") or {}).get("value", ""), self.cfg)
         if "model_used" in snap:
             st["model_used"] = snap.get("model_used") or ""
         else:
@@ -399,7 +403,7 @@ class FileService:
         extract = nfc(extract)
         abstract = nfc(abstract)
 
-        self._apply_draft_fields(st, units_data, style, extract, abstract)
+        self._apply_draft_fields(st, units_data, style, extract, abstract, cfg=self.cfg)
         chk = run_checks(units_data, style, extract, abstract, self.cfg)
         st["checks"] = chk.to_dict()
 
@@ -575,6 +579,7 @@ class FileService:
             raise FileNotFoundError(f"Không tìm thấy file '{stem}'.")
         docx_path = files_map[stem]
         ws, st, units_data = self.inspect_file(docx_path)
+        sync_manual_label_metadata(st, (st.get("label") or {}).get("value", ""), self.cfg)
         if units_data:
             chk = run_checks(
                 units_data,
@@ -586,6 +591,8 @@ class FileService:
             st["checks"] = chk.to_dict()
         step_models = infer_step_models_from_logs(ws, st)
         for step_name, m_name in step_models.items():
+            if step_name == "label" and isinstance(st.get("label"), dict) and st["label"].get("manual_edited"):
+                continue
             if isinstance(st.get(step_name), dict) and not st[step_name].get("model_used"):
                 st[step_name]["model_used"] = m_name
         if not st.get("model_used"):

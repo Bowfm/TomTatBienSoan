@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import threading
 import time
 from datetime import datetime
@@ -79,6 +80,10 @@ class GeminiClient(BaseClient):
         self._idle_429_strikes: dict[tuple[str, str], int] = {}  # đếm số lần lỗi 429 theo từng cặp (key, model)
         self._model_cursor: dict[str, int] = {}  # model -> chỉ số key tiếp theo sẽ gọi (gọi tuần tự #1 -> #N rồi quay vòng)
         self._payload_next_ts: dict[str, float] = {}  # payload_sig -> thời điểm sớm nhất được gửi lại payload giống nhau
+        self._global_qps_next_ts: float = 0.0  # thời điểm sớm nhất cổng chung hết hạ nhiệt sau lỗi 429 QPS
+        self._dispatch_slots: list[float] = []  # mốc thời gian gửi API gần nhất/đã đặt chỗ trên toàn bộ luồng
+        self._model_503_streak: dict[str, int] = {}  # số lần lỗi 503/tạm thời liên tiếp trên toàn pool theo từng model
+        self._model_outage_until: dict[str, float] = {}  # model -> timestamp hết thời gian tạm hạ nhiệt sau bão 503
 
         self._api_key = self._api_keys[0]
         self._tls_timeout = threading.local()
@@ -104,6 +109,11 @@ class GeminiClient(BaseClient):
             "backoff_max_s": g.get("backoff_max_s"),
             "max_rounds_per_model": g.get("max_rounds_per_model"),
             "max_timeouts_per_model": g.get("max_timeouts_per_model"),
+            "max_transient_per_model": g.get("max_transient_per_model"),
+            "model_outage_threshold": g.get("model_outage_threshold"),
+            "model_outage_cooldown_s": g.get("model_outage_cooldown_s"),
+            "global_min_dispatch_interval_s": g.get("global_min_dispatch_interval_s"),
+            "qps_global_cooldown_s": g.get("qps_global_cooldown_s"),
         }
 
     def _apply_gemini_config(self, g: dict) -> None:
@@ -130,6 +140,26 @@ class GeminiClient(BaseClient):
             self.max_timeouts_per_model = max(0, int(g.get("max_timeouts_per_model", 2)))
         except (TypeError, ValueError):
             self.max_timeouts_per_model = 2
+        try:
+            self.max_transient_per_model = max(0, int(g.get("max_transient_per_model", 8)))
+        except (TypeError, ValueError):
+            self.max_transient_per_model = 8
+        try:
+            self.model_outage_threshold = max(0, int(g.get("model_outage_threshold", 5)))
+        except (TypeError, ValueError):
+            self.model_outage_threshold = 5
+        try:
+            self.model_outage_cooldown_s = max(0.0, float(g.get("model_outage_cooldown_s", 30.0)))
+        except (TypeError, ValueError):
+            self.model_outage_cooldown_s = 30.0
+        try:
+            self.global_min_dispatch_interval_s = max(0.0, float(g.get("global_min_dispatch_interval_s", 1.5)))
+        except (TypeError, ValueError):
+            self.global_min_dispatch_interval_s = 1.5
+        try:
+            self.qps_global_cooldown_s = max(0.0, float(g.get("qps_global_cooldown_s", 15.0)))
+        except (TypeError, ValueError):
+            self.qps_global_cooldown_s = 15.0
         self._cfg_gemini_snapshot = self._snapshot_gemini_cfg(g)
 
     def sync_config(self, new_cfg: dict | None = None) -> None:
@@ -197,9 +227,17 @@ class GeminiClient(BaseClient):
                     **({"reset_prefix": self._reset_prefix} if self._reset_prefix else {}),
                 }
                 self._exhausted_file.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self._exhausted_file.with_suffix(".tmp")
+                tmp = self._exhausted_file.with_suffix(f".{threading.get_ident()}.tmp")
                 tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                os.replace(tmp, self._exhausted_file)
+                for attempt in range(4):
+                    try:
+                        os.replace(tmp, self._exhausted_file)
+                        break
+                    except PermissionError:
+                        if attempt == 3:
+                            tmp.unlink(missing_ok=True)
+                            raise
+                        time.sleep(0.01 * (attempt + 1))
             except Exception:
                 pass
 
@@ -218,6 +256,10 @@ class GeminiClient(BaseClient):
             self._idle_429_strikes.clear()
             self._model_cursor.clear()
             self._payload_next_ts.clear()
+            self._global_qps_next_ts = 0.0
+            self._dispatch_slots.clear()
+            self._model_503_streak.clear()
+            self._model_outage_until.clear()
             self._reset_prefix = ""
             with _QUOTA_FILE_LOCK:
                 try:
@@ -615,7 +657,14 @@ class GeminiClient(BaseClient):
 
     def _reserve_payload_wait(self, payload_sig: str, min_wait_s: float = 0.0) -> float:
         """Giãn nhịp tối thiểu giữa các request có nội dung giống hệt nhau để tránh vượt QPS payload trùng lặp."""
-        min_gap = min(1.2, self.backoff_max) if self.backoff_max > 0.1 else 0.0
+        if self.backoff_max >= 2.0:
+            min_gap = min(self.backoff_max, max(3.5, self.backoff_base * 1.5))
+        elif self.backoff_max > 0.5:
+            min_gap = min(self.backoff_max, max(0.05, self.backoff_base * 1.5))
+        elif self.backoff_max > 0.1:
+            min_gap = min(1.2, self.backoff_max)
+        else:
+            min_gap = 0.0
         with self._key_lock:
             now = time.time()
             if len(self._payload_next_ts) > 64:
@@ -627,20 +676,82 @@ class GeminiClient(BaseClient):
                 self._payload_next_ts[payload_sig] = earliest_start + min_gap
             return max(0.0, earliest_start - now)
 
+    def _reserve_gateway_wait(self, min_wait_s: float = 0.0) -> float:
+        """Giãn nhịp toàn cục giữa các luồng và tôn trọng cooldown cổng API khi vừa gặp 429 QPS."""
+        if self.backoff_max <= 0.5:
+            return 0.0
+        with self._key_lock:
+            now = time.time()
+            base_ts = now + max(0.0, min_wait_s)
+            earliest = max(base_ts, self._global_qps_next_ts)
+            dispatch_gap = self.global_min_dispatch_interval_s if len(self._api_keys) > 1 else 0.0
+            if dispatch_gap > 0.0:
+                cutoff = now - 10.0
+                slots = sorted(t for t in self._dispatch_slots if t > cutoff)
+                t_cand = earliest
+                for s in slots:
+                    if t_cand + dispatch_gap <= s:
+                        break
+                    if abs(t_cand - s) < dispatch_gap:
+                        t_cand = s + dispatch_gap
+                if t_cand > earliest:
+                    t_cand += random.uniform(0.05, 0.25)
+                slots.append(t_cand)
+                self._dispatch_slots = slots
+                earliest = t_cand
+            return max(0.0, earliest - now)
+
     def _schedule_payload_qps_backoff(self, payload_sig: str, qps_hits: int) -> float:
-        """Đặt thời gian lùi lũy thừa theo payload khi gặp lỗi 429 QPS payload trùng lặp."""
+        """Đặt thời gian lùi lũy thừa theo payload (kèm hạ nhiệt cổng chung) khi gặp lỗi 429 QPS."""
         if self.backoff_base <= 0:
             qps_backoff = 0.0
         elif self.backoff_max <= 0.5:
             qps_backoff = min(self.backoff_max, self.backoff_base * (2 ** min(max(0, qps_hits - 1), 3)))
+        elif self.backoff_max < 2.0:
+            raw_exp = self.backoff_base * (2 ** min(max(0, qps_hits), 4))
+            qps_backoff = min(self.backoff_max, raw_exp)
         else:
-            qps_backoff = min(max(self.backoff_max, 12.0), max(2.0, self.backoff_base * (2 ** min(max(0, qps_hits - 1), 3))))
+            raw_exp = max(4.0, self.backoff_base * (2 ** min(max(0, qps_hits), 4)))
+            qps_backoff = min(30.0, raw_exp) + random.uniform(0.2, 1.2)
         if qps_backoff > 0.0:
             with self._key_lock:
-                target = time.time() + qps_backoff
+                now = time.time()
+                target = now + qps_backoff
                 if target > self._payload_next_ts.get(payload_sig, 0.0):
                     self._payload_next_ts[payload_sig] = target
+                if self.backoff_max > 0.5 and self.qps_global_cooldown_s > 0.0:
+                    global_cd = min(self.qps_global_cooldown_s, max(4.0, qps_backoff))
+                    g_target = now + global_cd
+                    if g_target > self._global_qps_next_ts:
+                        self._global_qps_next_ts = g_target
         return qps_backoff
+
+    def _has_non_outage_fallback_unlocked(self, cur_model: str, now: float) -> bool:
+        """Kiểm tra có model dự phòng nào còn key khả dụng và không đang hạ nhiệt bão 503 không (gọi trong _key_lock)."""
+        for m in self.models_chain:
+            if m == cur_model:
+                continue
+            if self._model_outage_until.get(m, 0.0) > now:
+                continue
+            if any((k, m) not in self._exhausted for k in self._api_keys):
+                return True
+        return False
+
+    def _ordered_models_for_call(self) -> list[str]:
+        """Ưu tiên các model không đang trong giai đoạn hạ nhiệt bão 503; model đang hạ nhiệt dồn xuống cuối làm phương án cuối."""
+        with self._key_lock:
+            if self.backoff_max <= 0.5 or not self._model_outage_until:
+                return list(self.models_chain)
+            now = time.time()
+            self._model_outage_until = {m: ts for m, ts in self._model_outage_until.items() if ts > now}
+            if not self._model_outage_until:
+                return list(self.models_chain)
+            healthy = [m for m in self.models_chain if m not in self._model_outage_until]
+            cooling = sorted(
+                (m for m in self.models_chain if m in self._model_outage_until),
+                key=lambda m: self._model_outage_until[m],
+            )
+            return healthy + cooling
 
     def _raise_cancelled_log(
         self,
@@ -686,6 +797,7 @@ class GeminiClient(BaseClient):
         log_dir: Path | None,
         log_path: Path | None,
     ) -> tuple[str, dict, object]:
+        sem = self._semaphore
         acquired_sem = False
         while not acquired_sem:
             if cancel_ev.is_set():
@@ -693,7 +805,7 @@ class GeminiClient(BaseClient):
                     record, log_dir, log_path, t_init,
                     in_flight=False, cur_key=cur_key, cur_model=cur_model, scheduled_ts=scheduled_ts,
                 )
-            acquired_sem = self._semaphore.acquire(timeout=0.1)
+            acquired_sem = sem.acquire(timeout=0.1)
         try:
             if cancel_ev.is_set():
                 self._raise_cancelled_log(
@@ -737,7 +849,7 @@ class GeminiClient(BaseClient):
             return res_box[0]
         finally:
             if acquired_sem:
-                self._semaphore.release()
+                sem.release()
 
     def generate_json(self, step, system, prompt, schema, *, log_dir=None, attempt=0, context=None):
         """Gọi model theo chiến lược TUẦN TỰ:
@@ -761,7 +873,7 @@ class GeminiClient(BaseClient):
             f"{step}\0{system or ''}\0{prompt or ''}".encode("utf-8", errors="replace")
         ).hexdigest()[:24]
 
-        for cur_model in self.models_chain:
+        for cur_model in self._ordered_models_for_call():
             check_not_cancelled(cancel_ev)
             if not self._has_available_key(cur_model):
                 continue  # toàn bộ key đã hết RPD cho model này -> model kế tiếp
@@ -771,6 +883,7 @@ class GeminiClient(BaseClient):
             skip_model = False
             qps_streak = 0
             timeouts_on_model = 0
+            transient_on_model = 0
 
             while not skip_model:
                 check_not_cancelled(cancel_ev)
@@ -789,13 +902,19 @@ class GeminiClient(BaseClient):
                     continue
 
                 payload_wait_s = self._reserve_payload_wait(payload_sig, min_wait_s=wait_s)
-                eff_wait_s = max(wait_s, payload_wait_s)
+                gateway_wait_s = self._reserve_gateway_wait(min_wait_s=max(wait_s, payload_wait_s))
+                eff_wait_s = max(wait_s, payload_wait_s, gateway_wait_s)
 
                 tried_this_round.add(cur_key)
                 net_try += 1
                 key_lbl = self._key_label(cur_key)
                 call_timeout = self._compute_call_timeout_s(
                     cur_model, system, prompt, timeout_retries=timeouts_on_model
+                )
+                call_prompt = (
+                    prompt
+                    if (global_qps_hits == 0 or self.backoff_max <= 0.5)
+                    else f"{prompt}\n\n[Phiên thử lại #{net_try} · {cur_model}]"
                 )
                 t_init = time.time()
                 record = {
@@ -822,6 +941,7 @@ class GeminiClient(BaseClient):
                 if eff_wait_s > 0:
                     with self._key_lock:
                         cooldown_before_wait = self._key_cooldown.get(cur_key, 0.0)
+                        outage_before_wait = self._model_outage_until.get(cur_model, 0.0)
                     if cancel_ev is not None:
                         if cancel_ev.wait(timeout=eff_wait_s + 0.05):
                             self._raise_cancelled_log(
@@ -830,23 +950,32 @@ class GeminiClient(BaseClient):
                             )
                     else:
                         time.sleep(eff_wait_s + 0.05)
-                    # Trong lúc ngủ chờ, luồng khác có thể đã đánh dấu key này cạn RPD hoặc phạt cooldown mới
+                    # Trong lúc ngủ chờ, luồng khác có thể đã đánh dấu key cạn RPD, phạt cooldown mới hoặc model vào bão 503
                     with self._key_lock:
                         now_after_wait = time.time()
                         cur_cd = self._key_cooldown.get(cur_key, 0.0)
+                        cur_outage = self._model_outage_until.get(cur_model, 0.0)
+                        entered_outage = (
+                            self.backoff_max > 0.5
+                            and cur_outage > outage_before_wait
+                            and cur_outage > now_after_wait
+                            and self._has_non_outage_fallback_unlocked(cur_model, now_after_wait)
+                        )
                         became_unusable = (
                             (cur_key, cur_model) in self._exhausted
                             or (cur_cd > cooldown_before_wait and cur_cd > now_after_wait)
                         )
-                    if became_unusable:
+                    if entered_outage or became_unusable:
                         self._release_reserved_slot(cur_key, cur_model, scheduled_ts)
                         record.update(
                             in_progress=False,
                             phase="done",
                             status="skipped",
-                            action="requeue_after_wait",
+                            action="fallback_model_outage" if entered_outage else "requeue_after_wait",
                         )
                         write_log(log_dir, record, self._api_keys, log_path=log_path)
+                        if entered_outage:
+                            break
                         continue
 
                 if cancel_ev is not None and cancel_ev.is_set():
@@ -870,13 +999,14 @@ class GeminiClient(BaseClient):
                     self._tls_timeout.value = call_timeout
                     try:
                         if cancel_ev is None:
-                            with self._semaphore:
+                            sem = self._semaphore
+                            with sem:
                                 t_call = time.time()
                                 self._update_call_timestamp(cur_key, cur_model, scheduled_ts, t_call)
-                                text, usage, status = self._call_once(cur_model, step, system, prompt, schema, client=cur_client)
+                                text, usage, status = self._call_once(cur_model, step, system, call_prompt, schema, client=cur_client)
                         else:
                             text, usage, status = self._call_once_cancellable(
-                                cancel_ev, cur_model, step, system, prompt, schema, cur_client,
+                                cancel_ev, cur_model, step, system, call_prompt, schema, cur_client,
                                 cur_key, scheduled_ts, t_init, t0, record, log_dir, log_path,
                             )
                     finally:
@@ -884,6 +1014,8 @@ class GeminiClient(BaseClient):
                     qps_streak = 0
                     with self._key_lock:
                         self._idle_429_strikes.pop((cur_key, cur_model), None)
+                        self._model_503_streak.pop(cur_model, None)
+                        self._model_outage_until.pop(cur_model, None)
                     self._increment_rpd(cur_model, cur_key)
                     dur = time.time() - t0
                     record.update(
@@ -1028,7 +1160,41 @@ class GeminiClient(BaseClient):
                     if _is_connection_error(exc, err_lower):
                         self._evict_client(cur_key)
                     if is_transient(exc) or st_code is None:
-                        # 503 high demand / 5xx / lỗi kết nối tạm: model chưa hết RPD, chuyển key kế tiếp, vòng sau thử lại
+                        # 503 high demand / 5xx / lỗi kết nối tạm: giãn nhịp payload, ngắt mạch khi bão 503 để bảo toàn RPD
+                        transient_on_model += 1
+                        record["transient_retry"] = transient_on_model
+                        hit_outage_breaker = False
+                        if self.backoff_max > 0.5:
+                            raw_tr = max(0.0, self.backoff_base * (1.5 ** min(max(0, transient_on_model - 1), 3)))
+                            tr_jitter = random.uniform(0.05, min(0.6, self.backoff_max * 0.25))
+                            tr_wait = min(self.backoff_max, raw_tr + tr_jitter)
+                            with self._key_lock:
+                                now_tr = time.time()
+                                if now_tr + tr_wait > self._payload_next_ts.get(payload_sig, 0.0):
+                                    self._payload_next_ts[payload_sig] = now_tr + tr_wait
+                                streak = self._model_503_streak.get(cur_model, 0) + 1
+                                self._model_503_streak[cur_model] = streak
+                                if self.model_outage_threshold and streak >= self.model_outage_threshold:
+                                    if self.model_outage_cooldown_s > 0.0:
+                                        self._model_outage_until[cur_model] = now_tr + self.model_outage_cooldown_s
+                                    self._model_503_streak[cur_model] = 0
+                                    if self._has_non_outage_fallback_unlocked(cur_model, now_tr):
+                                        hit_outage_breaker = True
+                                elif (
+                                    self._model_outage_until.get(cur_model, 0.0) > now_tr
+                                    and self._has_non_outage_fallback_unlocked(cur_model, now_tr)
+                                ):
+                                    hit_outage_breaker = True
+                        if hit_outage_breaker:
+                            record["action"] = "fallback_model_outage"
+                            write_log(log_dir, record, self._api_keys, log_path=log_path)
+                            skip_model = True
+                            continue
+                        if self.max_transient_per_model and transient_on_model >= self.max_transient_per_model:
+                            record["action"] = "fallback_transient"
+                            write_log(log_dir, record, self._api_keys, log_path=log_path)
+                            skip_model = True
+                            continue
                         record["action"] = "next_key"
                         write_log(log_dir, record, self._api_keys, log_path=log_path)
                         continue

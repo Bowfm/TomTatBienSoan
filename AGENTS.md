@@ -26,4 +26,4 @@ Mọi phiên làm việc, sửa lỗi (debug), hoặc nâng cấp trong repo `d:
 - `updater.py` không bao giờ báo có bản cập nhật mới khi commit local mới hơn `origin/main` (`_is_git_ancestor`), và ZIP update tuyệt đối bảo vệ `PROTECTED_ENTRIES` (`input`, `output`, `work`, `.venv`, `.env`, `api_keys.txt`).
 - `setup.bat` tránh bọc khối lệnh chứa biến đường dẫn trong `if (...)` dễ văng `cmd.exe` khi gặp dấu ngoặc; `khoi_dong.bat` không chặn khởi động bằng auto-update đồng bộ.
 - `B/T <= 70%` (`abstract.ratio_limit = 0.70`, `allow_longer_below_words = 0`) luôn là bất biến ở tầng kiểm tra độ dài biên soạn.
-- Xử lý song song tối đa `max_workers` (hiện là 2) file, chặn ở cả config/UI/API/CLI; pacing `(key, model)` đặt chỗ dưới `_key_lock` đảm bảo `<= 60/min_interval_s < rpm_limit` RPM/key bất kể số luồng (BUG-014).
+- Xử lý song song tối đa `max_workers` (hiện là 3) file, chặn ở cả config/UI/API/CLI; pacing `(key, model)` đặt chỗ dưới `_key_lock` đảm bảo `<= 60/min_interval_s < rpm_limit` RPM/key bất kể số luồng (BUG-014), kèm giãn nhịp cổng toàn cục chống `429 QPS` và mạch ngắt bão `503` tiết kiệm RPD (BUG-027).

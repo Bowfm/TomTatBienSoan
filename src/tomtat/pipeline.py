@@ -1,6 +1,7 @@
 """Pipeline xử lý từng file .docx: inspect -> label -> extract -> abstract -> judge."""
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 import threading
 
@@ -40,9 +41,11 @@ from .units import (
 )
 
 STEPS_ORDER = ("inspect", "label", "extract", "abstract", "judge")
+LABEL_REVIEW_FLAG = "Cần xem kỹ nhãn phong cách (mức chắc chắn thấp/trung bình hoặc lệch đa số)."
 
 __all__ = [
     "STEPS_ORDER",
+    "LABEL_REVIEW_FLAG",
     "Pipeline",
     "process_file",
     "step_inspect",
@@ -51,6 +54,7 @@ __all__ = [
     "step_abstract",
     "step_judge",
     "finalize_status",
+    "sync_manual_label_metadata",
 ]
 
 
@@ -103,6 +107,123 @@ def _clear_stale(st: dict, step: str) -> None:
     st["stale_steps"] = stale
     if not stale:
         st["stale_reason"] = None
+
+
+def _ai_label_baseline(lb: dict) -> str:
+    """Trả về nhãn gốc do AI gán (nếu có) để phân biệt chỉnh sửa thủ công và giữ nguyên/hoàn tác."""
+    for candidate in (
+        lb.get("ai_value"),
+        lb.get("computed_majority") if lb.get("computed_majority") in STYLES else "",
+        lb.get("model_label") if lb.get("model_label") in STYLES else "",
+    ):
+        val = nfc(str(candidate or "")).strip()
+        if val:
+            return val
+    return ""
+
+
+def _snapshot_ai_label_fields(lb: dict, fallback_value: str) -> None:
+    """Lưu lại thông tin nhãn AI ban đầu một lần trước khi ghi đè bằng lựa chọn thủ công."""
+    if "ai_value" in lb:
+        return
+    lb["ai_value"] = fallback_value
+    lb["ai_reason"] = lb.get("reason", "")
+    lb["ai_confidence"] = lb.get("confidence", "")
+    lb["ai_per_doc"] = copy.deepcopy(lb.get("per_doc") or [])
+    lb["ai_model_used"] = lb.get("model_used")
+
+
+def sync_manual_label_metadata(st: dict, new_style: str, cfg: dict | None = None) -> bool:
+    """Đồng bộ phần giải thích/độ chắc chắn khi người dùng chỉnh sửa phong cách thủ công.
+
+    - Nếu đổi sang phong cách khác với gợi ý ban đầu của AI (hoặc tự chọn khi chưa có AI):
+      lưu giữ dữ liệu AI ban đầu vào các trường `ai_*` (phục vụ tự học & hoàn tác),
+      cập nhật `reason` rõ ràng theo phong cách mới, đặt `confidence="thu_cong"`,
+      `manual_edited=True`, xóa `per_doc`/`model_used` cũ và gỡ cờ cảnh báo xem lại nhãn AI.
+    - Nếu chọn lại đúng nhãn AI ban đầu: khôi phục giải thích/độ chắc chắn/cờ AI gốc.
+    - Nếu không thay đổi so với trạng thái hiện tại: giữ nguyên (no-op).
+    """
+    lb = st.setdefault("label", {})
+    prev_val = nfc(str(lb.get("value") or "")).strip()
+    new_val = nfc(str(new_style or "")).strip()
+    ai_val = _ai_label_baseline(lb)
+
+    # State hoặc test cũ chỉ lưu value + reason/confidence mà chưa có model_label/computed_majority
+    if (
+        not lb.get("manual_edited")
+        and not ai_val
+        and prev_val
+        and new_val != prev_val
+        and (lb.get("reason") or lb.get("confidence") or lb.get("model_used") or lb.get("per_doc"))
+    ):
+        ai_val = prev_val
+
+    has_legacy_mismatch = bool(
+        not lb.get("manual_edited")
+        and ai_val
+        and new_val
+        and new_val != ai_val
+    )
+    style_changed = new_val != prev_val
+
+    if not style_changed and not has_legacy_mismatch:
+        return False
+
+    if not new_val:
+        if not lb.get("manual_edited") and ai_val:
+            _snapshot_ai_label_fields(lb, ai_val)
+        lb["value"] = ""
+        lb["manual_edited"] = False
+        lb["confidence"] = ""
+        lb["reason"] = ""
+        lb["per_doc"] = []
+        lb["model_used"] = None
+        _remove_flag(st, LABEL_REVIEW_FLAG)
+        return True
+
+    if ai_val and new_val == ai_val:
+        if lb.get("manual_edited") or "ai_reason" in lb or "ai_confidence" in lb:
+            restored_conf = lb.pop("ai_confidence", lb.get("confidence", ""))
+            lb["value"] = new_val
+            lb["manual_edited"] = False
+            lb["reason"] = lb.pop("ai_reason", "")
+            lb["confidence"] = restored_conf
+            lb["per_doc"] = lb.pop("ai_per_doc", [])
+            lb["model_used"] = lb.pop("ai_model_used", None)
+            lb.pop("ai_value", None)
+
+            ok_conf = set(((cfg or {}).get("label") or {}).get("ok_confidence", ["cao"]))
+            raw_lb = nfc(str(lb.get("model_label") or "")).strip()
+            maj_lb = nfc(str(lb.get("computed_majority") or "")).strip()
+            _remove_flag(st, LABEL_REVIEW_FLAG)
+            if (restored_conf and restored_conf not in ok_conf) or (
+                raw_lb in STYLES and maj_lb in STYLES and raw_lb != maj_lb
+            ):
+                _add_flag(st, LABEL_REVIEW_FLAG)
+        else:
+            lb["value"] = new_val
+        return True
+
+    if not lb.get("manual_edited") and (
+        ai_val or lb.get("reason") or lb.get("confidence") or lb.get("model_used") or lb.get("per_doc")
+    ):
+        _snapshot_ai_label_fields(lb, ai_val or prev_val)
+
+    ai_hint = nfc(str(lb.get("ai_value") or ai_val or "")).strip()
+    lb["value"] = new_val
+    lb["manual_edited"] = True
+    lb["confidence"] = "thu_cong"
+    lb["per_doc"] = []
+    lb["model_used"] = None
+    if ai_hint and ai_hint != new_val:
+        lb["reason"] = (
+            f"Người duyệt đã chỉnh sửa thủ công sang phong cách '{new_val}' "
+            f"(trước đó AI gợi ý '{ai_hint}')."
+        )
+    else:
+        lb["reason"] = f"Người duyệt đã chọn thủ công phong cách '{new_val}'."
+    _remove_flag(st, LABEL_REVIEW_FLAG)
+    return True
 
 
 # ------------------------------------------------------------------ Bước 0: inspect
@@ -176,9 +297,9 @@ def step_label(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
 
     conf = nfc(out.get("confidence", "trung_binh")).strip()
     ok_conf = set(cfg.get("label", {}).get("ok_confidence", ["cao"]))
-    _remove_flag(st, "Cần xem kỹ nhãn phong cách (mức chắc chắn thấp/trung bình hoặc lệch đa số).")
+    _remove_flag(st, LABEL_REVIEW_FLAG)
     if conf not in ok_conf or (raw_label in STYLES and majority in STYLES and raw_label != majority):
-        _add_flag(st, "Cần xem kỹ nhãn phong cách (mức chắc chắn thấp/trung bình hoặc lệch đa số).")
+        _add_flag(st, LABEL_REVIEW_FLAG)
 
     st["label"] = {
         "value": final_label,
@@ -188,6 +309,7 @@ def step_label(ws: FileWorkspace, units_data: UnitsData, client: BaseClient,
         "confidence": conf,
         "reason": nfc(out.get("reason", "")).strip(),
         "model_used": res.model,
+        "manual_edited": False,
     }
     st["model_used"] = res.model
     if st.get("status") not in DONE_STATUSES:
@@ -639,6 +761,12 @@ def process_file(docx_path: Path, cfg: dict, client: BaseClient, *,
                     units_data = step_inspect(ws, cfg, st)
                 if only_step != "inspect":
                     check_not_cancelled(eff_cancel)
+                    if only_step in ("extract", "extract_abstract", "abstract", "judge"):
+                        sync_manual_label_metadata(
+                            st,
+                            (st.get("label") or {}).get("value", ""),
+                            cfg,
+                        )
                     _backup_before_ai(only_step)
                 prev_label = nfc(str((st.get("label") or {}).get("value") or "")).strip()
                 label_changed = False

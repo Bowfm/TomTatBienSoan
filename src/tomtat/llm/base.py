@@ -644,22 +644,25 @@ class BaseClient:
     model = "base"
     _semaphore: threading.Semaphore | None = None
     _sem_limit: int = 0
+    _sem_lock: threading.Lock = threading.Lock()
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
         from ..config import get_pool_scaling
         scaling = get_pool_scaling(cfg)
         limit = max(1, int(scaling["max_concurrent_calls"]))
-        if BaseClient._semaphore is None or BaseClient._sem_limit != limit:
-            BaseClient._semaphore = threading.Semaphore(limit)
-            BaseClient._sem_limit = limit
+        with BaseClient._sem_lock:
+            if BaseClient._semaphore is None or BaseClient._sem_limit != limit:
+                BaseClient._semaphore = threading.Semaphore(limit)
+                BaseClient._sem_limit = limit
 
     @classmethod
     def ensure_concurrency_limit(cls, min_limit: int) -> None:
         """Đảm bảo semaphore toàn cục cho phép ít nhất `min_limit` luồng gọi API song song."""
-        if min_limit > cls._sem_limit:
-            cls._semaphore = threading.Semaphore(min_limit)
-            cls._sem_limit = min_limit
+        with cls._sem_lock:
+            if cls._semaphore is None or min_limit > cls._sem_limit:
+                cls._semaphore = threading.Semaphore(min_limit)
+                cls._sem_limit = min_limit
 
     def generate_json(self, step: str, system: str, prompt: str, schema: dict, *,
                       log_dir: Path | None = None, attempt: int = 0,

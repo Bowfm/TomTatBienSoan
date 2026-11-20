@@ -7,6 +7,7 @@ import time
 from flask import Blueprint, Response, current_app, jsonify, request
 
 from ...llm import get_rpd_status
+from ...pipeline import sync_manual_label_metadata
 from ...services.file_service import FileService
 from ...textutil import count_words, nfc
 from ..batch import BatchManager, make_client
@@ -182,8 +183,8 @@ def api_rerun(stem: str):
             st = ws.load_state()
             changed = False
             if payload.get("style"):
-                st.setdefault("label", {})["value"] = nfc(payload["style"]).strip()
-                changed = True
+                if sync_manual_label_metadata(st, payload["style"], cfg):
+                    changed = True
             if payload.get("extract") is not None and step in ("abstract", "judge"):
                 st.setdefault("extract", {})["text"] = nfc(payload["extract"])
                 st["extract"]["words"] = count_words(st["extract"]["text"])

@@ -319,7 +319,74 @@ export async function onStyleChange() {
   clearTimeout(checkTimer);
   syncVersionControls();
   await runLiveCheck();
-  await autoSaveSilent({ refreshFlags: true });
+  await autoSaveSilent({ refreshFlags: true, refreshLabel: true });
+}
+
+function setStepBadge(elId, modelName) {
+  const el = $(elId);
+  if (!el) return;
+  if (modelName) {
+    el.textContent = `🤖 ${modelName}`;
+    el.style.background = "#dbeafe";
+    el.style.color = "#1e40af";
+    el.classList.remove("hidden");
+  } else {
+    el.textContent = "";
+    el.classList.add("hidden");
+  }
+}
+
+export function renderSummaryMeta(st, u) {
+  if (!st || !u || !$("cur-meta")) return;
+  const nDocs = (u.docs || []).length;
+  const lb = st.label || {};
+  const isManualLabel = Boolean(lb.manual_edited || lb.confidence === "thu_cong");
+  const mLabel = isManualLabel ? "" : lb.model_used;
+  const mExt = (st.extract || {}).model_used;
+  const mAbs = (st.abstract || {}).model_used;
+  const modelParts = [];
+  if (mLabel) modelParts.push(`Nhãn: ${mLabel}`);
+  else if (isManualLabel && (mExt || mAbs)) modelParts.push("Nhãn: thủ công");
+  if (mExt) modelParts.push(`Trích: ${mExt}`);
+  if (mAbs) modelParts.push(`Biên soạn: ${mAbs}`);
+  const modelSummary = modelParts.length
+    ? ` · 🤖 Model đã chạy: ${modelParts.join(" | ")}`
+    : st.model_used
+      ? ` · 🤖 Model: ${st.model_used}`
+      : "";
+  $("cur-meta").textContent = `${nDocs > 1 ? "Đa văn bản" : "Đơn văn bản"} (${nDocs} văn bản, ${u.budget.total_words} từ gốc)${modelSummary}`;
+}
+
+export function renderLabelSection(st, opts = {}) {
+  const lb = (st && st.label) || {};
+  const isManual = Boolean(lb.manual_edited || lb.confidence === "thu_cong");
+  setStepBadge("model-badge-label", isManual ? "" : lb.model_used);
+  if (!opts.skipSelectValue && $("sel-style")) {
+    $("sel-style").value = lb.value || "";
+  }
+  const confEl = $("label-conf");
+  if (confEl) {
+    if (isManual) {
+      confEl.textContent = "👤 Người duyệt chỉnh sửa";
+      confEl.title = lb.ai_confidence ? `Độ chắc chắn ban đầu của AI: ${lb.ai_confidence}` : "";
+    } else {
+      confEl.textContent = lb.confidence ? `Độ chắc chắn: ${lb.confidence}` : "Chưa có độ chắc chắn";
+      confEl.title = "";
+    }
+  }
+  if ($("label-reason")) {
+    $("label-reason").textContent = lb.reason || "";
+  }
+  const perDocDiv = $("label-per-doc");
+  if (perDocDiv) {
+    if (!isManual && lb.per_doc && lb.per_doc.length > 1) {
+      perDocDiv.innerHTML = lb.per_doc
+        .map((p) => `<div>- Văn bản ${p.doc} (${p.words} từ): <strong>${escapeHtml(p.label)}</strong> — ${escapeHtml(p.reason || "")}</div>`)
+        .join("");
+    } else {
+      perDocDiv.innerHTML = "";
+    }
+  }
 }
 
 export function renderEditor(versions) {
@@ -329,20 +396,9 @@ export function renderEditor(versions) {
   const st = store.CURRENT_STATE;
   const u = store.CURRENT_UNITS;
   $("cur-filename").textContent = st.file;
-  const nDocs = (u.docs || []).length;
-  const mLabel = (st.label || {}).model_used;
   const mExt = (st.extract || {}).model_used;
   const mAbs = (st.abstract || {}).model_used;
-  const modelParts = [];
-  if (mLabel) modelParts.push(`Nhãn: ${mLabel}`);
-  if (mExt) modelParts.push(`Trích: ${mExt}`);
-  if (mAbs) modelParts.push(`Biên soạn: ${mAbs}`);
-  const modelSummary = modelParts.length
-    ? ` · 🤖 Model đã chạy: ${modelParts.join(" | ")}`
-    : st.model_used
-      ? ` · 🤖 Model: ${st.model_used}`
-      : "";
-  $("cur-meta").textContent = `${nDocs > 1 ? "Đa văn bản" : "Đơn văn bản"} (${nDocs} văn bản, ${u.budget.total_words} từ gốc)${modelSummary}`;
+  renderSummaryMeta(st, u);
 
   const pill = $("cur-status");
   pill.textContent = st.status_vi;
@@ -358,35 +414,9 @@ export function renderEditor(versions) {
   $("ai-extract-ref").textContent = u.ai_extract || "(trống)";
   $("ai-abstract-ref").textContent = u.ai_abstract || "(trống)";
 
-  const setStepBadge = (elId, modelName) => {
-    const el = $(elId);
-    if (!el) return;
-    if (modelName) {
-      el.textContent = `🤖 ${modelName}`;
-      el.style.background = "#dbeafe";
-      el.style.color = "#1e40af";
-      el.classList.remove("hidden");
-    } else {
-      el.textContent = "";
-      el.classList.add("hidden");
-    }
-  };
-  setStepBadge("model-badge-label", mLabel);
   setStepBadge("model-badge-extract", mExt);
   setStepBadge("model-badge-abstract", mAbs);
-
-  const lb = st.label || {};
-  $("sel-style").value = lb.value || "";
-  $("label-conf").textContent = lb.confidence ? `Độ chắc chắn: ${lb.confidence}` : "Chưa có độ chắc chắn";
-  $("label-reason").textContent = lb.reason || "";
-  const perDocDiv = $("label-per-doc");
-  if (lb.per_doc && lb.per_doc.length > 1) {
-    perDocDiv.innerHTML = lb.per_doc
-      .map((p) => `<div>- Văn bản ${p.doc} (${p.words} từ): <strong>${escapeHtml(p.label)}</strong> — ${escapeHtml(p.reason || "")}</div>`)
-      .join("");
-  } else {
-    perDocDiv.innerHTML = "";
-  }
+  renderLabelSection(st);
 
   $("txt-extract").value = (st.extract || {}).text || "";
   $("txt-abstract").value = (st.abstract || {}).text || "";
@@ -772,22 +802,46 @@ export async function autoSaveSilent(opts = {}) {
       method: "POST",
       body: JSON.stringify(body),
     });
-    if (data && data.state && store.CURRENT_STATE && store.CURRENT_STATE.stem === store.CURRENT_STEM) {
+    if (
+      data &&
+      data.state &&
+      store.CURRENT_STATE &&
+      store.CURRENT_STATE.stem === store.CURRENT_STEM &&
+      !store.RUNNING_STEMS.has(store.CURRENT_STEM)
+    ) {
       const prevStale = JSON.stringify(store.CURRENT_STATE.stale_steps || []);
       const prevReason = store.CURRENT_STATE.stale_reason || null;
+      const prevFlags = JSON.stringify(store.CURRENT_STATE.flags || []);
+      const prevLabelSig = JSON.stringify(store.CURRENT_STATE.label || {});
       store.CURRENT_STATE.updated_at = data.state.updated_at;
       store.CURRENT_STATE.status = data.state.status;
       store.CURRENT_STATE.status_vi = data.state.status_vi;
       store.CURRENT_STATE.checks = data.state.checks;
-      store.CURRENT_STATE.label = data.state.label;
+      store.CURRENT_STATE.flags = data.state.flags || [];
       store.CURRENT_STATE.stale_steps = data.state.stale_steps || [];
       store.CURRENT_STATE.stale_reason = data.state.stale_reason || null;
+      const curSelectVal = $("sel-style") ? $("sel-style").value : "";
+      const respLabelVal = (data.state.label || {}).value || "";
+      if (curSelectVal === respLabelVal) {
+        store.CURRENT_STATE.label = data.state.label;
+      }
       if (Array.isArray(data.versions)) {
         store.CURRENT_VERSIONS = data.versions;
       }
       syncVersionControls();
       const nextStale = JSON.stringify(store.CURRENT_STATE.stale_steps || []);
-      if (opts.refreshFlags || prevStale !== nextStale || prevReason !== store.CURRENT_STATE.stale_reason) {
+      const nextFlags = JSON.stringify(store.CURRENT_STATE.flags || []);
+      const nextLabelSig = JSON.stringify(store.CURRENT_STATE.label || {});
+      if (opts.refreshLabel || prevLabelSig !== nextLabelSig) {
+        renderLabelSection(store.CURRENT_STATE, { skipSelectValue: true });
+        renderSummaryMeta(store.CURRENT_STATE, store.CURRENT_UNITS);
+      }
+      if (
+        opts.refreshFlags ||
+        prevStale !== nextStale ||
+        prevReason !== store.CURRENT_STATE.stale_reason ||
+        prevFlags !== nextFlags
+      ) {
         renderFlagsAndStale();
       }
     }

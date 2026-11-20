@@ -45,6 +45,11 @@ gemini:
     gemini-3.5-flash-lite: 180    # Tối đa 3 phút
     gemini-3.1-flash-lite: 180    # Tối đa 3 phút
   max_timeouts_per_model: 2       # tối đa số lần lỗi timeout mạng/server trên cùng 1 model trước khi trượt model kế tiếp (0 = không giới hạn)
+  max_transient_per_model: 8      # tối đa số lần lỗi 503/tạm thời liên tiếp trên cùng 1 model cho mỗi lượt gọi trước khi tạm trượt model kế tiếp (tiết kiệm RPD khi model chính nghẽn; 0 = không giới hạn)
+  model_outage_threshold: 5       # số lỗi 503 liên tiếp trên toàn pool để tạm hạ nhiệt model cho cả 3 luồng (tránh nối đuôi đốt RPD)
+  model_outage_cooldown_s: 30     # thời gian tạm hạ nhiệt model đang bão 503 (giây) trước khi thử thăm dò lại
+  global_min_dispatch_interval_s: 1.5  # giãn nhịp tối thiểu (giây) giữa mọi lượt gửi API trên toàn bộ các luồng (chống burst đồng thời gây 429 QPS)
+  qps_global_cooldown_s: 15       # thời gian hạ nhiệt cổng chung (giây) khi bất kỳ luồng nào gặp 429 QPS payload gần giống nhau
   max_retries: 2
   backoff_base_s: 2
   backoff_max_s: 10
@@ -53,13 +58,13 @@ gemini:
   max_concurrent_calls: auto      # "auto" = tự động tăng/giảm theo tổng số API keys trong api_keys.txt
   # Chiến lược gọi key TUẦN TỰ: mỗi model có 1 con trỏ, gọi lần lượt key #1 -> key cuối rồi quay vòng lại #1.
   #  - 429  -> đủ 3 lần trên cùng (key, model) mới đánh dấu hết RPD tới chu kỳ mới (15:00 VN)
-  #  - 503 / 5xx -> model đang quá tải, chuyển sang key kế tiếp, vòng sau thử lại
+  #  - 503 / 5xx -> model đang quá tải, giãn nhịp và đổi key kế tiếp; vượt ngưỡng max_transient_per_model hoặc bão 503 toàn pool thì tạm trượt sang model kế tiếp để bảo toàn RPD
   #  - Timeout -> tự nới timeout thử lại tối đa max_timeouts_per_model lần trên kết nối mới, sau đó trượt ngay sang model kế tiếp
   #  - Chỉ khi MỌI key đều hết RPD (hoặc model lỗi/quá tải liên tiếp) -> chuyển sang model kế tiếp trong fallback_models
   max_rounds_per_model: 3         # số vòng quét hết pool mà toàn bộ key đều lỗi 503/tạm thời trước khi tạm hạ model cho lượt gọi này (0 = quay vòng vô hạn)
 
-workers: 2      # xử lý 2 file song song; pacing (key, model) luôn giữ <= 60/min_interval_s RPM/key bất kể số luồng ("auto" = tự tính theo số key)
-max_workers: 2  # TRẦN CỨNG: giao diện / API / CLI không thể chạy quá số luồng này (kể cả khi workers: auto)
+workers: 3      # xử lý tối đa 3 file song song; có giãn nhịp toàn cục chống 429 QPS, ngắt mạch bão 503 bảo toàn RPD và pacing <= 60/min_interval_s RPM/key
+max_workers: 3  # TRẦN CỨNG: giao diện / API / CLI không thể chạy quá số luồng này (kể cả khi workers: auto)
 
 # ---------------- Đếm từ ----------------
 word_count:

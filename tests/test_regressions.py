@@ -2573,6 +2573,560 @@ def test_bug_025_rollback_clears_stale_steps_and_stale_reason(tmp_path, monkeypa
     assert d_rb2["state"]["stale_reason"] is None
 
 
+# ---------------------------------------------------------------------------
+# BUG-026: Chỉnh sửa phong cách thủ công giữ nguyên ghi chú giải thích phong cách cũ
+# ---------------------------------------------------------------------------
+
+def test_bug_026_manual_style_edit_updates_label_reason_and_preserves_through_rerun(tmp_path, monkeypatch):
+    """BUG-026: Khi người duyệt chỉnh sửa phong cách thủ công (và chạy lại Trích chọn & Biên soạn),
+    phần ghi chú giải thích (`label.reason`), `confidence`, `per_doc`, `model_used` và cờ cảnh báo AI
+    phải cập nhật đồng bộ theo phong cách mới, không giữ nguyên giải thích của phong cách cũ;
+    đồng thời vẫn bảo toàn `model_label`/`ai_confidence` cho `learned_memory.json` và khôi phục được khi quay lại nhãn AI."""
+    from tomtat.llm import MockClient
+    from tomtat.memory import load_memory
+    from tomtat.pipeline import LABEL_REVIEW_FLAG, process_file
+    from tomtat.state import FileWorkspace
+    from tomtat.web import create_app
+
+    cfg, inp = _setup_version_test_env(tmp_path, monkeypatch)
+    orig_style = "báo chí - công luận"
+    alt_style = "khoa học"
+    old_ai_reason = "Văn bản thuộc phong cách báo chí - công luận do mang hình thức bài tường thuật sự kiện."
+
+    class CustomLabelClient(MockClient):
+        def _mock_label(self, ctx, attempt):
+            data = ctx["data"]
+            per = [
+                {"doc": d["n"], "label": orig_style, "reason": f"VB {d['n']} là bài báo tường thuật."}
+                for d in data["docs"]
+            ]
+            return {
+                "label": orig_style,
+                "per_doc": per,
+                "confidence": "trung_binh",
+                "reason": old_ai_reason,
+            }
+
+    ai_client = CustomLabelClient(cfg)
+    out1 = process_file(inp, cfg, ai_client, force=True, restart=True)
+    ws = FileWorkspace(cfg.work_dir, inp)
+    st1 = out1["state"]
+    assert st1["label"]["value"] == orig_style
+    assert st1["label"]["reason"] == old_ai_reason
+    assert st1["label"]["confidence"] == "trung_binh"
+    assert st1["label"]["model_used"] == "mock"
+    assert LABEL_REVIEW_FLAG in st1["flags"]
+
+    app = create_app(cfg, mock=True)
+    monkeypatch.setattr("tomtat.web.routes.process.make_client", lambda c, force_mock=False: CustomLabelClient(c))
+    tc = app.test_client()
+
+    # 1. Đổi phong cách thủ công qua /save (auto_save=True) -> reason/confidence/model_used/per_doc/flags phải cập nhật ngay
+    r_save = tc.post(
+        "/api/file/M54629/save",
+        json={
+            "style": alt_style,
+            "extract": st1["extract"]["text"],
+            "abstract": st1["abstract"]["text"],
+            "auto_save": True,
+        },
+    )
+    assert r_save.status_code == 200
+    lb_manual = r_save.get_json()["state"]["label"]
+    assert lb_manual["value"] == alt_style
+    assert lb_manual["manual_edited"] is True
+    assert lb_manual["confidence"] == "thu_cong"
+    assert lb_manual["model_used"] is None
+    assert lb_manual["per_doc"] == []
+    assert old_ai_reason not in lb_manual["reason"]
+    assert alt_style in lb_manual["reason"]
+    assert orig_style in lb_manual["reason"]
+    assert lb_manual["model_label"] == orig_style
+    assert lb_manual["ai_confidence"] == "trung_binh"
+    assert LABEL_REVIEW_FLAG not in r_save.get_json()["state"]["flags"]
+
+    # 2. Chạy lại cả 2 bản trích chọn & biên soạn (extract_abstract) -> tạo version mới và KHÔNG khôi phục reason/model cũ
+    r_rerun = tc.post(
+        "/api/file/M54629/rerun",
+        json={
+            "step": "extract_abstract",
+            "style": alt_style,
+            "mock": True,
+            "ignore_mismatch": True,
+        },
+    )
+    assert r_rerun.status_code == 200
+    d_rerun = r_rerun.get_json()
+    assert d_rerun["versions"][0]["source"] == "ai:extract_abstract"
+    lb_after = d_rerun["state"]["label"]
+    assert lb_after["value"] == alt_style
+    assert lb_after["manual_edited"] is True
+    assert lb_after["confidence"] == "thu_cong"
+    assert lb_after["model_used"] is None
+    assert lb_after["per_doc"] == []
+    assert old_ai_reason not in lb_after["reason"]
+    assert alt_style in lb_after["reason"]
+    assert LABEL_REVIEW_FLAG not in d_rerun["state"]["flags"]
+
+    # 3. GET /api/file/<stem> không được backfill nhầm model_used='mock' từ log cũ lên label khi đã manual_edited
+    d_detail = tc.get("/api/file/M54629").get_json()
+    assert d_detail["state"]["label"]["model_used"] is None
+    assert d_detail["state"]["label"]["reason"] == lb_after["reason"]
+
+    # 4. Đổi ngược về phong cách ban đầu của AI -> khôi phục đúng reason, confidence, per_doc, model_used & flag AI gốc
+    r_revert = tc.post(
+        "/api/file/M54629/save",
+        json={
+            "style": orig_style,
+            "extract": d_rerun["state"]["extract"]["text"],
+            "abstract": d_rerun["state"]["abstract"]["text"],
+            "auto_save": True,
+        },
+    )
+    assert r_revert.status_code == 200
+    d_rev = r_revert.get_json()
+    assert d_rev["state"]["label"]["value"] == orig_style
+    assert d_rev["state"]["label"]["manual_edited"] is False
+    assert d_rev["state"]["label"]["reason"] == old_ai_reason
+    assert d_rev["state"]["label"]["confidence"] == "trung_binh"
+    assert d_rev["state"]["label"]["model_used"] == "mock"
+    assert len(d_rev["state"]["label"]["per_doc"]) == len(st1["label"]["per_doc"])
+    assert LABEL_REVIEW_FLAG in d_rev["state"]["flags"]
+
+    # 5. Gửi trực tiếp /rerun extract_abstract với style mới (không qua /save trước) -> cũng phải đồng bộ label
+    r_direct = tc.post(
+        "/api/file/M54629/rerun",
+        json={
+            "step": "extract_abstract",
+            "style": alt_style,
+            "mock": True,
+            "ignore_mismatch": True,
+        },
+    )
+    assert r_direct.status_code == 200
+    lb_dir = r_direct.get_json()["state"]["label"]
+    assert lb_dir["value"] == alt_style
+    assert lb_dir["manual_edited"] is True
+    assert old_ai_reason not in lb_dir["reason"]
+    assert alt_style in lb_dir["reason"]
+
+    # 6. process_file(..., restart=False) phải tôn trọng nhãn thủ công (confidence='thu_cong'), không chạy đè step_label
+    spy_resume = CustomLabelClient(cfg)
+    out_resume = process_file(inp, cfg, spy_resume, force=True, restart=False)
+    assert "label" not in spy_resume.calls
+    assert out_resume["state"]["label"]["value"] == alt_style
+    assert out_resume["state"]["label"]["manual_edited"] is True
+
+    # 7. Duyệt & xuất vẫn ghi nhận được vào learned_memory (AI đoán orig_style -> người duyệt chốt alt_style)
+    d_cur = tc.get("/api/file/M54629").get_json()["state"]
+    r_app = tc.post(
+        "/api/file/M54629/approve",
+        json={
+            "style": alt_style,
+            "extract": d_cur["extract"]["text"],
+            "abstract": d_cur["abstract"]["text"],
+            "confirm_warnings": True,
+        },
+    )
+    assert r_app.status_code == 200
+    mem = load_memory(cfg.work_dir)
+    assert any(
+        c["stem"] == "M54629" and c["ai_guessed"] == orig_style and c["human_approved"] == alt_style
+        for c in mem["label_corrections"]
+    )
+
+    # 8. State cũ trên đĩa từng bị lệch (value != model_label nhưng thiếu manual_edited) khi GET /api/file/<stem> phải tự sửa hiển thị
+    st_legacy = ws.load_state()
+    st_legacy["label"] = {
+        "value": alt_style,
+        "model_label": orig_style,
+        "computed_majority": orig_style,
+        "per_doc": st1["label"]["per_doc"],
+        "confidence": "trung_binh",
+        "reason": old_ai_reason,
+        "model_used": "gemini-4-hydrogen",
+    }
+    st_legacy["flags"] = [LABEL_REVIEW_FLAG]
+    ws.save_state(st_legacy)
+    d_healed = tc.get("/api/file/M54629").get_json()["state"]
+    assert d_healed["label"]["manual_edited"] is True
+    assert d_healed["label"]["confidence"] == "thu_cong"
+    assert d_healed["label"]["model_used"] is None
+    assert old_ai_reason not in d_healed["label"]["reason"]
+    assert alt_style in d_healed["label"]["reason"]
+    assert LABEL_REVIEW_FLAG not in d_healed["flags"]
+
+    # 9. Chạy AI: Gán nhãn lại (only_step='label') phải khôi phục chế độ AI (manual_edited=False) và cập nhật reason mới từ AI
+    r_relabel = tc.post("/api/file/M54629/rerun", json={"step": "label", "mock": True})
+    assert r_relabel.status_code == 200
+    lb_rel = r_relabel.get_json()["state"]["label"]
+    assert lb_rel["value"] == orig_style
+    assert lb_rel["manual_edited"] is False
+    assert lb_rel["reason"] == old_ai_reason
+    assert lb_rel["confidence"] == "trung_binh"
+
+
+def test_bug_026_frontend_label_sync_contract():
+    """BUG-026: Frontend phải cập nhật ngay phần giải thích, độ chắc chắn, model badge và flags khi autoSaveSilent sau khi đổi phong cách."""
+    editor_js = (PROJECT_ROOT / "src" / "tomtat" / "web" / "static" / "modules" / "editor.js").read_text(encoding="utf-8")
+    assert "renderLabelSection" in editor_js
+    assert "renderSummaryMeta" in editor_js
+    assert "thu_cong" in editor_js
+    assert "refreshLabel" in editor_js
+    assert "store.CURRENT_STATE.flags = data.state.flags || []" in editor_js
+
+
+# ---------------------------------------------------------------------------
+# BUG-027: Nâng lên 3 luồng an toàn, tiết kiệm RPD khi bão 503 và chống 429 QPS
+# ---------------------------------------------------------------------------
+
+def test_bug_027_three_workers_safe_and_pacing_contract(tmp_path, monkeypatch):
+    """BUG-027: Cấu hình mặc định 3 luồng phải đồng bộ giữa config.yaml, UI, pool scaling, BatchManager
+    và bảo đảm 3 luồng chạy song song không bao giờ vượt RPM / min_interval_s trên mỗi key."""
+    import threading
+    from tomtat.config import clamp_workers, get_pool_scaling
+    from tomtat.llm.base import get_model_min_interval_s, get_model_rpm_per_key
+
+    # 1. Hợp đồng config.yaml & giao diện UI
+    cfg = load_config()
+    assert cfg.get("workers") == 3
+    assert cfg.get("max_workers") == 3
+    g = cfg.get("gemini") or {}
+    assert int(g.get("max_transient_per_model", 0)) >= 6
+    assert int(g.get("model_outage_threshold", 0)) >= 3
+    assert float(g.get("model_outage_cooldown_s", 0)) >= 10.0
+    assert float(g.get("global_min_dispatch_interval_s", 0)) >= 1.0
+    assert float(g.get("qps_global_cooldown_s", 0)) >= 5.0
+
+    html = (PROJECT_ROOT / "src" / "tomtat" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    sel = re.search(r'<select id="sel-concurrency".*?</select>', html, re.S)
+    assert sel is not None
+    vals = [int(v) for v in re.findall(r'<option value="(\d+)"', sel.group(0))]
+    assert vals == [1, 2, 3]
+
+    # 2. Pool scaling với 58 keys -> khuyến nghị đúng 3 luồng, kẹp mọi mức vượt trần
+    keys_58 = [f"k58_{i:02d}" for i in range(1, 59)]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys_58)
+    sc = get_pool_scaling(cfg, api_keys=keys_58)
+    assert sc["recommended_workers"] == 3
+    assert sc["max_workers"] == 3
+    assert sc["concurrency_options"] == [1, 2, 3]
+    assert sc["max_concurrent_calls"] >= 5
+    assert clamp_workers(16, cfg, api_keys=keys_58) == 3
+
+    # 3. BatchManager chạy đúng 3 file song song
+    cfg_batch = _make_batch_cfg(tmp_path, monkeypatch, max_workers=3)
+    cfg_batch["workers"] = 3
+    workers, peak = _run_batch_and_measure(cfg_batch, monkeypatch, [f"F{i}" for i in range(7)], "auto")
+    assert workers == 3
+    assert peak == 3
+
+    # 4. 3 luồng cùng đặt chỗ key đồng thời không bao giờ vượt RPM / min_interval_s
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    keys_3 = ["ka", "kb", "kc"]
+    cfg_rpm = load_config()
+    cfg_rpm["paths"] = {"work": str(tmp_path / "work_rpm")}
+    client = GeminiClient(cfg_rpm, keys_3)
+    monkeypatch.setattr(client, "_get_or_create_client", lambda k: object())
+    monkeypatch.setattr(client, "_save_quota_state_unlocked", lambda: None)
+
+    for model in ("gemini-4-hydrogen", "gemini-3.5-flash-lite"):
+        reserved: dict[str, list[float]] = {k: [] for k in keys_3}
+        lock = threading.Lock()
+        barrier = threading.Barrier(3)
+
+        def _acq():
+            barrier.wait()
+            for _ in range(30):
+                k, _c, _w, ts = client._acquire_paced_key_client_with_ts(model)
+                assert k is not None
+                with lock:
+                    reserved[k].append(ts)
+
+        threads = [threading.Thread(target=_acq) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        min_iv = get_model_min_interval_s(model, cfg_rpm)
+        rpm = get_model_rpm_per_key(model, cfg_rpm)
+        assert sum(len(v) for v in reserved.values()) == 90
+        for k, ts_list in reserved.items():
+            ts_list.sort()
+            for a, b in zip(ts_list, ts_list[1:]):
+                assert b - a >= min_iv - 1e-6
+            for i, t0 in enumerate(ts_list):
+                assert sum(1 for t in ts_list[i:] if t < t0 + 60.0) <= rpm
+
+
+def test_bug_027_503_circuit_breaker_and_outage_cooldown_saves_rpd(tmp_path, monkeypatch):
+    """BUG-027: Khi gặp bão 503 trên model chính với pool lớn (58 keys) và 3 luồng song song,
+    mạch bảo vệ + cooldown hạ nhiệt model phải chặn lãng phí RPD, trượt êm sang model dự phòng
+    và tự khôi phục lại model chính sau khi hết cooldown."""
+    import threading
+    import time as _time
+    from tomtat.llm import get_rpd_status
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    monkeypatch.setattr("tomtat.llm.base.get_model_rpm_per_key", lambda m, c=None: 10_000)
+    monkeypatch.setattr("tomtat.llm.gemini.get_model_rpm_per_key", lambda m, c=None: 10_000)
+
+    keys = [f"key_rpd_{i:02d}" for i in range(1, 59)]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["min_interval_s"] = 0.0
+    cfg["gemini"]["rpm_limits"] = {}
+    cfg["gemini"]["backoff_base_s"] = 0.05
+    cfg["gemini"]["backoff_max_s"] = 0.6
+    cfg["gemini"]["max_transient_per_model"] = 8
+    cfg["gemini"]["model_outage_threshold"] = 5
+    cfg["gemini"]["model_outage_cooldown_s"] = 1.2
+    cfg["gemini"]["global_min_dispatch_interval_s"] = 0.0
+    cfg["gemini"]["qps_global_cooldown_s"] = 0.0
+
+    client = GeminiClient(cfg, keys)
+    hydrogen_state = {"mode": "503"}
+    calls: list[str] = []
+    calls_lock = threading.Lock()
+
+    class Err503(Exception):
+        status_code = 503
+
+    monkeypatch.setattr(client, "_get_or_create_client", lambda k: object())
+
+    def fake_call_once(model_name, step, system, prompt, schema, client=None):
+        with calls_lock:
+            calls.append(model_name)
+        if model_name == "gemini-4-hydrogen" and hydrogen_state["mode"] == "503":
+            raise Err503("high demand")
+        return '{"ok": true}', {}, "completed"
+
+    monkeypatch.setattr(client, "_call_once", fake_call_once)
+
+    # 1. 3 luồng chạy đồng thời trong cơn bão 503 trên gemini-4-hydrogen
+    barrier = threading.Barrier(3)
+    results = []
+
+    def _run(idx: int):
+        barrier.wait()
+        res = client.generate_json(
+            step="abstract",
+            system="sys",
+            prompt=f"prompt_{idx}",
+            schema={},
+            log_dir=tmp_path / "work" / f"F{idx}" / "logs",
+            attempt=1,
+        )
+        results.append(res.model)
+
+    threads = [threading.Thread(target=_run, args=(i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert len(results) == 3
+    assert all(m == "gemini-3.8-flash" for m in results)
+    h_wasted = calls.count("gemini-4-hydrogen")
+    # Không bao giờ đốt tới 3 x 174 = 522 hay 3 x 8 = 24 RPD; cả 3 luồng cộng lại chỉ tốn ~5-8 RPD
+    assert 5 <= h_wasted <= 12
+
+    # 2. Lượt gọi ngay sau trong lúc 4-hydrogen đang hạ nhiệt (1.2s) phải bỏ qua 4-hydrogen (0 RPD lãng phí thêm)
+    calls.clear()
+    res_during = client.generate_json(step="abstract", system="sys", prompt="during_cd", schema={})
+    assert res_during.model == "gemini-3.8-flash"
+    assert calls.count("gemini-4-hydrogen") == 0
+
+    # 3. Sau khi hết cooldown 1.2s và 4-hydrogen ổn định lại -> tự quay lại ưu tiên 4-hydrogen
+    _time.sleep(1.25)
+    hydrogen_state["mode"] = "ok"
+    calls.clear()
+    res_rec = client.generate_json(step="abstract", system="sys", prompt="recovered", schema={})
+    assert res_rec.model == "gemini-4-hydrogen"
+    assert calls == ["gemini-4-hydrogen"]
+
+    rpd_map = {x["model"]: x for x in get_rpd_status(cfg, api_keys=keys)}
+    assert rpd_map["gemini-4-hydrogen"]["used"] == h_wasted + 1
+
+
+def test_bug_027_anti_qps_stagger_shared_cooldown_and_retry_differentiation(tmp_path, monkeypatch):
+    """BUG-027: Giãn nhịp toàn cục chống 3 luồng bắn burst đồng thời; khi 1 luồng chạm 429 QPS,
+    luồng khác tự tôn trọng cooldown chung, đồng thời lượt thử lại tự biến đổi nhẹ payload để thoát dedup."""
+    import json
+    import threading
+    import time as _time
+
+    monkeypatch.setattr("tomtat.llm._get_quota_cycle_date", lambda: "2026-01-01")
+    monkeypatch.setattr("tomtat.llm.base.get_model_rpm_per_key", lambda m, c=None: 10_000)
+    monkeypatch.setattr("tomtat.llm.gemini.get_model_rpm_per_key", lambda m, c=None: 10_000)
+
+    keys = [f"key_qps_{i:02d}" for i in range(1, 7)]
+    monkeypatch.setattr("tomtat.config.get_api_keys", lambda root=None: keys)
+
+    cfg = load_config()
+    cfg["paths"] = {"work": str(tmp_path / "work")}
+    cfg["gemini"]["min_interval_s"] = 0.0
+    cfg["gemini"]["rpm_limits"] = {}
+    cfg["gemini"]["backoff_base_s"] = 0.12
+    cfg["gemini"]["backoff_max_s"] = 1.0
+    cfg["gemini"]["global_min_dispatch_interval_s"] = 0.08
+    cfg["gemini"]["qps_global_cooldown_s"] = 0.20
+
+    client = GeminiClient(cfg, keys)
+    monkeypatch.setattr(client, "_get_or_create_client", lambda k: object())
+
+    # 1. Đặt chỗ giãn nhịp toàn cục: thread có RPM wait dài (13s) không được chặn thread khác chạy ngay
+    w_long = client._reserve_gateway_wait(min_wait_s=13.0)
+    w_now = client._reserve_gateway_wait(min_wait_s=0.0)
+    assert w_long >= 12.9
+    assert w_now == 0.0
+    client._dispatch_slots.clear()
+
+    # 2. 3 luồng chạy đồng thời được giãn nhịp >= global_min_dispatch_interval_s
+    dispatch_times: list[float] = []
+    dt_lock = threading.Lock()
+
+    def ok_call(model_name, step, system, prompt, schema, client=None):
+        with dt_lock:
+            dispatch_times.append(_time.monotonic())
+        return '{"ok": true}', {}, "completed"
+
+    monkeypatch.setattr(client, "_call_once", ok_call)
+    barrier = threading.Barrier(3)
+    threads = [
+        threading.Thread(
+            target=lambda idx=i: (
+                barrier.wait(),
+                client.generate_json(step="label", system="sys", prompt=f"doc_{idx}", schema={}),
+            )
+        )
+        for i in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+    dispatch_times.sort()
+    assert len(dispatch_times) == 3
+    assert dispatch_times[1] - dispatch_times[0] >= 0.06
+    assert dispatch_times[2] - dispatch_times[1] >= 0.06
+
+    # 3. Khi 1 luồng gặp 429 QPS:
+    #    - Đẩy _global_qps_next_ts để luồng khác không nối đuôi bắn vào cổng đang nghẽn
+    #    - Lượt retry thêm dấu hiệu phân biệt ở prompt gửi đi nhưng giữ nguyên prompt trong log
+    seen_prompts: list[tuple[str, float]] = []
+    qps_triggered = threading.Event()
+
+    class ErrQPS(Exception):
+        status_code = 429
+
+    def qps_then_ok(model_name, step, system, prompt, schema, client=None):
+        seen_prompts.append((prompt, _time.monotonic()))
+        if prompt == "doc_A":
+            qps_triggered.set()
+            raise ErrQPS(
+                "Error code: 429 - {'error': {'message': 'The query-per-second (QPS) limit for identical or "
+                "near-identical request payloads has been exceeded.', 'code': 'too_many_requests'}}"
+            )
+        return '{"ok": true}', {}, "completed"
+
+    client._dispatch_slots.clear()
+    client._global_qps_next_ts = 0.0
+    monkeypatch.setattr(client, "_call_once", qps_then_ok)
+    log_dir_a = tmp_path / "work" / "A" / "logs"
+
+    t_b_box: list[float] = []
+    t_a = threading.Thread(
+        target=lambda: client.generate_json(step="label", system="sys", prompt="doc_A", schema={}, log_dir=log_dir_a),
+    )
+
+    def _run_b():
+        assert qps_triggered.wait(timeout=2.0)
+        _time.sleep(0.02)
+        t_start_b = _time.monotonic()
+        client.generate_json(step="label", system="sys", prompt="doc_B", schema={})
+        t_b_box.append(_time.monotonic() - t_start_b)
+
+    t_b = threading.Thread(target=_run_b)
+    t_a.start()
+    t_b.start()
+    t_a.join(timeout=10.0)
+    t_b.join(timeout=10.0)
+
+    # doc_A lượt đầu giữ nguyên, lượt thử lại có nhãn phân biệt để thoát QPS dedup
+    a_prompts = [p for p, _ in seen_prompts if p.startswith("doc_A")]
+    assert len(a_prompts) == 2
+    assert a_prompts[0] == "doc_A"
+    assert "[Phiên thử lại #" in a_prompts[1]
+    # doc_B phải chờ cooldown cổng chung chứ không bắn tức thì
+    assert t_b_box and t_b_box[0] >= 0.12
+    # Log giữ nguyên prompt sạch, không khóa key hay trừ RPD
+    logs_a = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(log_dir_a.glob("*.json"))]
+    assert logs_a[0]["prompt"] == "doc_A"
+    assert logs_a[0]["action"] == "backoff_payload_qps"
+    assert len(client._exhausted) == 0
+
+
+def test_bug_027_memory_and_semaphore_thread_safety(tmp_path):
+    """BUG-027: Khóa semaphore toàn cục và memory.py phải an toàn khi gọi đồng thời từ nhiều luồng."""
+    import threading
+    from tomtat.llm.base import BaseClient
+    from tomtat.memory import load_memory, record_approved_sample
+
+    # 1. ensure_concurrency_limit đồng thời
+    errors: list[Exception] = []
+    barrier = threading.Barrier(4)
+
+    def _bump(n: int):
+        try:
+            barrier.wait()
+            for _ in range(20):
+                BaseClient.ensure_concurrency_limit(n)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    ths = [threading.Thread(target=_bump, args=(i + 5,)) for i in range(4)]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    assert errors == []
+    assert BaseClient._sem_limit >= 8
+
+    # 2. record_approved_sample đồng thời không làm mất dữ liệu / hỏng JSON
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    b2 = threading.Barrier(3)
+
+    def _save_mem(i: int):
+        b2.wait()
+        units = {
+            "file": f"S{i}.docx",
+            "docs": [{"n": 1, "units": [{"id": 1, "text": f"Nội dung mẫu {i}."}]}],
+            "budget": {"total_words": 100},
+        }
+        st = {
+            "stem": f"S{i}",
+            "label": {"value": "khoa học", "model_label": "báo chí - công luận", "confidence": "thap"},
+            "abstract": {"text": f"Tóm tắt {i}."},
+        }
+        record_approved_sample(work_dir, units, st, "khoa học", f"Trích {i}.", f"Biên soạn {i}.")
+
+    m_ths = [threading.Thread(target=_save_mem, args=(i,)) for i in range(3)]
+    for t in m_ths:
+        t.start()
+    for t in m_ths:
+        t.join()
+    mem = load_memory(work_dir)
+    assert mem["total_approved_learned"] == 3
+    assert len(mem["label_corrections"]) == 3
+
+
+
+
 
 
 

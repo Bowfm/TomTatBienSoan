@@ -20,11 +20,18 @@ from typing import Any, TypedDict
 # ---------------------------------------------------------------- state.json
 class LabelStep(TypedDict, total=False):
     value: str
+    model_label: str
     per_doc: list[dict[str, Any]]
     confidence: str
     reason: str
     computed_majority: str
     model_used: str | None
+    manual_edited: bool
+    ai_value: str
+    ai_confidence: str
+    ai_reason: str
+    ai_per_doc: list[dict[str, Any]]
+    ai_model_used: str | None
 
 
 class ExtractStep(TypedDict, total=False):
