@@ -4419,6 +4419,54 @@ def test_bug_033_day_cap_nhat_bat_contract_and_e2e(tmp_path, monkeypatch):
         assert secret not in ls_remote
 
 
+# ---------------------------------------------------------------------------
+# BUG-034: Loại bỏ nút thừa "Ghép lại từ các câu đã tick" (#btn-rebuild-extract)
+# ---------------------------------------------------------------------------
+
+def test_bug_034_rebuild_extract_button_removed_cleanly(tmp_path, monkeypatch):
+    """BUG-034: Bỏ nút #btn-rebuild-extract khỏi HTML và listener khỏi app.js,
+    nhưng vẫn giữ nguyên tự động ghép qua onToggleUnit / Chọn hết / Bỏ hết và API /assemble."""
+    from tomtat.llm import MockClient
+    from tomtat.pipeline import process_file
+    from tomtat.web import create_app
+
+    html = (PROJECT_ROOT / "src" / "tomtat" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    assert "btn-rebuild-extract" not in html
+    assert "Ghép lại từ các câu đã tick" not in html
+    assert 'id="txt-extract"' in html
+    assert 'id="docs-container"' in html
+    assert 'id="verbatim-bar"' in html
+
+    static_dir = PROJECT_ROOT / "src" / "tomtat" / "web" / "static"
+    for js_file in static_dir.rglob("*.js"):
+        assert "btn-rebuild-extract" not in js_file.read_text(encoding="utf-8"), (
+            f"{js_file.name} vẫn còn tham chiếu tới #btn-rebuild-extract"
+        )
+
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    assert "assembleFromSelections" not in app_js
+
+    editor_js = (static_dir / "modules" / "editor.js").read_text(encoding="utf-8")
+    assert "export async function onToggleUnit" in editor_js
+    assert "await assembleFromSelections()" in editor_js
+    assert "export async function assembleFromSelections" in editor_js
+
+    cfg, inp = _setup_version_test_env(tmp_path, monkeypatch)
+    process_file(inp, cfg, MockClient(cfg), force=True)
+    app = create_app(cfg, mock=True)
+    tc = app.test_client()
+
+    r_asm = tc.post(
+        "/api/file/M54629/assemble",
+        json={"selections": {"1": [1, 2]}, "style": "", "abstract": ""},
+    )
+    assert r_asm.status_code == 200
+    d_asm = r_asm.get_json()
+    assert d_asm["extract"].strip() != ""
+    assert d_asm["selections"]["1"] == [1, 2]
+
+
+
 
 
 

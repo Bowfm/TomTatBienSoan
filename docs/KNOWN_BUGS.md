@@ -40,6 +40,7 @@
 | BUG-031 | 2026-11-20 | `llm/gemini.py` | Jitter trong `_reserve_gateway_wait` cộng sau vòng lặp `slots` làm slot mới có thể nhảy đè lên slot đã đặt kế tiếp (`test_bug_027_anti_qps_stagger...` fail ngẫu nhiên) | `tests/test_regressions.py::test_bug_031_reserve_gateway_wait_jitter_never_collides_with_existing_slots` |
 | BUG-032 | 2026-11-20 | `config.yaml`, `llm/{base,gemini}.py`, `prompts.py`, `prompts/judge.md`, `pipeline.py`, `web/` | Chuẩn hóa G-Eval (`JUDGE_SCHEMA` lý do trước điểm, rubric + query + đa văn bản) và tách model riêng theo bước (`model_by_step.judge` dùng Flash-Lite 500 RPD/key) kèm gatekeeper `only_if_checks_ok` | `tests/test_regressions.py::test_bug_032_*` |
 | BUG-033 | 2026-11-20 | `day_cap_nhat.bat`, `.agents/push_helper.py`, `.gitignore` | Nâng cấp script đẩy GitHub 1-click: tránh wildcard `*.txt`, không làm bẩn `.github_repo_url`, kiểm tra nhánh `main`/rebase trước khi push, chặn bí mật stage và tự sinh commit message | `tests/test_regressions.py::test_bug_033_*` |
+| BUG-034 | 2026-11-20 | `web/templates/index.html`, `web/static/app.js` | Bỏ nút thừa `Ghép lại từ các câu đã tick` (`#btn-rebuild-extract`) và listener tương ứng, giữ nguyên tự động ghép khi tick/bỏ tick câu | `tests/test_regressions.py::test_bug_034_rebuild_extract_button_removed_cleanly` |
 
 ---
 
@@ -381,6 +382,16 @@
   - `day_cap_nhat.bat` phải chạy thuần ASCII + CRLF, giữ nguyên kiểm tra `verify_guard.py`, `pytest.exe` và `pyproject.toml` (`BUG-024`), không dùng `*.txt` wildcard và không dùng khối `if (...)` chứa biến đường dẫn (`BUG-007`).
   - Chỉ ghi `.github_repo_url` khi thiếu hoặc khác `DEFAULT_REPO`; luôn đảm bảo đứng trên nhánh `main`, kiểm tra bí mật qua `push_helper.py check-staged` (cấm `api_keys.txt`, `.env`, `config.local.yaml`, `input/*.docx`, `output/*`, `work/*` trừ `work/learned_memory.json` và `.gitkeep`), tự động sinh commit message từ thay đổi (`BUG-XXX` / vùng sửa), và `git fetch` + `pull --rebase` trước khi `git push -u origin main`.
 - **Regression Test**: `tests/test_regressions.py::test_bug_033_push_helper_staged_safety_and_commit_message`, `test_bug_033_day_cap_nhat_bat_contract_and_e2e`
+
+### BUG-034: Loại bỏ nút thừa `Ghép lại từ các câu đã tick` (`#btn-rebuild-extract`)
+- **Commit / Nguồn**: Sửa đổi ngày 2026-11-20 trong `src/tomtat/web/templates/index.html`, `src/tomtat/web/static/app.js`
+- **File / Symbol**: `src/tomtat/web/templates/index.html` (`#card-extract`), `src/tomtat/web/static/app.js`, `src/tomtat/web/static/modules/editor.js` (`onToggleUnit`, `renderDocsUnits`, `assembleFromSelections`)
+- **Triệu chứng**: Nút `Ghép lại từ các câu đã tick` dư thừa vì mỗi lần tick/bỏ tick câu hoặc bấm `Chọn hết`/`Bỏ hết` ở cột trái đều đã tự động gọi `assembleFromSelections()`, đồng thời khi gõ nhầm làm câu không còn nguyên văn thì `runLiveCheck` đã bỏ tick câu đó sau 300ms nên nút ghép lại không giúp khôi phục câu bị sửa lỗi mà còn dễ gây xóa nhầm. Nếu chỉ xóa nút trong HTML mà quên gỡ `$("btn-rebuild-extract").addEventListener(...)` trong `app.js` sẽ làm vỡ `DOMContentLoaded`.
+- **Nguyên nhân gốc**: Nút thủ công còn sót lại cạnh cơ chế tự động đồng bộ hai chiều giữa checkbox cột trái (`onToggleUnit`/`renderDocsUnits`) và `#txt-extract` (`runLiveCheck`).
+- **Bất biến cần bảo vệ**:
+  - Không còn `#btn-rebuild-extract` hay `"Ghép lại từ các câu đã tick"` trong `index.html`, và không còn tham chiếu DOM `#btn-rebuild-extract` trong các file `.js` dưới `web/static/`.
+  - Vẫn giữ nguyên `assembleFromSelections()` trong `editor.js` và endpoint `POST /api/file/<stem>/assemble` để tự động ghép tức thì khi người dùng tick/bỏ tick từng câu hoặc bấm `Chọn hết`/`Bỏ hết`.
+- **Regression Test**: `tests/test_regressions.py::test_bug_034_rebuild_extract_button_removed_cleanly`
 
 ---
 

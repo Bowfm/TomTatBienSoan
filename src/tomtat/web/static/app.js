@@ -2,7 +2,6 @@
 import { runPendingFiles, startBatchPolling, startBatchPollingFallback, stopBatch, uploadFiles } from "./modules/batch.js";
 import {
   approveAndExport,
-  assembleFromSelections,
   onStyleChange,
   rerunStep,
   rollbackPreviousVersion,
@@ -90,7 +89,6 @@ window.addEventListener("DOMContentLoaded", () => {
     syncVersionControls();
     scheduleCheck();
   });
-  $("btn-rebuild-extract").addEventListener("click", assembleFromSelections);
   if ($("btn-save")) $("btn-save").addEventListener("click", saveDraft);
   if ($("btn-rollback-prev")) $("btn-rollback-prev").addEventListener("click", rollbackPreviousVersion);
   if ($("btn-versions-modal")) $("btn-versions-modal").addEventListener("click", () => openVersionsModal(null));
